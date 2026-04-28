@@ -41,3 +41,9 @@ tmp-phpstan/*
 docker/development-easy/docker-compose.override.yml
 docker/development-easy-light/docker-compose.override.yml
 docker/development-easy-redis/docker-compose.override.yml
+
+# GauntletAI project notes (local only, not for upstream)
+/.gauntlet/
+
+# Claude Code session state (local only)
+/.claude/
