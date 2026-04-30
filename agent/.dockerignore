@@ -1,0 +1,14 @@
+# Secrets — must never be baked into the image
+.env
+
+# Python cruft
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/

@@ -1,0 +1,31 @@
+# AgentForge Clinical Co-Pilot — Python agent service dependencies
+# Python 3.11+ recommended.
+
+# Web framework
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# LLM SDK (Anthropic; supports tool use, prompt caching)
+anthropic>=0.40.0
+
+# Data validation / DTOs
+pydantic>=2.5.0
+
+# Config
+python-dotenv>=1.0.0
+
+# DB driver (direct DB access for v1; FHIR is week-2)
+PyMySQL>=1.1.0
+cryptography>=42.0.0  # required by PyMySQL for some MariaDB auth modes
+
+# Observability
+langfuse>=2.40.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0          # used by FastAPI's TestClient and for eval-suite HTTP calls
+PyYAML>=6.0            # eval case fixtures
+
+# Dev / lint (optional, but helpful)
+ruff>=0.4.0

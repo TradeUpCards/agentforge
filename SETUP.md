@@ -170,7 +170,24 @@ These are the things that aren't obvious from the upstream docs but matter for d
 | `AUDIT.md` | OpenEMR audit findings with agent-integration implications |
 | `USERS.md` | Target user (PCP), workflow, use cases |
 | `ARCHITECTURE.md` | Agent integration plan + tradeoffs |
+| `DECISIONS.md` | CTO-defense ledger — every architectural choice with its rationale and tradeoff |
 | `SETUP.md` | This file |
+| `agent/` | Python agent service (FastAPI). See [`agent/README.md`](./agent/README.md) for setup. |
+| `interface/modules/custom_modules/oe-module-clinical-copilot/` | OpenEMR PHP integration module |
 | `.gauntlet/` | Local working notes (gitignored) — not part of deliverables |
 
 These are AgentForge-specific. All upstream OpenEMR documentation (`README.md`, `DOCKER_README.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `API_README.md`, `FHIR_README.md`) remains authoritative for OpenEMR-the-product.
+
+---
+
+## Bringing up the full stack (OpenEMR + agent)
+
+The OpenEMR stack instructions above are sufficient to run OpenEMR on its
+own. To run the full agent integration locally, you need three things up
+at the same time:
+
+1. **OpenEMR dev-easy stack** — see "First-time setup" above.
+2. **Python agent service** — see [`agent/README.md`](./agent/README.md). Runs as a uvicorn process on the host, port 8000.
+3. **Docker-compose override** at `docker/development-easy/docker-compose.override.yml` — adds `AGENT_BASE_URL=http://host.docker.internal:8000` and `OPENEMR_HMAC_SECRET` to the openemr container so the PHP module can reach the host-bound agent service. Gitignored; create from the example in `agent/README.md`.
+
+End-to-end click-through walkthrough lives in [`.gauntlet/week1/local-openemr-runbook.md`](./.gauntlet/week1/local-openemr-runbook.md) (gitignored — local notes only).

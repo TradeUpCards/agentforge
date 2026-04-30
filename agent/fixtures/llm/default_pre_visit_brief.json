@@ -1,0 +1,20 @@
+{
+  "id": "msg_fixture_pvb_001",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-fixture-default",
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"prose\": \"**Pre-visit brief — Maria Hernandez, 54F (fixture)**\\n\\nFollow-up for diabetes management. Type 2 DM since 2024 with current A1c 7.8 (up from 6.8 in Dec 2025) — crossed the ADA-flagged 1.0-point delta threshold. On metformin 1000mg BID and lisinopril 10mg QD. Active hypertension diagnosis. Penicillin allergy on file. Last visit was 2026-01-22 for diabetes follow-up; plan was to repeat A1c in 3 months — that A1c is now back and elevated.\", \"claims\": [{\"text\": \"Active diagnosis: Type 2 diabetes mellitus since 2024-08-12\", \"claim_type\": \"history\", \"source_record_ids\": [\"lists:1408\"]}, {\"text\": \"Active diagnosis: Essential hypertension\", \"claim_type\": \"history\", \"source_record_ids\": [\"lists:1411\"]}, {\"text\": \"On metformin 1000mg BID since 2025-10-04\", \"claim_type\": \"fact\", \"source_record_ids\": [\"prescriptions:2231\"]}, {\"text\": \"On lisinopril 10mg QD\", \"claim_type\": \"fact\", \"source_record_ids\": [\"prescriptions:2289\"]}, {\"text\": \"HbA1c 7.8 on 2026-03-15, up from 6.8 on 2025-12-10\", \"claim_type\": \"lab_value\", \"source_record_ids\": [\"procedure_result:5421\", \"procedure_result:4892\"]}, {\"text\": \"Penicillin allergy on file\", \"claim_type\": \"fact\", \"source_record_ids\": [\"lists:1399\"]}, {\"text\": \"Last visit 2026-01-22 for diabetes follow-up; plan was to repeat A1c in 3 months\", \"claim_type\": \"history\", \"source_record_ids\": [\"form_encounter:9012\"]}]}"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": null,
+    "cache_read_input_tokens": null
+  }
+}

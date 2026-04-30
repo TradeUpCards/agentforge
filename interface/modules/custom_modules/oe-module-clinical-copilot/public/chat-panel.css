@@ -1,0 +1,149 @@
+/*
+ * Clinical Co-Pilot chat panel styles.
+ *
+ * Bootstrap 4.6 is already loaded by Header::setupHeader; this stylesheet
+ * adds only the layout glue and message styling specific to the chat UI.
+ *
+ * @package   OpenEMR
+ * @author    AgentForge Team
+ * @copyright Copyright (c) 2026 AgentForge
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ */
+
+html, body {
+    height: 100%;
+    margin: 0;
+}
+
+.copilot-app {
+    height: 100vh;
+    max-height: 100vh;
+}
+
+.copilot-header {
+    flex: 0 0 auto;
+}
+
+.copilot-messages {
+    overflow-y: auto;
+    background-color: #f8f9fa;
+}
+
+.copilot-empty-state {
+    margin-top: 4rem;
+}
+
+.copilot-message {
+    margin-bottom: 1rem;
+    max-width: 85%;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    word-wrap: break-word;
+}
+
+.copilot-message__role {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6c757d;
+    margin-bottom: 0.25rem;
+}
+
+.copilot-message__body p:last-child,
+.copilot-message__body ul:last-child {
+    margin-bottom: 0;
+}
+
+.copilot-message--user {
+    background-color: #cfe2ff;
+    margin-left: auto;
+    text-align: right;
+}
+
+.copilot-message--user .copilot-message__role {
+    color: #0a58ca;
+}
+
+.copilot-message--assistant {
+    background-color: #ffffff;
+    border: 1px solid #dee2e6;
+}
+
+.copilot-status {
+    margin: 0.5rem 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.25rem;
+    font-size: 0.875rem;
+}
+
+.copilot-status--thinking {
+    color: #6c757d;
+    font-style: italic;
+}
+
+.copilot-status--refused {
+    background-color: #fff3cd;
+    border: 1px solid #ffeeba;
+    color: #856404;
+}
+
+.copilot-status--error {
+    background-color: #f8d7da;
+    border: 1px solid #f5c2c7;
+    color: #842029;
+}
+
+.copilot-starters {
+    flex: 0 0 auto;
+}
+
+.copilot-form {
+    flex: 0 0 auto;
+}
+
+.copilot-citation {
+    margin: 0 2px;
+    padding: 0.15rem 0.4rem;
+    cursor: pointer;
+    border: none;
+    font-family: var(--bs-font-monospace, monospace);
+    font-size: 0.75rem;
+    line-height: 1;
+}
+
+.copilot-citation:focus {
+    outline: 2px solid #0d6efd;
+    outline-offset: 1px;
+}
+
+.copilot-citation__popover {
+    margin: 0.25rem 0 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background-color: #ffffff;
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    font-size: 0.8125rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.copilot-citation__header {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+
+.copilot-citation__popover dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 0.5rem;
+    row-gap: 0.15rem;
+}
+
+.copilot-citation__popover dt {
+    font-weight: 500;
+    color: #495057;
+}
+
+.copilot-citation__popover dd {
+    margin: 0;
+}

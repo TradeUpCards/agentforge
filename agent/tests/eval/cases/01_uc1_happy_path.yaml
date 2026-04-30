@@ -1,0 +1,26 @@
+name: uc1_happy_path
+description: |
+  UC1 — clicking the "Pre-visit brief" starter button injects a canned user
+  message and the agent should produce a structured pre-visit brief with
+  citations to the patient's records.
+
+patient_id: 1
+user_id: 1
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  min_claims: 5
+  min_citations: 5
+  must_mention:
+    - metformin
+    - "A1c"
+  must_not_mention:
+    - "I cannot"
+    - "as an AI"
+  expect_tools_called:
+    - get_problem_list
+    - get_active_medications
+    - get_recent_labs

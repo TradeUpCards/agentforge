@@ -45,5 +45,8 @@ docker/development-easy-redis/docker-compose.override.yml
 # GauntletAI project notes (local only, not for upstream)
 /.gauntlet/
 
+# Local deployment scripts (droplet-specific; not for upstream)
+/.deploy/
+
 # Claude Code session state (local only)
 /.claude/

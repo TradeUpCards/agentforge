@@ -1,0 +1,19 @@
+name: uc1_diagnosis_surfaced
+description: |
+  Pre-visit brief must surface active diagnoses (problems list). This guards
+  against the "verifier doesn't catch omissions" risk noted in
+  ARCHITECTURE.md §3.9 — partial mitigation is the eval suite asserting that
+  specific active facts are mentioned.
+
+patient_id: 1
+user_id: 1
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    - "diabetes"
+  expect_tools_called:
+    - get_problem_list
