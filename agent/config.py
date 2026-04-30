@@ -46,6 +46,7 @@ class Settings(BaseModel):
 
     # Dev mode
     use_fixture_llm: bool
+    use_fixture_data: bool
 
     @property
     def has_real_llm_key(self) -> bool:
@@ -68,6 +69,20 @@ def _resolve_use_fixture_llm(raw: str, has_real_key: bool) -> bool:
         return False
     raise ValueError(
         f"USE_FIXTURE_LLM must be one of: auto, true, false (got {raw!r})"
+    )
+
+
+def _resolve_use_fixture_data(raw: str) -> bool:
+    """USE_FIXTURE_DATA controls whether tools return canned RetrievedRecord
+    fixtures or hit the real OpenEMR DB. No `auto` mode here — until real DB
+    queries are wired in tools.py:_real_dispatch(), this should be true."""
+    raw = raw.strip().lower()
+    if raw == "" or raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(
+        f"USE_FIXTURE_DATA must be one of: true, false (got {raw!r})"
     )
 
 
@@ -96,5 +111,8 @@ def get_settings() -> Settings:
         use_fixture_llm=_resolve_use_fixture_llm(
             os.getenv("USE_FIXTURE_LLM", "auto"),
             has_real_key,
+        ),
+        use_fixture_data=_resolve_use_fixture_data(
+            os.getenv("USE_FIXTURE_DATA", "true"),
         ),
     )

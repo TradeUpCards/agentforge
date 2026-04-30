@@ -1,0 +1,45 @@
+name: empty_records_absence_claim
+description: |
+  When all baseline tools return zero records (the "patient has no records
+  on file" case), the agent should:
+
+  1. Pass the absence claim through the verifier (per ARCHITECTURE.md §3.7
+     — absence is verifiable when the tool was called and returned empty).
+  2. Surface the LLM's actual prose to the user, not a generic verifier
+     refusal that hides the correct observation.
+
+  This case was added because manual click-through testing (NOT the eval
+  suite) caught the UX gap where "no records found" was being masked
+  behind a "30% claims unverified" refusal. Documented in DECISIONS.md
+  appendix entry 2026-04-30.
+
+  Patient_id 999999 is a fixture sentinel — `_fixture_dispatch()` in
+  `agent/tools.py` returns empty for any tool when patient_id matches it.
+
+  This case exercises live-LLM behavior — the LLM must observe the empty
+  patient context and emit an absence-typed claim. In FIXTURE_LLM mode
+  the canned Maria response references real fixture record IDs that
+  aren't in the empty record set, so the case fails (correctly — the
+  fixture LLM doesn't simulate the empty-data scenario).
+
+patient_id: 999999
+user_id: 1
+
+# Live-LLM-only: the canned fixture LLM response references real fixture
+# record IDs that don't exist in this case's empty record set, so it
+# fails by design in fixture-LLM mode. Pytest skips this case automatically
+# when running with USE_FIXTURE_LLM=true.
+live_llm_required: true
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    - "no"
+  # No positive claims required; the agent may emit an absence claim or
+  # nothing. The key win is `status: ok` and prose surfacing the missing
+  # data.
+  max_claims: 5

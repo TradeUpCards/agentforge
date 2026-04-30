@@ -19,9 +19,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from .agent import run_chat
+from .agent import record_score, run_chat, verify_score_hmac
 from .config import get_settings
-from .schemas import AgentResponse, ChatRequest, RefusalResponse
+from .schemas import (
+    AgentResponse,
+    ChatRequest,
+    RefusalResponse,
+    ScoreRequest,
+    ScoreResponse,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +118,34 @@ async def chat(request: ChatRequest) -> AgentResponse | RefusalResponse:
             detail="The agent encountered an internal error. Please retry.",
         ) from exc
     return result
+
+
+@app.post("/score", response_model=ScoreResponse)
+async def score(request: ScoreRequest) -> ScoreResponse:
+    """Attach a client-side metric to an existing Langfuse trace.
+
+    Used by the OpenEMR chat panel to record visual-render latency
+    (browser click → DOM update) onto the same trace that captured
+    the agent-side latency, so end-to-end timing lives in one place.
+    """
+    settings = get_settings()
+    if not verify_score_hmac(
+        request.user_id,
+        request.patient_id,
+        request.trace_id,
+        request.name,
+        request.value,
+        request.hmac,
+        settings.openemr_hmac_secret,
+    ):
+        raise HTTPException(status_code=403, detail="Invalid signature.")
+    await record_score(
+        trace_id=request.trace_id,
+        name=request.name,
+        value=request.value,
+        comment=request.comment,
+    )
+    return ScoreResponse()
 
 
 @app.exception_handler(HTTPException)

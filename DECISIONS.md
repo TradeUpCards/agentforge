@@ -38,7 +38,11 @@
 - **Citation strength tiers** — code-backed (LOINC/SNOMED/ICD-10) > structured (typed columns) > free-text (narrative `pnotes`). Free-text-sourced claims are weakest and flagged accordingly. The agent does not make standalone claims from free text alone. ([ARCHITECTURE.md §3.4](./ARCHITECTURE.md), [AUDIT.md D-1, D-2, D-3](./AUDIT.md))
 - **Rule corpus boundary.** Clinical-significance claims (e.g. "this lab change is concerning") only fire when a cited rule matches. The agent will not invent clinical interpretation outside the rule corpus. Expanding the agent's clinical-claim surface requires expanding cited rules — content problem, not architecture. ([ARCHITECTURE.md §3.5](./ARCHITECTURE.md))
 
-**Limits we acknowledge.** The verifier does NOT catch *omissions* — if the agent fails to mention the active diabetes diagnosis, no rule fires. Eval suite has partial mitigation via "did you surface X?" cases, but true omission detection is a hard problem deferred. ([ARCHITECTURE.md §3.9](./ARCHITECTURE.md))
+**Limits we acknowledge.**
+
+- **Omissions.** The verifier does NOT catch *omissions* — if the agent fails to mention the active diabetes diagnosis, no rule fires. Eval suite has partial mitigation via "did you surface X?" cases, but true omission detection is a hard problem deferred. ([ARCHITECTURE.md §3.9](./ARCHITECTURE.md))
+- **Temporal coherence.** Observed during live testing on a Synthea patient (2026-04-30): the LLM produced *"Creatinine improved 2.65 mg/dL (08/19) → 0.92 mg/dL (08/16)"* — both values exist in cited records, both dates match cited record fields, **but the arrow is backwards in time** (08/19 came AFTER 08/16, so the values went up not down). The verifier passed it because each individual claim is verifiable in isolation; it doesn't check that delta narratives are temporally consistent. Strict v1 fix would require teaching the verifier to recognize delta-language ("improved", "rose to", "→") and validate the date direction. Week-2 candidate; flagged as a known verifier gap rather than papered over.
+- **~~Token-level matching, not semantic pairing.~~ Closed 2026-04-30 (afternoon).** *Original gap (now fixed):* the verifier extracted individual digit groups from claim text (e.g. *"77.3 mL/min on 08/19/2025"* → tokens `77.3`, `08`, `19`, `2025`) and checked each one was present somewhere in the cited record's field blob. It did NOT check that value and date came from the **same** record, and it did NOT parse non-ISO date formats (`08/19/2025` was matched as three separate digit groups, not a date). *Fix:* `verifier.py` now (a) normalizes ISO / `MM/DD/YYYY` / `MM-DD-YYYY` to a canonical ISO form before matching, (b) extracts `(value, date)` pairs by proximity (within ~60 chars in the same sentence) from claim text and requires the pair to co-locate in a *single* cited record's fields. Cross-record splicing now fails verification with a `not co-located` note. Covered by 4 new unit tests in `test_verifier.py`. See appendix entry 2026-04-30 (afternoon).
 
 **Tradeoff accepted.** Refuse beats fabricate. Some legitimate questions get refused. Our eval suite specifically tests this boundary so we know how often it fires.
 
@@ -73,6 +77,13 @@
   - **External audit-log forwarding (ATNA syslog)** — log integrity is application-enforced today, not schema-enforced. Same is true for OpenEMR's existing log. Documented honestly rather than papered over. ([AUDIT.md C-2](./AUDIT.md))
   - **PHI redaction in observability traces** — Langfuse traces include patient context in dev mode for the demo; production hardens this with redaction at log-write time. ([ARCHITECTURE.md §7](./ARCHITECTURE.md))
   - **Anomalous-access alerting** — the structured `agent_log` makes this trivial to add later, but it's not in MVP. ([ARCHITECTURE.md §10 #4](./ARCHITECTURE.md))
+  - **Langfuse HIPAA-compliant region** (`us-hipaa.cloud.langfuse.com`) under signed BAA on the Enterprise tier — current setup uses the standard `us.cloud.langfuse.com` free tier, which is NOT HIPAA-compliant. Per the brief's footnote (page 3) we operate under the *assumption* of a signed BAA across all third-party services for the bootcamp; real production migration is a config change (one URL + Enterprise account provisioning), not architectural. The same applies to Anthropic — production needs their enterprise BAA with PHI commitments.
+
+**Three pre-production gates, in concrete terms.** A CTO walking up to deploy this should expect:
+
+1. **Move Langfuse to the HIPAA region** under a signed BAA. URL changes from `https://us.cloud.langfuse.com` to `https://us-hipaa.cloud.langfuse.com` in `agent/.env`. Enterprise plan required.
+2. **Sign a BAA with Anthropic** (their enterprise tier offers PHI commitments). API base URL likely unchanged; the contract is the change.
+3. **Wire PHI redaction at log-write time** in the agent — strip patient identifiers from prompts/responses sent to Langfuse before they leave the trust boundary, even with the BAA. Defense in depth; minimizes blast radius if anything in the observability pipeline is later breached.
 
 **Tradeoff accepted.** This is a v0.5 with a defined v1 path. A CTO would treat it as deployable for pilot/sandbox use today; full production deployment requires the week-3 hardening list to land.
 
@@ -217,6 +228,8 @@ A defined "no" is part of a defensible product. Each of these was explicitly con
 - **Multi-provider LLM redundancy** — viable migration path via the `LLMClient` interface; not v1.
 - **LLM-as-judge eval** — manual + deterministic asserts for v1; LLM-as-judge is week 2 stretch.
 - **Custom OpenEMR-image bake** — for week 1, mount the module dir from the host. Bake into a custom image week 2+.
+- **Calendar-driven Co-Pilot triggering.** A "Brief" button next to each appointment on the schedule view, so the PCP can summon a pre-visit brief in one click directly from their day's schedule (no chart-load roundtrip). The current trigger is the patient menu / floating launcher inside an already-opened chart. Calendar integration is the more workflow-native entry point — week-2 candidate; see appendix entry 2026-04-30 for the workflow insight.
+- **Pre-visit brief pre-warming.** Anticipating that the next N appointments on today's schedule will all need briefs, the agent could pre-fetch + cache them in the background, so when the PCP clicks, the brief is already there. Reduces perceived latency to zero; verifier still runs at click time on the cached output. Observability would surface pre-warm hit rate. Real architectural value at scale; not in scope for week 1.
 
 **Why this matters.** The surface area we are defending is bounded. A CTO walks away knowing the line we drew, what crosses it, when it would cross it, and that we considered each "no" rather than overlooking it.
 
@@ -276,6 +289,86 @@ The verifier's regex was matching `01` from inside `2026-01-01` as a numeric tok
 
 **Why this matters.** Defensive coding can mask root-cause issues rather than solving them. Removing the workaround surfaced the actual root cause (next entry).
 
+### 2026-04-30 — Pull forward real-DB tools + Synthea-populated demo data into week 1
+
+**Original scope.** PRD §5 v1 data-path decision was *"direct DB access from the Python agent via a dedicated read-only MariaDB user. ARCHITECTURE.md §2.6 permits direct DB as a fallback; we extend that to all reads for week 1."* Implementation deferred — `agent/tools.py:_real_dispatch()` raises `NotImplementedError`, and the agent runs in `USE_FIXTURE_DATA=true` mode against a single hand-crafted Maria Hernandez fixture.
+
+**Revised scope.** Pulling the real-DB-tool implementation forward into week 1, plus seeding the demo with realistic clinical data. Two reasons:
+
+1. **The single-patient fixture demo doesn't exercise the architecture's claims.** The verifier's strict-on-numerics, lenient-on-qualifiers behavior is most defensible when shown across multiple patients with real lab trends. The "what's changed since last visit" delta only meaningfully exists with multi-encounter histories. Fixtures dodge both.
+2. **A populated calendar reframes the demo around the real workflow.** The CTO defense narrative is *"PCP between rooms looks at schedule, picks next patient, summons Co-Pilot, walks in."* That story needs (a) appointments on today's schedule and (b) patients with real chart depth so the brief has something to summarize.
+
+**What changes:**
+
+- **`agent/tools.py:_real_dispatch()`** gets real PyMySQL queries for the 5 baseline tools (`get_problem_list`, `get_active_medications`, `get_recent_labs`, `get_allergies`, `get_recent_encounters`) against OpenEMR's actual schema (`lists`, `prescriptions`, `procedure_result`, `form_encounter`).
+- **A dedicated read-only DB user** (`agent_ro`) is created on the local MariaDB with SELECT-only privileges. Per ARCHITECTURE.md §4.1: *"the agent runs queries with the authenticated user's effective DB privileges — there is no agent-superuser account."* `agent_ro` is the agent-side equivalent.
+- **Synthea-generated patients** imported via OpenEMR's `import-random-patients` devtool. ~20 patients with realistic multi-year clinical histories — multiple encounters, lab trends, medication changes, real allergies.
+- **Today's appointments** seeded for ~5 of the imported patients via SQL (`openemr_postcalendar_events`) so the calendar view tells the right "PCP's day" story.
+- **Eval suite** runs in `USE_FIXTURE_DATA=true` for determinism (existing cases reference fixture record IDs); production runs in `USE_FIXTURE_DATA=false`. Mode toggle preserved as the test-vs-prod boundary.
+
+**Trade-off accepted.** ~3–4 hours of additional work today against an already-tight Thu 22:59 early-submission target. Worth it because the demo video story changes meaningfully — instead of *"here's the fixture patient I crafted"*, it's *"here's a Synthea-generated patient with a 5-year history, summarized in 6 seconds with verifiable citations to actual record IDs."*
+
+**Why this matters for the CTO defense.** This is the difference between a prototype and something a hospital CTO could imagine putting in front of physicians. The architecture's verifier story holds up against real clinical data variability (free-text problem entries, LOINC-coded labs vs uncoded labs, missing fields, multi-encounter trends) — not just against a single curated test case. It also lets us defend cost economics at a more honest scale (the prompt size grows with real chart depth; the cost projections in `COST_ANALYSIS.md` will reflect that).
+
+**Provenance note.** This decision came directly from a workflow observation made during testing — the schedule-as-entry-point insight (entry above) led to *"we need a populated schedule"* led to *"and that means real patients with real depth."* Both entries should be read together; one prompted the other.
+
+### 2026-04-30 — Workflow insight: the schedule, not the search box, is the natural entry point for a PCP
+
+**Observation.** During local testing, the user noted: opening a patient chart in OpenEMR requires either a name search or a click-through navigation. Search-as-primary doesn't match a PCP's actual day — patients are pre-booked on a schedule; search is the edge case (cancellation, walk-in, urgent recall), not the common case.
+
+**Implication for the architecture.** The 90-second clinical window referenced in [USERS.md](./USERS.md) doesn't start at *"I clicked a patient name from search"*; it starts at *"I closed the previous chart and looked at my schedule for who's next."* The agent's value compounds when its trigger is co-located with the schedule.
+
+**Decision (week 1).** Stay with the patient-menu + floating launcher trigger. The architecture's `PatientMenuEvent::MENU_UPDATE` integration point is already in place; the sidecar drawer summons from any chart view; this is sufficient for the case-study demo.
+
+**Roadmap (week 2+).** Two concrete extensions worth flagging:
+
+1. **Calendar-integrated Co-Pilot trigger.** Subscribe to OpenEMR's calendar-render event (or render hook); add a "Brief" button next to each appointment block. Click → drawer opens pre-targeted at that patient. One step from "see schedule" to "have brief in hand."
+2. **Pre-visit brief pre-warming.** For the next N appointments on the day's schedule, pre-fetch the brief on a background thread and cache it. PCP clicks → brief is already there (zero perceived latency). Verifier still runs at click time; observability surfaces pre-warm hit rate. Real architectural value at scale.
+
+**Why this matters for the CTO defense.** A CTO doesn't grade architectural completeness in isolation — they grade *whether the architecture maps onto how the work actually gets done*. Acknowledging that a search-driven flow is wrong for clinical practice (and naming what we'd build instead) is exactly the kind of insight that distinguishes "implemented the spec" from "designed for the user."
+
+### 2026-04-30 — Absence claims pass verification when no records were retrieved (§3.7 implementation gap closed)
+
+**Symptom.** During the live-LLM swap, manual click-through testing showed: when all baseline tools returned zero records, the LLM correctly emitted *"No patient records are available in the system for this patient."* with `claim_type: "absence"` and empty `source_record_ids`. The verifier stripped that claim because it had no source IDs, hit 100% failure rate, and returned the generic *"More than 30% of the agent's claims could not be verified..."* refusal. The user saw a misleading error instead of the correct "no data found" message.
+
+**Cause.** `ARCHITECTURE.md §3.7` already prescribed the right behavior: *"Claims about absence ('no recorded LDL') are verifiable if the corresponding tool was actually called and returned an empty result. The verifier matches against the **tool-call shape**, not just records."* The verifier implementation hadn't caught up — every claim was required to carry at least one `source_record_id`.
+
+**Decision.** In `verifier.py:_verify_one_claim`, allow `claim_type == ABSENCE` to pass without `source_record_ids` IFF the retrieved-records index is empty. The empty tool-call shape grounds the absence claim. Strict v1 form: only blanket-empty records get the exemption; partial-data absence ("no recent labs but here are problems") still requires source IDs against specific empty tools — week-2 work.
+
+**Companion change in the agent loop.** Added a separate refusal path for "tools failed transiently" (e.g., DB error) vs "tools cleanly returned empty." If any tool failed AND no records came back, the agent refuses with an explicit *"clinical data sources could not be reached"* message rather than letting the LLM make absence claims about data we couldn't reach. Different conditions, different messages.
+
+**New tests:**
+- Unit: `test_absence_claim_passes_when_no_records_retrieved`, `test_non_absence_claim_still_fails_when_no_records`.
+- Eval: `06_empty_records_absence_claim.yaml` — uses sentinel `patient_id=999999` (fixture layer returns empty for this) to exercise the absence-verification path through the chat endpoint. Live-LLM-only (canned fixture response references real IDs that wouldn't match in this case).
+
+**Why this matters for the CTO defense — be honest about provenance.** This was caught by **manual click-through testing during the live-LLM swap**, not by the eval suite. The eval cases as designed didn't simulate "tools returned empty" — they used `bad_hmac` for refusal triggering and assumed populated fixtures otherwise. The lesson: **eval suites need to grow with new failure modes; manual exploratory testing is still load-bearing.** Eval-driven development isn't fire-and-forget. The new eval case (06) closes this specific gap so future regressions are caught.
+
+This is also a reminder that the architecture-doc-as-source-of-truth discipline matters: §3.7 had the answer all along; the implementation just hadn't reached it yet. Defense in front of a CTO benefits from acknowledging the gap rather than hiding it.
+
+### 2026-04-30 (afternoon) — Verifier closes the token-level / date-normalization gap
+
+**Symptom.** While reviewing successful traces in Langfuse, the user spotted: a `claim_type=lab_value` claim *"GFR was 77.3 mL/min on 08/19/2025"* passed verification, but the verifier was actually matching the digit groups `77.3`, `08`, `19`, `2025` independently against the cited record's blob — not the date `2025-08-19` as a single normalized token, and not `(77.3, 2025-08-19)` as a tuple. Two related gaps from §2:
+1. Non-ISO dates (`MM/DD/YYYY`, `MM-DD-YYYY`) decomposed into bare digits, so a deliberate format swap could trick the verifier.
+2. `(value, date)` pairs not validated as a tuple from a single record — value-from-record-A paired with date-from-record-B would slip through.
+
+**Decision.** Both fixed in `verifier.py`:
+- New `_DATE_REGEX` with named groups for ISO / `MM/DD/YYYY` / `MM-DD-YYYY`. `_normalize_date()` rewrites all three to canonical `YYYY-MM-DD` before any comparison.
+- Per-record date sets (`record_dates_normalized`) maintained alongside per-record text blobs, so date-presence is checked against the specific record(s) the claim cites — not a flat union.
+- Sentence-level proximity pairing: for each value + date in the same sentence within ~60 chars (`_PAIR_DISTANCE_THRESHOLD`), require both to co-locate in a *single* cited record's fields. Cross-record pairs fail with note `"(value, date) not co-located in any single cited record"`.
+- Standalone date and numeric checks remain as fallbacks for tokens not part of any pair.
+
+**Sentence splitter bugfix found via test failure.** `_split_sentences` originally split on `[.!?\n;]+`, which broke decimals — `"7.8"` became `"7"` + `"8"`. The cross-record-pair test caught this on the first run (claim text `"7.8 on 2025-12-10"` was split into `"7"` and `"8 on 2025-12-10"`, so the pair check ran on `("8", "2025-12-10")` instead of `("7.8", "2025-12-10")` — and `"8"` is a substring of `"6.8"` in record B, which falsely matched). Fixed by treating `.` as a sentence boundary only when not flanked by digits on both sides: `r"(?:(?<!\d)\.|\.(?!\d)|[!?\n;])+"`.
+
+**New tests** (4, all passing alongside the existing 12):
+- `test_us_slash_date_normalizes_to_match_iso_record_date`
+- `test_us_dash_date_normalizes_to_match_iso_record_date`
+- `test_value_date_pair_must_come_from_same_record` (cross-record fail)
+- `test_value_date_pair_passes_when_co_located_in_same_record`
+
+**Why this matters for the CTO defense.** Two of the three named verifier limits in §2 are now closed in week 1. The third (temporal-coherence — backwards-in-time delta narratives) remains explicitly week-2 work because it requires teaching the verifier to recognize delta language (`improved`, `→`, `up from`) and validate direction. Honest accounting: live testing surfaced the gap, the gap had a named fix path in DECISIONS.md, and the fix landed within hours. This is the verifier-iteration discipline the architecture promises.
+
+**Provenance.** Caught by **manual review of a successful Langfuse trace** — not by the eval suite, not by a customer report. Reviewing successful traces (not just refusals) is what surfaced the structural mismatch. Same lesson as the absence-claim gap: eval suites need to grow with new failure modes; reviewing what *passed* is as important as reviewing what failed.
+
 ### 2026-04-29 (evening) — Session reads via `SessionWrapperFactory`, not the raw `$_SESSION` superglobal
 
 **Symptom.** `401 Authentication required` with a valid session cookie, even after the bootstrap was simplified. Server-side debug dump showed:
@@ -299,5 +392,12 @@ pid: (missing)
 |---|---|---|
 | 2026-04-29 (afternoon) | Initial document. Sections 1–10 + appendix entries for Wed afternoon work. | AgentForge build |
 | 2026-04-29 (evening) | Three appendix entries for the local-integration smoke-test bugs (`js_url` URL-encoding, `$sessionAllowWrite` bootstrap, session-bag namespace). | AgentForge build |
+| 2026-04-30 (morning) | Closed §3.7 implementation gap (absence claims pass when no records retrieved); added eval case 06; honest provenance note (caught by manual testing, not eval). | AgentForge build |
+| 2026-04-30 (morning) | Workflow insight: schedule (not search) is the natural entry point. Calendar-integrated trigger + pre-visit-brief pre-warming added to §10 non-goals as week-2+ candidates. | AgentForge build |
+| 2026-04-30 (mid-morning) | Pulled real-DB tools + Synthea data import + today's appointments forward into week 1 (was week-2 work). Trade-off: ~3–4 hours more today; demo story shifts from single-curated-fixture to realistic multi-patient workflow. | AgentForge build |
+| 2026-04-30 (late-morning) | §4 (HIPAA) expanded with explicit `us-hipaa.cloud.langfuse.com` migration path + 3 named pre-production gates (HIPAA region, Anthropic BAA, PHI redaction at log-write). | AgentForge build |
+| 2026-04-30 (late-morning) | §2 verifier-limits expanded with temporal-coherence gap (LLM produced backwards-in-time delta narrative; values + dates verified individually; narrative direction not checked). Flagged as week-2 fix. | AgentForge build |
+| 2026-04-30 (mid-day) | §2 verifier-limits expanded with token-level-vs-semantic-pairing gap (digit groups matched individually; non-ISO date formats decompose to bare digits; (value, date) not validated as a tuple from a single record). Week-2 fix path documented. | AgentForge build |
+| 2026-04-30 (afternoon) | Closed the token-level / date-normalization gap in `verifier.py` — date-format normalization (ISO / `MM/DD/YYYY` / `MM-DD-YYYY` → canonical ISO) and proximity-based `(value, date)` tuple pairing against single-record fields. Sentence-splitter bugfix found via test failure. 4 new unit tests; all 16 pass. §2 limits list reduced from 3 to 1 (temporal-coherence remains as week-2 work). | AgentForge build |
 
 When updating, add a row to this table and date-stamp any modified appendix entries inline.

@@ -183,6 +183,155 @@ def test_no_claims_at_all_passes_trivially() -> None:
     assert result.failure_rate == 0.0
 
 
+def test_absence_claim_passes_when_no_records_retrieved() -> None:
+    """Per ARCHITECTURE.md §3.7: an absence claim is verifiable when tools
+    were called and returned no records. The empty tool-call shape grounds
+    the claim — strictly, source_record_ids is appropriately empty.
+
+    Without this special case, "patient has no records on file" gets
+    stripped because it lacks source_record_ids, then 100% failure-rate
+    triggers a generic verifier refusal that hides the LLM's correct
+    observation.
+    """
+    records: list[RetrievedRecord] = []
+    claims = [
+        _claim(
+            "No patient records are available for this patient.",
+            claim_type=ClaimType.ABSENCE,
+        ),
+    ]
+    result = verify_claims(claims, records)
+    assert result.verdict == VerifierVerdict.PASS
+    assert len(result.claims_passed) == 1
+
+
+def test_non_absence_claim_still_fails_when_no_records() -> None:
+    """The absence-claim exemption is narrow — only ABSENCE-typed claims
+    pass without source_record_ids. A FACT claim with empty record_index
+    is still a hallucination and gets stripped."""
+    records: list[RetrievedRecord] = []
+    claims = [
+        _claim(
+            "Patient is on metformin 500mg",
+            claim_type=ClaimType.FACT,  # not absence
+        ),
+    ]
+    result = verify_claims(claims, records)
+    assert result.verdict == VerifierVerdict.REFUSED
+    assert len(result.claims_failed) == 1
+
+
+def test_us_slash_date_normalizes_to_match_iso_record_date() -> None:
+    """Claim uses MM/DD/YYYY; record stores ISO YYYY-MM-DD. After
+    normalization both should reference the same calendar date."""
+    records = [
+        _record(
+            "procedure_result",
+            "5421",
+            name="HbA1c",
+            value="7.8",
+            units="%",
+            date="2026-03-15",
+        ),
+    ]
+    claims = [
+        _claim(
+            "HbA1c was 7.8% on 03/15/2026",
+            "procedure_result:5421",
+            claim_type=ClaimType.LAB_VALUE,
+        ),
+    ]
+    result = verify_claims(claims, records)
+    assert result.verdict == VerifierVerdict.PASS, [c.verifier_note for c in result.claims_failed]
+
+
+def test_us_dash_date_normalizes_to_match_iso_record_date() -> None:
+    """Same as above for MM-DD-YYYY format."""
+    records = [
+        _record(
+            "procedure_result",
+            "5421",
+            name="HbA1c",
+            value="7.8",
+            date="2026-03-15",
+        ),
+    ]
+    claims = [
+        _claim(
+            "HbA1c was 7.8 on 03-15-2026",
+            "procedure_result:5421",
+            claim_type=ClaimType.LAB_VALUE,
+        ),
+    ]
+    result = verify_claims(claims, records)
+    assert result.verdict == VerifierVerdict.PASS, [c.verifier_note for c in result.claims_failed]
+
+
+def test_value_date_pair_must_come_from_same_record() -> None:
+    """Cross-record pairing: claim says value 7.8 paired with date
+    2025-12-10. Record A has 7.8 + 2026-03-15. Record B has 6.8 +
+    2025-12-10. Neither has BOTH 7.8 AND 2025-12-10. Should fail."""
+    records = [
+        _record(
+            "procedure_result",
+            "5421",
+            name="HbA1c",
+            value="7.8",
+            date="2026-03-15",
+        ),
+        _record(
+            "procedure_result",
+            "4892",
+            name="HbA1c",
+            value="6.8",
+            date="2025-12-10",
+        ),
+    ]
+    claims = [
+        _claim(
+            # Value-from-A spliced with date-from-B
+            "HbA1c was 7.8 on 2025-12-10",
+            "procedure_result:5421",
+            "procedure_result:4892",
+            claim_type=ClaimType.LAB_VALUE,
+        ),
+    ]
+    result = verify_claims(claims, records)
+    assert result.verdict == VerifierVerdict.REFUSED
+    assert "not co-located" in (result.claims_failed[0].verifier_note or "")
+
+
+def test_value_date_pair_passes_when_co_located_in_same_record() -> None:
+    """The honest case — value and date in the same record should pass."""
+    records = [
+        _record(
+            "procedure_result",
+            "5421",
+            name="HbA1c",
+            value="7.8",
+            date="2026-03-15",
+        ),
+        _record(
+            "procedure_result",
+            "4892",
+            name="HbA1c",
+            value="6.8",
+            date="2025-12-10",
+        ),
+    ]
+    claims = [
+        # Two pairs, each correctly co-located.
+        _claim(
+            "HbA1c was 7.8 on 2026-03-15, up from 6.8 on 2025-12-10",
+            "procedure_result:5421",
+            "procedure_result:4892",
+            claim_type=ClaimType.LAB_VALUE,
+        ),
+    ]
+    result = verify_claims(claims, records)
+    assert result.verdict == VerifierVerdict.PASS, [c.verifier_note for c in result.claims_failed]
+
+
 def test_qualifier_claim_passes_without_strict_match() -> None:
     """Qualifiers like 'elevated' pass as long as the cited record exists.
 

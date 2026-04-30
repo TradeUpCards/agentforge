@@ -32,28 +32,30 @@ final class PatientMenuSubscriber implements EventSubscriberInterface
     }
 
     /**
-     * Append the Clinical Co-Pilot menu entry to the patient chart tabs.
+     * No-op: the patient-menu trigger is intentionally not registered.
      *
-     * The patient id is appended by OpenEMR's menu rendering layer when
-     * needed, but we also include `pid` so the chat panel can derive the
-     * patient context defensively. The authoritative `pid` is still the
-     * one held in the active OpenEMR session.
+     * Earlier iterations injected a "Clinical Co-Pilot" menu item with a
+     * `#oe-copilot-open` hash URL. That broke because the patient menu
+     * renders inside an iframe — clicking the menu item changed the
+     * *iframe's* URL hash, not the top window's, so the top-window
+     * `hashchange` listener (in chart-bootstrap.js) never fired.
+     *
+     * The drawer is now reachable via two top-window-scoped affordances:
+     *   - persistent chevron handle on the right edge of the viewport
+     *   - floating "Co-Pilot" launcher in the bottom-right corner
+     *
+     * Both are wired through chart-bootstrap.js / ScriptFilterSubscriber
+     * and work identically across all chart tabs (Dashboard, Reports,
+     * History, etc.).
+     *
+     * The subscriber is kept registered for the architecture trace —
+     * `PatientMenuEvent::MENU_UPDATE` is a documented integration point;
+     * a future iteration could re-introduce a menu item that calls
+     * `top.OE_COPILOT.open()` via a JS bridge.
      */
     public function onPatientMenuUpdate(PatientMenuEvent $event): PatientMenuEvent
     {
-        $existingMenu = $event->getMenu();
-
-        $menuItem = new \stdClass();
-        $menuItem->label = 'Clinical Co-Pilot';
-        $menuItem->menu_id = 'mod_clinical_copilot';
-        $menuItem->target = 'mod';
-        $menuItem->url = OEGlobalsBag::getInstance()->getWebRoot()
-            . '/interface/modules/custom_modules/oe-module-clinical-copilot/public/chat-panel.php';
-
-        $existingMenu[] = $menuItem;
-
-        $event->setMenu($existingMenu);
-
+        // Intentionally empty — see class docblock.
         return $event;
     }
 }

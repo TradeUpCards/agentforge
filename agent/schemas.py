@@ -155,6 +155,18 @@ class AgentResponse(BaseModel):
     request_id: str
     """Joins agent_log row with Langfuse trace."""
 
+    trace_id: str | None = None
+    """Langfuse trace id for this request. Round-trips to the browser so
+    the UI can attach client-side metrics (e.g. visual-render latency)
+    back onto the same trace via /score."""
+
+    claims_stripped: int = 0
+    """Count of claims the verifier removed via atomic strip before
+    returning. Lets the UI surface "9 verified · 2 stripped" so the
+    clinician can see the verifier is doing its job even on responses
+    that pass overall (i.e. the strip didn't cross the 30% refusal
+    threshold)."""
+
 
 class RefusalResponse(BaseModel):
     """Returned when the verifier rejects ≥30% of claims twice (per §3.6)."""
@@ -168,6 +180,34 @@ class RefusalResponse(BaseModel):
     in the chart manually."""
 
     request_id: str
+    trace_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Score endpoint — browser-side metrics attach to existing trace
+# ---------------------------------------------------------------------------
+
+
+class ScoreRequest(BaseModel):
+    """Browser → PHP → agent. Records a client-side metric (e.g. visual
+    latency) onto an existing Langfuse trace.
+
+    HMAC payload convention (must match the PHP module):
+      f"{user_id}|{patient_id}|{trace_id}|{name}|{value}"
+    """
+
+    user_id: int
+    patient_id: int
+    hmac: str
+    trace_id: str
+    name: str
+    """Metric name. Convention: snake_case (e.g. `visual_latency_ms`)."""
+    value: float
+    comment: str | None = None
+
+
+class ScoreResponse(BaseModel):
+    status: Literal["ok"] = "ok"
 
 
 # ---------------------------------------------------------------------------

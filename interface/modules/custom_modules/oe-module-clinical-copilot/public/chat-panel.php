@@ -37,6 +37,18 @@ if (empty($pid)) {
 }
 
 $csrfToken = CsrfUtils::collectCsrfToken(session: $session);
+
+// Embedded mode: drawer wrapper provides outer "Clinical Co-Pilot" chrome,
+// but we still render an inner header showing WHICH patient the agent is
+// reasoning about. That's the trust signal — clinician sees the name,
+// not just an opaque pid.
+$isEmbedded = !empty($_GET['embedded']);
+
+$nameRow = sqlQuery("SELECT fname, lname FROM patient_data WHERE pid = ?", [$pid]);
+$patientName = trim(($nameRow['fname'] ?? '') . ' ' . ($nameRow['lname'] ?? ''));
+if ($patientName === '') {
+    $patientName = 'Patient ' . (string) $pid;
+}
 ?>
 <!doctype html>
 <html lang="en">
@@ -48,13 +60,32 @@ $csrfToken = CsrfUtils::collectCsrfToken(session: $session);
     <?php Header::setupHeader(['common']); ?>
     <link rel="stylesheet" href="chat-panel.css">
 </head>
-<body class="container-fluid">
+<body class="container-fluid<?php echo $isEmbedded ? ' copilot-embedded' : ''; ?>">
     <div class="copilot-app d-flex flex-column">
-        <header class="copilot-header py-2 border-bottom">
-            <h3 class="m-0"><?php echo xlt('Clinical Co-Pilot'); ?></h3>
-            <small class="text-muted">
-                <?php echo xlt('Patient'); ?>: <span id="copilot-pid"><?php echo text((string) $pid); ?></span>
-            </small>
+        <header class="copilot-header py-2 px-3 border-bottom"
+                style="background:#f3f4f6;">
+            <?php if (!$isEmbedded): ?>
+                <h3 class="m-0"><?php echo xlt('Clinical Co-Pilot'); ?></h3>
+            <?php endif; ?>
+            <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:#374151; flex-wrap:wrap;">
+                <span style="font-weight:600; text-transform:uppercase; color:#6b7280; letter-spacing:0.4px; font-size:10px;">
+                    <?php echo xlt('Reasoning about'); ?>
+                </span>
+                <span id="copilot-patient-name"
+                      style="font-weight:600; color:#111827;"
+                      data-pid="<?php echo attr((string) $pid); ?>">
+                    <?php echo text($patientName); ?>
+                </span>
+                <span style="color:#9ca3af;">
+                    (PID&nbsp;<?php echo text((string) $pid); ?>)
+                </span>
+                <!-- Verifier status — populated by chat-panel.js after each
+                     successful assistant turn. Hidden until first response. -->
+                <span id="copilot-verifier-status"
+                      style="margin-left:auto; font-size:11px; color:#6b7280; display:none;"
+                      title="Last response — verifier outcome">
+                </span>
+            </div>
         </header>
 
         <section id="copilot-messages"
@@ -95,6 +126,7 @@ $csrfToken = CsrfUtils::collectCsrfToken(session: $session);
     <script>
         window.OE_COPILOT_CONFIG = {
             endpoint: <?php echo js_escape($GLOBALS['webroot'] . '/interface/modules/custom_modules/oe-module-clinical-copilot/public/chat.php'); ?>,
+            scoreEndpoint: <?php echo js_escape($GLOBALS['webroot'] . '/interface/modules/custom_modules/oe-module-clinical-copilot/public/score.php'); ?>,
             csrfToken: <?php echo js_escape($csrfToken); ?>,
             patientId: <?php echo js_escape((string) $pid); ?>,
             labels: {

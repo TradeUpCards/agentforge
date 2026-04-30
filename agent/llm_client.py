@@ -24,6 +24,7 @@ from typing import Any
 
 from anthropic import AsyncAnthropic
 from anthropic.types import Message
+from langfuse import get_client, observe
 
 from .config import Settings, get_settings
 
@@ -53,6 +54,7 @@ class AnthropicLLMClient(LLMClient):
             base_url=settings.anthropic_base_url,
         )
 
+    @observe(as_type="generation", name="anthropic.messages.create")
     async def create(
         self,
         *,
@@ -72,7 +74,48 @@ class AnthropicLLMClient(LLMClient):
         }
         if tools:
             kwargs["tools"] = tools
-        return await self._client.messages.create(**kwargs)
+
+        # Pre-call: stamp the input + model on the Langfuse generation.
+        lf = get_client()
+        lf.update_current_generation(
+            input={"system": system, "messages": messages},
+            model=model,
+            model_parameters={
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+            metadata={"has_tools": bool(tools)},
+        )
+
+        response = await self._client.messages.create(**kwargs)
+
+        # Post-call: stamp output text + token usage + cache stats.
+        output_text = "".join(
+            getattr(b, "text", "") for b in response.content
+            if getattr(b, "type", None) == "text"
+        )
+        usage = response.usage
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cache_hit_rate = (
+            cache_read / max(usage.input_tokens, 1)
+            if usage.input_tokens
+            else 0.0
+        )
+        lf.update_current_generation(
+            output=output_text,
+            usage_details={
+                "input": usage.input_tokens,
+                "output": usage.output_tokens,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_create,
+            },
+            metadata={
+                "stop_reason": response.stop_reason,
+                "prompt_cache_hit_rate": round(cache_hit_rate, 4),
+            },
+        )
+        return response
 
 
 class FixtureLLMClient(LLMClient):

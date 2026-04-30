@@ -12,18 +12,24 @@ Two execution modes share the same external interface:
 
 - **Fixture mode:** returns deterministic fixture records with stable
   record_ids the LLM fixture (in `agent/fixtures/llm/`) references. Used
-  when no API key is present; lets the agent loop be exercised end-to-end
-  without an LLM and without depending on local DB schema.
+  for eval-suite determinism and for development without a populated DB.
 
-Real-DB queries land at the start of Phase 5 once the local stack is verified
-running and the schema is double-checked against `src/Services/*.php`. Until
-then the real-mode functions raise NotImplementedError — agent runs in
-fixture mode regardless.
+Toggled via `USE_FIXTURE_DATA` in `agent/.env` (default: true). Production
+flips it false. SQL conventions cribbed from OpenEMR's own service classes
+(see `src/Services/ConditionService.php`, `PrescriptionService.php`,
+`ObservationLabService.php`, `AllergyIntoleranceService.php`,
+`EncounterService.php`).
 """
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
 from typing import Any
+
+import pymysql
+import pymysql.cursors
+from langfuse import get_client, observe
 
 from .config import get_settings
 from .schemas import CitationStrength, RetrievedRecord
@@ -117,6 +123,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
+@observe(name="tool.execute")
 async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> list[RetrievedRecord]:
     """Dispatch a tool call to the right handler.
 
@@ -124,9 +131,21 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> list[Retri
     found" response per ARCHITECTURE.md §2.6 (explicit absence).
     """
     settings = get_settings()
-    if settings.use_fixture_llm:
-        return _fixture_dispatch(tool_name, tool_input)
-    return await _real_dispatch(tool_name, tool_input)
+    lf = get_client()
+    lf.update_current_span(
+        input={"tool_name": tool_name, "params": tool_input},
+        metadata={"data_mode": "fixture" if settings.use_fixture_data else "live"},
+    )
+    # Tool data mode is independent of LLM mode. Today's typical config:
+    # live LLM + fixture data (LLM observes the synthetic Maria Hernandez
+    # records and cites their stable IDs accurately). Once real DB queries
+    # land in _real_dispatch(), flip USE_FIXTURE_DATA=false.
+    if settings.use_fixture_data:
+        records = _fixture_dispatch(tool_name, tool_input)
+    else:
+        records = await _real_dispatch(tool_name, tool_input)
+    lf.update_current_span(output={"record_count": len(records)})
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +153,19 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> list[Retri
 # ---------------------------------------------------------------------------
 
 
+_EMPTY_PATIENT_SENTINEL = 999999
+"""Patient ID that the fixture layer returns empty for, regardless of tool.
+Used by eval cases to exercise the "patient has no records on file" path
+through the agent and verifier. See agent/tests/eval/cases/06_*.yaml."""
+
+
 def _fixture_dispatch(tool_name: str, tool_input: dict[str, Any]) -> list[RetrievedRecord]:
+    # Sentinel: agent-side eval path for "patient with no records on file".
+    # All fixture tools return empty for this patient_id so we can exercise
+    # the absence-claim verification path (verifier.py / ARCHITECTURE.md §3.7).
+    if int(tool_input.get("patient_id", 0)) == _EMPTY_PATIENT_SENTINEL:
+        return []
+
     if tool_name == "get_problem_list":
         return _fixture_problems()
     if tool_name == "get_active_medications":
@@ -278,7 +309,254 @@ def _fixture_encounters() -> list[RetrievedRecord]:
 
 
 async def _real_dispatch(tool_name: str, tool_input: dict[str, Any]) -> list[RetrievedRecord]:
-    raise NotImplementedError(
-        "Real-DB queries are wired in Phase 5 (after local OpenEMR schema is verified). "
-        "For now, set USE_FIXTURE_LLM=auto in agent/.env to run in fixture mode."
+    """Run real DB queries against OpenEMR's MariaDB. PyMySQL is sync, so we
+    drop into a threadpool — keeps FastAPI's event loop responsive."""
+    patient_id = int(tool_input.get("patient_id", 0))
+    if patient_id <= 0:
+        return []
+
+    handlers = {
+        "get_problem_list": _real_get_problem_list,
+        "get_active_medications": _real_get_active_medications,
+        "get_recent_labs": _real_get_recent_labs,
+        "get_allergies": _real_get_allergies,
+        "get_recent_encounters": _real_get_recent_encounters,
+    }
+    handler = handlers.get(tool_name)
+    if handler is None:
+        raise ValueError(f"Unknown tool: {tool_name}")
+
+    return await asyncio.get_event_loop().run_in_executor(None, handler, patient_id)
+
+
+# ---------------------------------------------------------------------------
+# Real-DB query implementations
+#
+# SQL queries cribbed from OpenEMR's own service classes (see file-level
+# docstring) and trimmed to just the columns the agent needs. Narrow SELECT
+# lists per AUDIT.md C-3 — never `patient_data.ss` or `drivers_license`.
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _db_cursor():
+    """Open a PyMySQL connection with a dict cursor. Read-only is enforced
+    at the DB-user level (`agent_ro` has SELECT-only privileges); we don't
+    rely on application-level enforcement."""
+    settings = get_settings()
+    conn = pymysql.connect(
+        host=settings.db_host,
+        port=settings.db_port,
+        user=settings.db_user,
+        password=settings.db_password,
+        database=settings.db_name,
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=5,
+        read_timeout=10,
+        autocommit=True,
     )
+    try:
+        with conn.cursor() as cur:
+            yield cur
+    finally:
+        conn.close()
+
+
+def _real_get_problem_list(patient_id: int) -> list[RetrievedRecord]:
+    """Active diagnoses / chronic conditions. Excludes ended problems."""
+    sql = """
+        SELECT id, title, diagnosis, `date` AS date_added, activity
+        FROM lists
+        WHERE type = 'medical_problem'
+          AND pid = %s
+          AND (enddate IS NULL OR enddate = '0000-00-00')
+        ORDER BY `date` DESC
+        LIMIT 30
+    """
+    out: list[RetrievedRecord] = []
+    with _db_cursor() as cur:
+        cur.execute(sql, (patient_id,))
+        for row in cur.fetchall():
+            # Citation strength: ICD-10 / SNOMED in `diagnosis` → code-backed;
+            # free-text title only → structured (typed column, no code).
+            diagnosis = row.get("diagnosis") or ""
+            strength = (
+                CitationStrength.CODE_BACKED
+                if any(prefix in str(diagnosis) for prefix in ("ICD10:", "SNOMED:", "ICD9:"))
+                else CitationStrength.STRUCTURED
+            )
+            out.append(RetrievedRecord(
+                table="lists",
+                record_id=str(row["id"]),
+                citation_strength=strength,
+                fields={
+                    "title": row.get("title"),
+                    "diagnosis": str(diagnosis) if diagnosis else None,
+                    "date_added": str(row.get("date_added")) if row.get("date_added") else None,
+                    "type": "medical_problem",
+                },
+            ))
+    return out
+
+
+def _real_get_active_medications(patient_id: int) -> list[RetrievedRecord]:
+    """Active prescriptions. RxNorm-coded drugs are code-backed citation
+    strength; free-text drug names without a code are structured."""
+    sql = """
+        SELECT id, drug, dosage, `interval`, route, quantity,
+               start_date, date_added, active, rxnorm_drugcode
+        FROM prescriptions
+        WHERE patient_id = %s
+          AND active = 1
+        ORDER BY date_added DESC
+        LIMIT 30
+    """
+    out: list[RetrievedRecord] = []
+    with _db_cursor() as cur:
+        cur.execute(sql, (patient_id,))
+        for row in cur.fetchall():
+            rxnorm = row.get("rxnorm_drugcode")
+            strength = (
+                CitationStrength.CODE_BACKED
+                if rxnorm
+                else CitationStrength.STRUCTURED
+            )
+            out.append(RetrievedRecord(
+                table="prescriptions",
+                record_id=str(row["id"]),
+                citation_strength=strength,
+                fields={
+                    "drug": row.get("drug"),
+                    "dosage": row.get("dosage"),
+                    "frequency": row.get("interval"),
+                    "route": row.get("route"),
+                    "quantity": row.get("quantity"),
+                    "start_date": str(row["start_date"]) if row.get("start_date") else None,
+                    "date_added": str(row["date_added"]) if row.get("date_added") else None,
+                    "rxnorm_drugcode": rxnorm,
+                    "active": bool(row.get("active")),
+                },
+            ))
+    return out
+
+
+def _real_get_recent_labs(patient_id: int) -> list[RetrievedRecord]:
+    """Recent lab results. LOINC-coded results are code-backed citation
+    strength; raw values without codes drop to structured."""
+    sql = """
+        SELECT presult.procedure_result_id AS rid,
+               presult.result, presult.units, presult.`range`,
+               presult.abnormal, presult.result_code, presult.result_text,
+               pordercode.procedure_name, pordercode.procedure_code,
+               preport.date_report
+        FROM procedure_result AS presult
+        LEFT JOIN procedure_report AS preport
+               ON preport.procedure_report_id = presult.procedure_report_id
+        LEFT JOIN procedure_order AS porder
+               ON porder.procedure_order_id = preport.procedure_order_id
+        LEFT JOIN procedure_order_code AS pordercode
+               ON pordercode.procedure_order_id = porder.procedure_order_id
+        WHERE porder.patient_id = %s
+        ORDER BY preport.date_report DESC
+        LIMIT 50
+    """
+    out: list[RetrievedRecord] = []
+    with _db_cursor() as cur:
+        cur.execute(sql, (patient_id,))
+        for row in cur.fetchall():
+            loinc = row.get("result_code") or row.get("procedure_code")
+            strength = (
+                CitationStrength.CODE_BACKED
+                if loinc
+                else CitationStrength.STRUCTURED
+            )
+            out.append(RetrievedRecord(
+                table="procedure_result",
+                record_id=str(row["rid"]),
+                citation_strength=strength,
+                fields={
+                    "loinc": row.get("result_code") or row.get("procedure_code"),
+                    "name": row.get("result_text") or row.get("procedure_name"),
+                    "value": row.get("result"),
+                    "units": row.get("units"),
+                    "reference_range": row.get("range"),
+                    "abnormal_flag": row.get("abnormal"),
+                    "date": str(row["date_report"]) if row.get("date_report") else None,
+                },
+            ))
+    return out
+
+
+def _real_get_allergies(patient_id: int) -> list[RetrievedRecord]:
+    sql = """
+        SELECT id, title, reaction, severity_al, `date` AS date_added
+        FROM lists
+        WHERE type = 'allergy'
+          AND pid = %s
+          AND (enddate IS NULL OR enddate = '0000-00-00')
+        ORDER BY `date` DESC
+        LIMIT 20
+    """
+    out: list[RetrievedRecord] = []
+    with _db_cursor() as cur:
+        cur.execute(sql, (patient_id,))
+        for row in cur.fetchall():
+            out.append(RetrievedRecord(
+                table="lists",
+                record_id=str(row["id"]),
+                citation_strength=CitationStrength.STRUCTURED,
+                fields={
+                    "title": row.get("title"),
+                    "type": "allergy",
+                    "severity": row.get("severity_al"),
+                    "reaction": row.get("reaction"),
+                    "date_added": str(row["date_added"]) if row.get("date_added") else None,
+                },
+            ))
+    return out
+
+
+def _real_get_recent_encounters(patient_id: int) -> list[RetrievedRecord]:
+    """Most recent encounters with SOAP-form assessment + plan when
+    available. SOAP forms are optional — older or migrated encounters may
+    not have them. Free-text SOAP fields are free-text citation strength."""
+    sql = """
+        SELECT fe.encounter, fe.`date`, fe.reason,
+               fs.subjective, fs.objective, fs.assessment, fs.plan
+        FROM form_encounter AS fe
+        LEFT JOIN forms AS fo
+               ON fo.encounter = fe.encounter
+              AND fo.formdir = 'soap'
+              AND fo.deleted = 0
+        LEFT JOIN form_soap AS fs
+               ON fs.id = fo.form_id AND fs.pid = fe.pid
+        WHERE fe.pid = %s
+        ORDER BY fe.`date` DESC
+        LIMIT 5
+    """
+    out: list[RetrievedRecord] = []
+    with _db_cursor() as cur:
+        cur.execute(sql, (patient_id,))
+        for row in cur.fetchall():
+            # SOAP-derived data is free-text → weakest citation strength.
+            has_soap = any(row.get(k) for k in ("subjective", "objective", "assessment", "plan"))
+            strength = (
+                CitationStrength.FREE_TEXT
+                if has_soap
+                else CitationStrength.STRUCTURED
+            )
+            assessment_plan = "\n".join(filter(None, [
+                f"Assessment: {row['assessment']}" if row.get("assessment") else None,
+                f"Plan: {row['plan']}" if row.get("plan") else None,
+            ]))
+            out.append(RetrievedRecord(
+                table="form_encounter",
+                record_id=str(row["encounter"]),
+                citation_strength=strength,
+                fields={
+                    "date": str(row["date"]) if row.get("date") else None,
+                    "reason": row.get("reason"),
+                    "assessment_plan": assessment_plan or None,
+                },
+            ))
+    return out

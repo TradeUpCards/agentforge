@@ -20,6 +20,24 @@
     var config = window.OE_COPILOT_CONFIG || {};
     var labels = config.labels || {};
 
+    // Announce our pid to the parent shell so chart-bootstrap.js can
+    // update its `chatRenderedForPid` tracker. Fires on every load —
+    // initial open, manual refresh after the patient-changed banner,
+    // browser back/forward, etc. The parent uses this to reconcile its
+    // expectations against reality (vs guessing via timing).
+    try {
+        var pidValue = config.patientId || (function () {
+            var el = document.getElementById('copilot-patient-name');
+            return el ? el.getAttribute('data-pid') : null;
+        })();
+        if (pidValue && window.parent && window.parent !== window) {
+            window.parent.postMessage(
+                { type: 'oe-copilot/panel-loaded', pid: String(pidValue) },
+                '*'
+            );
+        }
+    } catch (e) { /* observability must not break the user path */ }
+
     /** @type {Array<{role: string, content: string}>} */
     var messages = [];
 
@@ -218,6 +236,113 @@
         badge.parentNode.insertBefore(popover, badge.nextSibling);
     }
 
+    /**
+     * Subtle verifier-status indicator in the panel header. After each
+     * successful assistant turn, shows "✓ N verified" (and " · M stripped"
+     * if any claims were atomically stripped before the response shipped).
+     * Lets the clinician see the verifier doing its job on every turn,
+     * not just on refusals — supports the "verifiable trust" defense.
+     */
+    function updateVerifierStatus(verifiedCount, strippedCount) {
+        var el = document.getElementById('copilot-verifier-status');
+        if (!el) return;
+        var parts = ['✓ ' + verifiedCount + ' verified'];
+        if (strippedCount > 0) {
+            parts.push(strippedCount + ' stripped');
+        }
+        el.textContent = parts.join(' · ');
+        el.style.display = '';
+        el.style.color = strippedCount > 0 ? '#b45309' : '#059669';
+    }
+
+    /**
+     * Render a refusal: the LLM declined to answer (verifier 30% rule
+     * fired, HMAC bad, tools failed, etc). Shows the reason AND the
+     * `searched` list so the PCP knows exactly what the agent attempted
+     * before refusing — per ARCHITECTURE.md §6: "Refusal is informative,
+     * not blank. Refusal tells the PCP what was searched and points them
+     * at the chart."
+     */
+    function appendRefusal(reason, searched) {
+        if (!$messagesEl) return;
+        var node = document.createElement('div');
+        node.className = 'copilot-status copilot-status--refused';
+
+        var h = document.createElement('div');
+        h.style.cssText = 'font-weight: 600; margin-bottom: 6px;';
+        h.textContent = reason;
+        node.appendChild(h);
+
+        if (Array.isArray(searched) && searched.length > 0) {
+            var label = document.createElement('div');
+            label.style.cssText = 'margin-top: 8px; margin-bottom: 4px; color: #6b7280; font-size: 12px;';
+            label.textContent = 'What I attempted:';
+            node.appendChild(label);
+
+            var list = document.createElement('ul');
+            list.style.cssText = 'margin: 0 0 6px 0; padding-left: 20px; font-size: 12px;';
+            searched.forEach(function (t) {
+                var li = document.createElement('li');
+                var name = t && t.tool_name ? t.tool_name : 'unknown';
+                var count = (t && typeof t.record_count === 'number') ? t.record_count : 0;
+                var ms = (t && typeof t.latency_ms === 'number') ? t.latency_ms : null;
+                var success = t && t.success !== false;
+                var summary = name + ' — ' + count + ' record' + (count === 1 ? '' : 's');
+                if (ms !== null) summary += ' (' + ms + ' ms)';
+                if (!success) summary += ' (failed: ' + (t.error || 'error') + ')';
+                li.textContent = summary;
+                if (!success) li.style.color = '#b91c1c';
+                list.appendChild(li);
+            });
+            node.appendChild(list);
+
+            var hint = document.createElement('div');
+            hint.style.cssText = 'margin-top: 8px; color: #6b7280; font-size: 12px; font-style: italic;';
+            hint.textContent = 'Review the chart manually — the agent will not make a claim it cannot verify.';
+            node.appendChild(hint);
+        }
+
+        $messagesEl.appendChild(node);
+        $messagesEl.scrollTop = $messagesEl.scrollHeight;
+    }
+
+    /**
+     * Post a client-side metric to the score endpoint, which forwards to
+     * the Python agent's /score endpoint and attaches it to the existing
+     * Langfuse trace. Fire-and-forget — never blocks the UI, never
+     * surfaces errors to the user (observability must not break the
+     * happy path).
+     */
+    function postScore(traceId, name, value) {
+        if (!config.scoreEndpoint || !traceId) {
+            return;
+        }
+        var headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+        if (config.csrfToken) {
+            headers['X-CSRF-Token'] = config.csrfToken;
+        }
+        fetch(config.scoreEndpoint, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: headers,
+            body: JSON.stringify({ trace_id: traceId, name: name, value: value })
+        }).catch(function () { /* swallow */ });
+    }
+
+    /**
+     * Render a small "answered in N.Ns" footer under the most recent
+     * assistant turn. Cheap UX signal that doesn't require leaving the
+     * panel to see latency.
+     */
+    function appendLatencyFooter(seconds) {
+        if (!$messagesEl) return;
+        var node = document.createElement('div');
+        node.className = 'copilot-latency-footer text-muted small';
+        node.style.cssText = 'margin: 4px 0 12px 8px; font-style: italic;';
+        node.textContent = 'answered in ' + seconds.toFixed(1) + 's';
+        $messagesEl.appendChild(node);
+    }
+
     function sendChat() {
         if (!config.endpoint) {
             appendStatus(labels.error || 'Configuration error.', 'error');
@@ -226,6 +351,10 @@
 
         setBusy(true);
         var thinkingNode = appendStatus(labels.thinking || 'Thinking…', 'thinking');
+
+        // t0 — click → fetch start. Bracket the entire user-perceived
+        // latency window (network + agent + render).
+        var t0 = (performance && performance.now) ? performance.now() : Date.now();
 
         var headers = {
             'Content-Type': 'application/json',
@@ -261,16 +390,34 @@
                 indexRetrievedRecords(body.retrieved_records);
                 appendAssistant(body.message.content);
                 messages.push({ role: 'assistant', content: body.message.content });
+                updateVerifierStatus(
+                    Array.isArray(body.claims) ? body.claims.length : 0,
+                    typeof body.claims_stripped === 'number' ? body.claims_stripped : 0
+                );
             } else if (body.status === 'refused') {
                 indexRetrievedRecords([]);
                 var reason = typeof body.reason === 'string' && body.reason
                     ? body.reason
                     : (labels.refused || 'The Co-Pilot declined to answer');
-                appendStatus(reason, 'refused');
+                appendRefusal(reason, body.searched || []);
             } else if (body.status === 'error' && typeof body.detail === 'string') {
                 appendStatus(body.detail, 'error');
             } else {
                 appendStatus(labels.error || 'Something went wrong.', 'error');
+            }
+
+            // t1 — DOM updated. Compute delta, surface in the panel,
+            // log to console, and post to Langfuse score endpoint.
+            var t1 = (performance && performance.now) ? performance.now() : Date.now();
+            var deltaMs = Math.round(t1 - t0);
+            var deltaSec = deltaMs / 1000;
+            appendLatencyFooter(deltaSec);
+            if (window.console && console.log) {
+                console.log('[Co-Pilot] visual_latency_ms=' + deltaMs +
+                    ' trace_id=' + (body && body.trace_id ? body.trace_id : 'null'));
+            }
+            if (body && body.trace_id) {
+                postScore(body.trace_id, 'visual_latency_ms', deltaMs);
             }
         }).catch(function () {
             if (thinkingNode && thinkingNode.parentNode) {
@@ -294,6 +441,86 @@
     }
 
     // --- Wiring ---------------------------------------------------------
+
+    /**
+     * Show a "patient context changed" banner at the top of the chat
+     * panel when the parent shell tells us via postMessage. Click the
+     * refresh button → reload the iframe so we start fresh against the
+     * new patient.
+     */
+    /**
+     * Disable all interactive controls in the chat panel — used when the
+     * patient context has changed and we're waiting for the user to
+     * refresh. Cleaner than letting them type a message that would be
+     * answered against a soon-to-be-discarded conversation.
+     */
+    function disableInteraction(reason) {
+        if ($input) {
+            $input.disabled = true;
+            $input.placeholder = reason || 'Refresh to continue';
+        }
+        if ($send) $send.disabled = true;
+        var starters = document.querySelectorAll('[data-copilot-starter]');
+        for (var i = 0; i < starters.length; i++) {
+            starters[i].disabled = true;
+        }
+    }
+
+    /**
+     * Show a "patient context changed" banner at the top of the chat
+     * panel when the parent shell tells us via postMessage. Click the
+     * refresh button → reload the iframe so we start fresh against the
+     * new patient. Input is disabled while the banner is up — clicking
+     * Refresh is the only forward path.
+     */
+    window.addEventListener('message', function (event) {
+        if (!event.data || event.data.type !== 'oe-copilot/patient-changed') return;
+        // Avoid duplicate banners if multiple events fire.
+        if (document.getElementById('copilot-patient-changed-banner')) return;
+
+        var banner = document.createElement('div');
+        banner.id = 'copilot-patient-changed-banner';
+        banner.style.cssText =
+            'background:#fef3c7; border-bottom:1px solid #fbbf24; ' +
+            'padding:10px 14px; font-size:13px; color:#78350f; ' +
+            'display:flex; align-items:center; justify-content:space-between; gap:12px;';
+
+        var msg = document.createElement('span');
+        msg.textContent = 'Patient context changed in OpenEMR. Refresh chat to reason about the new patient.';
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Refresh';
+        btn.style.cssText =
+            'background:#f59e0b; color:#fff; border:none; ' +
+            'padding:6px 12px; border-radius:4px; font-size:12px; ' +
+            'font-weight:600; cursor:pointer; flex-shrink:0;';
+        btn.addEventListener('click', function () {
+            // Tell the parent we're reloading BEFORE the reload fires.
+            // Parent sets `chatRenderedForPid = null` on receipt, which
+            // suppresses the polling-based banner-trigger in the brief
+            // window between reload start and the new page's
+            // `panel-loaded` message arriving. Without this, the parent
+            // sees `shellPid (Phil) ≠ chatRenderedForPid (Carlos)` again
+            // and re-fires the banner mid-reload — race condition.
+            try {
+                window.parent.postMessage(
+                    { type: 'oe-copilot/about-to-reload' }, '*'
+                );
+            } catch (e) { /* swallow */ }
+            window.location.reload();
+        });
+
+        banner.appendChild(msg);
+        banner.appendChild(btn);
+
+        // Insert at the very top of body so it's the first thing the
+        // clinician sees in the chat panel.
+        document.body.insertBefore(banner, document.body.firstChild);
+
+        // Lock the chat — the only meaningful action now is to refresh.
+        disableInteraction('Refresh to continue with the new patient');
+    });
 
     if ($form) {
         $form.addEventListener('submit', function (event) {

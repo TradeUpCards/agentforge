@@ -65,6 +65,10 @@ class EvalCase:
     """If True, an assertion failure indicates the case found what it was
     designed to find (e.g. a deliberately broken claim that the verifier
     catches). Reported as PASS in the markdown report."""
+    live_llm_required: bool = False
+    """If True, the case only makes sense against a real LLM (not the
+    fixture LLM). Pytest skips these in conftest's fixture-mode default;
+    the CLI runner runs them whenever USE_FIXTURE_LLM is false."""
 
     @classmethod
     def load_all(cls) -> list[EvalCase]:
@@ -83,6 +87,7 @@ class EvalCase:
                     expected=data.get("expected", {}),
                     bad_hmac=bool(data.get("bad_hmac", False)),
                     expected_to_fail=bool(data.get("expected_to_fail", False)),
+                    live_llm_required=bool(data.get("live_llm_required", False)),
                 )
             )
         return cases
