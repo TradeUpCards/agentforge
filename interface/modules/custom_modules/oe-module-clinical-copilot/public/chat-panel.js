@@ -89,7 +89,11 @@
                 }).join('');
                 return '<ul>' + items + '</ul>';
             }
-            return '<p>' + block.replace(/\n/g, '<br>') + '</p>';
+            // <div> instead of <p> so the citation popover (also a
+             // <div>) can be inserted inline as a sibling without
+             // triggering the browser's "block-inside-paragraph"
+             // rendering quirks (the empty-on-first-click bug).
+             return '<div class="copilot-paragraph">' + block.replace(/\n/g, '<br>') + '</div>';
         });
 
         return rendered.join('');
@@ -102,18 +106,18 @@
      * if one is available.
      */
     function linkCitations(html) {
-        // Bracketed form first so we don't double-wrap.
-        html = html.replace(/\[([a-z_][a-z0-9_]*:[A-Za-z0-9_\-]+)\]/g, function (_match, id) {
+        // Only match the bracketed form `[table:id]`. The bare-form
+        // fallback we used to have here matched inside the badge HTML
+        // we'd just produced (the `>` in the preceding-char class
+        // matched the closing `>` of the button's opening tag), wrapping
+        // every bracketed citation in a SECOND identical button. That
+        // produced nested <button><button>...</button>...</button> in
+        // the DOM, and any popover insert ended up inside the outer
+        // button. The system prompt instructs the LLM to use brackets,
+        // so the bare-form fallback isn't needed.
+        return html.replace(/\[([a-z_][a-z0-9_]*:[A-Za-z0-9_\-]+)\]/g, function (_match, id) {
             return renderCitationBadge(id);
         });
-        // Bare form: only when not already inside a tag attribute.
-        html = html.replace(
-            /(^|[\s(>])([a-z_][a-z0-9_]{2,}:[0-9]+)(?=$|[\s.,;:)<])/g,
-            function (_match, prefix, id) {
-                return prefix + renderCitationBadge(id);
-            }
-        );
-        return html;
     }
 
     function renderCitationBadge(recordId) {
@@ -141,7 +145,14 @@
         wrapper.appendChild(roleLabel);
         wrapper.appendChild(body);
         $messagesEl.appendChild(wrapper);
-        $messagesEl.scrollTop = $messagesEl.scrollHeight;
+        if (role === 'user') {
+            // Anchor the viewport to the new user message so the question
+            // stays at the top and the response renders visibly below it.
+            // Without this, long responses push the question off-screen
+            // and the user has to scroll back up to read it.
+            $messagesEl.scrollTop = wrapper.offsetTop;
+        }
+        // Assistant appends deliberately leave scroll alone — see above.
         return wrapper;
     }
 
@@ -160,7 +171,10 @@
         wrapper.className = 'copilot-status copilot-status--' + (modifier || 'info');
         wrapper.textContent = text;
         $messagesEl.appendChild(wrapper);
-        $messagesEl.scrollTop = $messagesEl.scrollHeight;
+        // No auto-scroll: the viewport is already anchored to the user's
+        // most recent question (see appendMessageNode); status nodes
+        // ("Thinking…", errors) appear below it and remain visible
+        // without pushing the question out of view.
         return wrapper;
     }
 
@@ -191,49 +205,102 @@
         });
     }
 
-    function showCitationDetails(badge) {
-        var id = badge.getAttribute('data-record-id');
-        var record = lastRetrievedRecords[id];
+    var openPopover = null;
 
-        // Toggle: if a popover already exists on this badge, remove it.
-        var existing = badge.nextElementSibling;
-        if (existing && existing.classList.contains('copilot-citation__popover')) {
-            existing.parentNode.removeChild(existing);
-            return;
-        }
-        // Close any other open popover.
-        Array.prototype.forEach.call(
-            document.querySelectorAll('.copilot-citation__popover'),
-            function (el) { el.parentNode.removeChild(el); }
-        );
-
+    function buildCitationPopover(recordId) {
+        var record = lastRetrievedRecords[recordId];
         var popover = document.createElement('div');
         popover.className = 'copilot-citation__popover';
 
         if (!record) {
             popover.textContent = labels.noRecord || 'No record details available';
-        } else {
-            var header = document.createElement('div');
-            header.className = 'copilot-citation__header';
-            header.textContent = (labels.source || 'Source') + ': ' + id +
-                (record.citation_strength ? ' (' + record.citation_strength + ')' : '');
-            popover.appendChild(header);
+            return popover;
+        }
 
-            if (record.fields && typeof record.fields === 'object') {
-                var dl = document.createElement('dl');
-                Object.keys(record.fields).forEach(function (key) {
-                    var dt = document.createElement('dt');
-                    dt.textContent = key;
-                    var dd = document.createElement('dd');
-                    dd.textContent = String(record.fields[key]);
-                    dl.appendChild(dt);
-                    dl.appendChild(dd);
-                });
-                popover.appendChild(dl);
+        var header = document.createElement('div');
+        header.className = 'copilot-citation__header';
+        header.textContent = (labels.source || 'Source') + ': ' + recordId +
+            (record.citation_strength ? ' (' + record.citation_strength + ')' : '');
+        popover.appendChild(header);
+
+        if (record.fields && typeof record.fields === 'object') {
+            var grid = document.createElement('div');
+            grid.className = 'copilot-citation__fields';
+            Object.keys(record.fields).forEach(function (key) {
+                var labelEl = document.createElement('div');
+                labelEl.className = 'copilot-citation__field-label';
+                labelEl.textContent = key;
+                var valueEl = document.createElement('div');
+                valueEl.className = 'copilot-citation__field-value';
+                valueEl.textContent = String(record.fields[key]);
+                grid.appendChild(labelEl);
+                grid.appendChild(valueEl);
+            });
+            popover.appendChild(grid);
+        }
+        return popover;
+    }
+
+    function closeOpenPopover() {
+        if (openPopover && openPopover.popover && openPopover.popover.parentNode) {
+            openPopover.popover.parentNode.removeChild(openPopover.popover);
+        }
+        if (openPopover) {
+            requestChartHighlightClear();
+        }
+        openPopover = null;
+    }
+
+    function showCitationDetails(badge) {
+        var id = badge.getAttribute('data-record-id');
+
+        if (openPopover && openPopover.badge === badge) {
+            closeOpenPopover();
+            return;
+        }
+        closeOpenPopover();
+
+        var popover = buildCitationPopover(id);
+        var parent = badge.parentNode;
+        if (parent) {
+            if (badge.nextSibling) {
+                parent.insertBefore(popover, badge.nextSibling);
+            } else {
+                parent.appendChild(popover);
             }
         }
 
-        badge.parentNode.insertBefore(popover, badge.nextSibling);
+        openPopover = { badge: badge, popover: popover, recordId: id };
+        requestChartHighlight(id);
+    }
+
+    /**
+     * Send a postMessage to the parent (top) window asking it to
+     * highlight the cited record in the chart iframe. Best-effort —
+     * chart-bootstrap.js scans the active iframe's DOM for matching
+     * elements and adds a yellow-flash class. Silent no-op if no
+     * match is found, since the chart's HTML structure varies by tab.
+     */
+    function requestChartHighlight(recordId) {
+        try {
+            var record = lastRetrievedRecords[recordId];
+            var parts = String(recordId).split(':');
+            var table = parts[0] || '';
+            var bareId = parts.slice(1).join(':') || '';
+            window.parent.postMessage({
+                type: 'oe-copilot/highlight-record',
+                recordId: recordId,
+                table: table,
+                bareId: bareId,
+                fields: record && record.fields ? record.fields : null,
+            }, '*');
+        } catch (_) { /* parent unreachable — silent no-op */ }
+    }
+
+    function requestChartHighlightClear() {
+        try {
+            window.parent.postMessage({ type: 'oe-copilot/clear-highlight' }, '*');
+        } catch (_) { /* silent */ }
     }
 
     /**
@@ -303,7 +370,9 @@
         }
 
         $messagesEl.appendChild(node);
-        $messagesEl.scrollTop = $messagesEl.scrollHeight;
+        // Refusal node renders below the user's message; keep the user's
+        // question anchored at the top so they can read it alongside
+        // the explanation rather than scrolling back up.
     }
 
     /**
@@ -543,10 +612,14 @@
 
     if ($messagesEl) {
         $messagesEl.addEventListener('click', function (event) {
-            var target = event.target;
-            if (target && target.classList && target.classList.contains('copilot-citation')) {
+            var badge = event.target && event.target.closest
+                ? event.target.closest('.copilot-citation')
+                : null;
+            if (badge) {
                 event.preventDefault();
-                showCitationDetails(target);
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+                showCitationDetails(badge);
             }
         });
     }

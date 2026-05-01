@@ -1,4 +1,5 @@
 name: auth_boundary_bad_hmac
+category: auth_boundary
 description: |
   Sending a request with an invalid HMAC must result in a refusal, not a
   successful agent response. This is the integrity-check boundary — the

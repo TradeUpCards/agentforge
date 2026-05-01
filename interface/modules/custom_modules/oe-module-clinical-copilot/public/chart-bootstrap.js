@@ -161,6 +161,16 @@
         title.className = 'oe-copilot-drawer__title';
         title.textContent = 'Clinical Co-Pilot';
 
+        // Refresh: reloads the chat-panel iframe so a sticky session
+        // picks up new chat-panel.js / .css. Loses current conversation
+        // by design — same affordance as opening a fresh tab.
+        var refreshBtn = hostDoc.createElement('button');
+        refreshBtn.className = 'oe-copilot-drawer__refresh';
+        refreshBtn.type = 'button';
+        refreshBtn.setAttribute('aria-label', 'Refresh chat panel');
+        refreshBtn.title = 'Refresh chat panel (clears current conversation)';
+        refreshBtn.innerHTML = '&#x21bb;'; // ↻
+
         var closeBtn = hostDoc.createElement('button');
         closeBtn.className = 'oe-copilot-drawer__close';
         closeBtn.type = 'button';
@@ -168,6 +178,7 @@
         closeBtn.textContent = '×'; // ×
 
         header.appendChild(title);
+        header.appendChild(refreshBtn);
         header.appendChild(closeBtn);
 
         var body = hostDoc.createElement('div');
@@ -215,6 +226,7 @@
             drawer: drawer,
             body: body,
             closeBtn: closeBtn,
+            refreshBtn: refreshBtn,
             chevron: chevron,
             launcher: launcher,
         };
@@ -236,6 +248,11 @@
             var f = iframes[i];
             // Skip iframes that aren't laid out (display:none or detached).
             if (f.offsetParent === null) continue;
+            // Skip the drawer's own chat iframe — it's not the chart.
+            // Without this, when the drawer is open and wide, it could
+            // outweigh the chart iframe and citation-highlight searches
+            // would target the chat panel instead of the patient chart.
+            if (f.classList && f.classList.contains('oe-copilot-drawer__iframe')) continue;
             var rect = f.getBoundingClientRect();
             // Skip tiny iframes (probably hidden trackers or chrome bits).
             if (rect.width < 200 || rect.height < 200) continue;
@@ -447,8 +464,325 @@
                 // Clear so detection short-circuits on `!chatRenderedForPid`
                 // until the next panel-loaded message lands.
                 chatRenderedForPid = null;
+            } else if (e.data.type === 'oe-copilot/highlight-record') {
+                highlightRecordInChart(e.data);
+            } else if (e.data.type === 'oe-copilot/clear-highlight') {
+                clearChartHighlights();
             }
         });
+
+        // ----- Citation -> chart-record highlighting -----
+        //
+        // When a clinician clicks a citation badge in the chat panel,
+        // chat-panel.js posts an `oe-copilot/highlight-record` message
+        // up to the top window. We try to find the matching record in
+        // the active chart iframe's DOM and add a yellow-flash class
+        // (defined in chart-bootstrap.css). Best-effort: the chart's
+        // HTML structure varies by tab — when nothing matches, silent
+        // no-op (better than a confusing partial highlight).
+
+        // Same-origin docs we might highlight in: the active tab iframe,
+        // plus any same-origin iframes nested inside it (the demographics
+        // dashboard renders cards in nested iframes, e.g. immunizations,
+        // labs, billing). Without recursion, hits inside those nested
+        // frames would be missed.
+        function collectSearchableDocs() {
+            var docs = [];
+            var f = findActiveTabIframe();
+            if (!f) return docs;
+            try {
+                if (f.contentDocument) docs.push(f.contentDocument);
+            } catch (_) { return docs; }
+            // Recurse into any same-origin iframes inside that doc.
+            try {
+                var nested = docs[0].querySelectorAll('iframe, frame');
+                for (var i = 0; i < nested.length; i++) {
+                    try {
+                        var nd = nested[i].contentDocument;
+                        if (nd) docs.push(nd);
+                    } catch (_) { /* cross-origin nested — skip */ }
+                }
+            } catch (_) { /* nothing */ }
+            return docs;
+        }
+
+        // Tracks elements we've highlighted (across multiple docs) so
+        // clear() can find them all without re-querying.
+        var _highlightedEls = [];
+
+        function applyInlineHighlight(el) {
+            // Belt-and-braces: the CSS class should win, but if the host
+            // page's own !important rules outrank ours we paint via
+            // inline style as a fallback. Stash the prior values so we
+            // can restore on clear.
+            el.__oeCopilotPriorBg = el.style.backgroundColor;
+            el.__oeCopilotPriorOutline = el.style.outline;
+            el.style.backgroundColor = '#fef3c7';
+            el.style.outline = '2px solid #f59e0b';
+        }
+        function removeInlineHighlight(el) {
+            el.style.backgroundColor = el.__oeCopilotPriorBg || '';
+            el.style.outline = el.__oeCopilotPriorOutline || '';
+            delete el.__oeCopilotPriorBg;
+            delete el.__oeCopilotPriorOutline;
+        }
+
+        function clearChartHighlights() {
+            for (var i = 0; i < _highlightedEls.length; i++) {
+                var el = _highlightedEls[i];
+                try {
+                    el.classList.remove('oe-copilot-chart-highlight');
+                    removeInlineHighlight(el);
+                } catch (_) { /* el may be detached */ }
+            }
+            _highlightedEls = [];
+        }
+
+        // Climb from a text-matching node to the nearest container
+        // that's reasonably-sized (a row, a card, a list item) — not
+        // the document body or a wrapping section that'd highlight
+        // the entire pane.
+        function pickHighlightContainer(textNode) {
+            var el = textNode.parentElement;
+            while (el && el.tagName !== 'BODY' && el.tagName !== 'HTML') {
+                var rect = el.getBoundingClientRect();
+                // A "natural" row-or-card sits between ~15px tall (a single
+                // line) and ~200px (a multi-line card). Wider than 50px to
+                // exclude tiny inline spans.
+                if (rect.height >= 14 && rect.height <= 220 && rect.width >= 60) {
+                    return el;
+                }
+                el = el.parentElement;
+            }
+            return textNode.parentElement || null;
+        }
+
+        function findMatchByText(doc, needle) {
+            var n = needle.toLowerCase().trim();
+            if (n.length < 4) return null;
+            try {
+                var walker = doc.createTreeWalker(
+                    doc.body || doc.documentElement,
+                    NodeFilter.SHOW_TEXT,
+                    null
+                );
+                var node;
+                while ((node = walker.nextNode())) {
+                    var text = (node.nodeValue || '').toLowerCase();
+                    if (text.indexOf(n) !== -1) {
+                        return pickHighlightContainer(node);
+                    }
+                }
+            } catch (_) { /* walker not available — silent skip */ }
+            return null;
+        }
+
+        // Map citation table -> destination in OpenEMR's tab system.
+        // tabName is the short code OpenEMR uses for tab identity (see
+        // interface/main/tabs/js/frame_proxies.js — 'enc' for the
+        // encounter list, 'med' for prescriptions, etc).
+        // relativeUrl is appended to /interface/ via left_nav.loadFrame;
+        // absoluteUrl is for URLs that don't live under /interface/
+        // (controller.php routes etc).
+        var TABLE_NAV_DESTINATIONS = {
+            'form_encounter': {
+                tabName: 'enc',
+                relativeUrl: 'patient_file/history/encounters.php',
+            },
+            // Problems, allergies, and medications all render on the
+            // Dashboard. (We tried `controller.php?prescription&list&id=N`
+            // for prescriptions, but that URL is meant to be opened in
+            // a popup dialog via OpenEMR's `editScripts()`; loading it
+            // standalone in a tab iframe errors.)
+            'lists': {
+                tabName: 'pat',
+                relativeUrl: 'patient_file/summary/demographics.php',
+            },
+            'prescriptions': {
+                tabName: 'pat',
+                relativeUrl: 'patient_file/summary/demographics.php',
+            },
+            // procedure_result intentionally not mapped — silent no-op
+            // when the cited lab isn't already visible on the current
+            // page. The Patient Results page (orders/orders_results.php)
+            // is too heavyweight a destination for the demo, and the
+            // Dashboard's labdata fragment is just a plain-text summary
+            // of the single most recent lab.
+        };
+
+        function navigateOpenemrTab(dest) {
+            try {
+                // Compare the open tab iframe's current URL to where
+                // we want to land. Only skip re-navigation when both
+                // the tab is open AND already at (a path matching) the
+                // target URL. Otherwise we'd activate the wrong page —
+                // e.g. 'enc' tab open at encounters.php, procedure_result
+                // citation wants orders_results.php in the same tab.
+                var existing = hostDoc.querySelector('iframe[name="' + dest.tabName + '"]');
+                var targetPath = (dest.relativeUrl || '').split('?')[0];
+                var alreadyOnTargetPage = false;
+                if (existing && targetPath) {
+                    try {
+                        var currentPath = existing.contentWindow.location.pathname || '';
+                        if (currentPath.indexOf(targetPath) !== -1) {
+                            alreadyOnTargetPage = true;
+                        }
+                    } catch (_) { /* cross-origin — assume not at target */ }
+                }
+                if (existing && alreadyOnTargetPage &&
+                    typeof hostWin.activateTabByName === 'function') {
+                    hostWin.activateTabByName(dest.tabName, true);
+                    return true;
+                }
+                if (dest.relativeUrl && hostWin.left_nav &&
+                    typeof hostWin.left_nav.loadFrame === 'function') {
+                    // OpenEMR's documented entry point. Goes through
+                    // navigateTab + activateTabByName so the tab strip
+                    // updates, no new browser tab is opened. If the tab
+                    // already exists, navigateTab updates its URL.
+                    hostWin.left_nav.loadFrame(dest.tabName + '1', dest.tabName, dest.relativeUrl);
+                    return true;
+                }
+                if (dest.absoluteUrl && typeof hostWin.navigateTab === 'function') {
+                    var pid = (typeof detectActivePid === 'function') ? detectActivePid() : '';
+                    var url = (hostWin.webroot_url || '') + dest.absoluteUrl(pid || '');
+                    hostWin.navigateTab(url, dest.tabName, function () {
+                        if (typeof hostWin.activateTabByName === 'function') {
+                            hostWin.activateTabByName(dest.tabName, true);
+                        }
+                    });
+                    return true;
+                }
+            } catch (_) { /* tab API unavailable — caller will silently fall through */ }
+            return false;
+        }
+
+        function highlightRecordInChart(data, attempt) {
+            attempt = attempt || 0;
+            clearChartHighlights();
+
+            // alwaysNavigate destinations skip in-page search on the
+            // first attempt — the current page's incidental matches
+            // (e.g., dashboard's plain-text lab summary) aren't the
+            // intended target. Force navigation to the canonical page
+            // first, then run the search after navigation.
+            var dest = TABLE_NAV_DESTINATIONS[data.table];
+            if (attempt === 0 && dest && dest.alwaysNavigate) {
+                if (navigateOpenemrTab(dest)) {
+                    if (hostWin.console) {
+                        hostWin.console.log(
+                            '[Co-Pilot] always-navigating to tab', dest.tabName,
+                            'for', data.recordId
+                        );
+                    }
+                    setTimeout(function () { highlightRecordInChart(data, 1); }, 1500);
+                    return;
+                }
+            }
+
+            var docs = collectSearchableDocs();
+            if (docs.length === 0) {
+                if (hostWin.console) hostWin.console.log('[Co-Pilot] highlight: no chart doc found');
+                return;
+            }
+
+            var bareId = data.bareId || '';
+            var fields = data.fields || {};
+            var match = null;
+
+            // Strategy 1: data-* attributes / id-suffixed rows OpenEMR
+            // uses on its chart pages. The encounter list specifically
+            // uses `<tr id="<encounter_id>~<formatted_date>">` (see
+            // interface/patient_file/history/encounters.php), so we
+            // match `[id^="<id>~"]` for that format.
+            if (bareId) {
+                var attrSelectors = [
+                    '[data-list-id="' + bareId + '"]',
+                    '[data-list_id="' + bareId + '"]',
+                    '[data-id="' + bareId + '"]',
+                    '[data-record-id="' + bareId + '"]',
+                    '#problem_' + bareId,
+                    '#prescription_' + bareId,
+                    '#encounter_' + bareId,
+                    'tr[id^="' + bareId + '~"]',  // encounters.php row format
+                    'tr.encrow[id^="' + bareId + '~"]',
+                    'a[href*="set_encounter=' + bareId + '"]',
+                    'tr[id$="_' + bareId + '"]',
+                ];
+                for (var d = 0; d < docs.length && !match; d++) {
+                    for (var s = 0; s < attrSelectors.length && !match; s++) {
+                        try {
+                            var hits = docs[d].querySelectorAll(attrSelectors[s]);
+                            if (hits.length > 0) match = hits[0];
+                        } catch (_) { /* invalid selector — skip */ }
+                    }
+                }
+            }
+
+            // Strategy 2: text-based search across all candidate docs,
+            // climbing to a sensible row/card container.
+            if (!match) {
+                var needles = [
+                    fields.title, fields.drug, fields.medication,
+                    fields.name, fields.diagnosis, fields.allergy,
+                    fields.description,
+                ].filter(function (v) { return v && String(v).trim().length >= 4; });
+                for (var n = 0; n < needles.length && !match; n++) {
+                    for (var d2 = 0; d2 < docs.length && !match; d2++) {
+                        match = findMatchByText(docs[d2], String(needles[n]));
+                    }
+                }
+            }
+
+            if (!match) {
+                // Not on the current chart page. On the very first
+                // attempt only, ask OpenEMR's tab system to open/select
+                // the tab where this record actually lives, then retry
+                // a few times (the new tab's iframe load is async and
+                // may include AJAX content that settles a beat after
+                // `load` fires).
+                if (attempt === 0) {
+                    // dest already looked up at the top of the function.
+                    if (dest && navigateOpenemrTab(dest)) {
+                        if (hostWin.console) {
+                            hostWin.console.log(
+                                '[Co-Pilot] navigated to tab', dest.tabName,
+                                'for', data.recordId
+                            );
+                        }
+                        // Single retry after the new tab's iframe has
+                        // had time to load + render. attempt=1 prevents
+                        // a re-navigation if the retry also misses.
+                        setTimeout(function () { highlightRecordInChart(data, 1); }, 1500);
+                        return;
+                    }
+                }
+                if (hostWin.console) {
+                    hostWin.console.log(
+                        '[Co-Pilot] highlight: no match for', data.recordId,
+                        'attempt=', attempt, 'fields=', fields
+                    );
+                }
+                return;
+            }
+
+            // If we matched an anchor or other small element nested inside
+            // a row, climb to the row so the highlight covers the whole
+            // entry. closest() returns null if no matching ancestor.
+            if (match.tagName === 'A' || match.tagName === 'SPAN') {
+                var row = match.closest('tr, li');
+                if (row) match = row;
+            }
+
+            try {
+                match.classList.add('oe-copilot-chart-highlight');
+                applyInlineHighlight(match);
+                _highlightedEls.push(match);
+                match.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            } catch (_) {
+                try { match.scrollIntoView(); } catch (__) { /* nothing */ }
+            }
+        }
 
         // Catch iframes that are added dynamically (OpenEMR's tab system
         // creates new iframes when a tab is opened for the first time).
@@ -553,6 +887,11 @@
         dom.launcher.addEventListener('click', open);
         dom.closeBtn.addEventListener('click', close);
         dom.chevron.addEventListener('click', toggle);
+        dom.refreshBtn.addEventListener('click', function () {
+            // Force-reload the chat panel iframe with a fresh URL so
+            // chat-panel.js / .css come back through the cache busters.
+            ensureIframe(true);
+        });
         hostDoc.addEventListener('keydown', function (e) {
             if (e.key === 'Escape' && dom.drawer.classList.contains('is-open')) {
                 close();

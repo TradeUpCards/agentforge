@@ -15,7 +15,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +58,31 @@ class ClaimType(str, Enum):
     RULE_FLAG = "rule_flag"       # "warfarin + new NSAID — bleeding risk per X"
 
 
+# LLM frequently produces shorter or pluralized aliases; map them onto
+# the canonical enum values rather than failing the whole response. The
+# verifier still treats them by their target type; we just don't
+# fabricate strictness about a label the LLM consistently misnames.
+_CLAIM_TYPE_ALIASES: dict[str, str] = {
+    "diagnosis": "history",
+    "diagnoses": "history",
+    "problem": "history",
+    "condition": "history",
+    "medication": "fact",
+    "medications": "fact",
+    "med": "fact",
+    "lab": "lab_value",
+    "labs": "lab_value",
+    "result": "lab_value",
+    "allergy": "fact",
+    "allergies": "fact",
+    "encounter": "fact",
+    "absent": "absence",
+    "no_data": "absence",
+    "rule": "rule_flag",
+    "flag": "rule_flag",
+}
+
+
 class Claim(BaseModel):
     """A factual statement the LLM emits about THIS patient.
 
@@ -74,6 +99,25 @@ class Claim(BaseModel):
     # Filled in by the verifier post-generation:
     verified: bool | None = None
     verifier_note: str | None = None
+
+    @field_validator("claim_type", mode="before")
+    @classmethod
+    def _normalize_claim_type(cls, v: object) -> object:
+        # Accept canonical enum values as-is. Map common LLM shorthand
+        # ("diagnosis" → "history", etc.) to the enum value. Anything we
+        # don't recognize falls through to FACT — safer than refusing
+        # the whole response on a label mismatch.
+        if isinstance(v, ClaimType):
+            return v
+        if isinstance(v, str):
+            normalized = v.strip().lower().replace("-", "_").replace(" ", "_")
+            valid_values = {ct.value for ct in ClaimType}
+            if normalized in valid_values:
+                return normalized
+            if normalized in _CLAIM_TYPE_ALIASES:
+                return _CLAIM_TYPE_ALIASES[normalized]
+            return ClaimType.FACT.value
+        return v
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,39 @@
+name: synthea_followup_medications
+category: happy_path
+description: |
+  Live-data eval against Guadalupe Botsford (patient_id 92), exercising
+  UC3 (multi-turn free-text Q&A). The PCP asks specifically about the
+  patient's current medications — the agent should produce a focused
+  list of active meds with citations, not a generic UC1 brief.
+
+  Tests two things:
+
+  1. The agent routes a focused question to the right tools (no need
+     to fetch labs or encounters when the user asked about meds).
+  2. Multiple specific meds are surfaced with verifiable citations.
+
+  Distinct from cases 09/10 which exercise UC1 (canned starter prompt).
+  This one is the brief's "multi-turn" requirement against real data.
+
+patient_id: 92
+user_id: 1
+live_llm_required: true
+live_db_required: true
+
+messages:
+  - role: user
+    content: "What medications is this patient currently on?"
+
+expected:
+  status: ok
+  min_claims: 3
+  min_citations: 3
+  must_mention:
+    # Three meds we KNOW are on Guadalupe's active list. Distinct
+    # drug classes (anti-diabetic, antihypertensive, antiplatelet)
+    # so we're not just testing one therapeutic area.
+    - metformin
+    - lisinopril
+    - simvastatin
+  expect_tools_called:
+    - get_active_medications

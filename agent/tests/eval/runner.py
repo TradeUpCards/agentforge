@@ -59,6 +59,10 @@ class EvalCase:
     user_id: int
     messages: list[dict[str, str]]
     expected: dict[str, Any]
+    category: str = "uncategorized"
+    """Label used to slice metrics in the report. One of: happy_path,
+    auth_boundary, refusal, edge_case, ambiguous, prompt_injection.
+    Defaults to 'uncategorized' when a YAML omits the field."""
     bad_hmac: bool = False
     """If True, send an invalid HMAC to test the auth boundary."""
     expected_to_fail: bool = False
@@ -69,6 +73,15 @@ class EvalCase:
     """If True, the case only makes sense against a real LLM (not the
     fixture LLM). Pytest skips these in conftest's fixture-mode default;
     the CLI runner runs them whenever USE_FIXTURE_LLM is false."""
+    live_db_required: bool = False
+    """If True, the case targets a specific Synthea-imported patient and
+    only makes sense against the real DB. Skipped when USE_FIXTURE_DATA
+    is true (which redirects all queries to the canned Maria fixture)."""
+    fixture_data_required: bool = False
+    """If True, the case is calibrated against the Maria fixture's
+    specific record content (e.g., asserts must_mention 'metformin').
+    Skipped when USE_FIXTURE_DATA is false because patient_id=1 in the
+    live DB likely has different data."""
 
     @classmethod
     def load_all(cls) -> list[EvalCase]:
@@ -85,9 +98,12 @@ class EvalCase:
                     user_id=int(data.get("user_id", 1)),
                     messages=data["messages"],
                     expected=data.get("expected", {}),
+                    category=str(data.get("category", "uncategorized")),
                     bad_hmac=bool(data.get("bad_hmac", False)),
                     expected_to_fail=bool(data.get("expected_to_fail", False)),
                     live_llm_required=bool(data.get("live_llm_required", False)),
+                    live_db_required=bool(data.get("live_db_required", False)),
+                    fixture_data_required=bool(data.get("fixture_data_required", False)),
                 )
             )
         return cases
@@ -119,6 +135,8 @@ class CaseResult:
     status_code: int
     response: dict[str, Any]
     failures: list[str] = field(default_factory=list)
+    skipped: bool = False
+    skip_reason: str = ""
 
     @property
     def passed(self) -> bool:
@@ -216,7 +234,31 @@ def run_all() -> list[CaseResult]:
     settings = get_settings()
     client = TestClient(app)
     cases = EvalCase.load_all()
-    return [run_case(client, c, settings.openemr_hmac_secret) for c in cases]
+    results: list[CaseResult] = []
+    for case in cases:
+        # Skip cases that require a live LLM in fixture-LLM mode, or
+        # require live DB data in fixture-data mode. Mirrors the pytest
+        # conftest skip logic — without this, Synthea-targeted cases
+        # would fail in CI because patient_id 92 returns the Maria
+        # fixture (or empty), not Guadalupe's actual chart.
+        skip_reason: str | None = None
+        if case.live_llm_required and settings.use_fixture_llm:
+            skip_reason = "requires live LLM (USE_FIXTURE_LLM=true)"
+        elif case.live_db_required and settings.use_fixture_data:
+            skip_reason = "requires live DB data (USE_FIXTURE_DATA=true)"
+        elif case.fixture_data_required and not settings.use_fixture_data:
+            skip_reason = "calibrated against fixture data (USE_FIXTURE_DATA=false)"
+        if skip_reason:
+            results.append(CaseResult(
+                case=case,
+                status_code=0,
+                response={},
+                skipped=True,
+                skip_reason=skip_reason,
+            ))
+            continue
+        results.append(run_case(client, case, settings.openemr_hmac_secret))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -233,41 +275,90 @@ def write_report(results: list[CaseResult], path: Path | None = None) -> Path:
     mode = "fixture" if settings.use_fixture_llm else "live"
 
     total = len(results)
-    real_failures = [r for r in results if not r.passed and not r.case.expected_to_fail]
-    expected_failures_seen = [r for r in results if not r.passed and r.case.expected_to_fail]
-    passed_count = total - len(real_failures) - len(expected_failures_seen)
+    skipped = [r for r in results if r.skipped]
+    non_skipped = [r for r in results if not r.skipped]
+    real_failures = [
+        r for r in non_skipped if not r.passed and not r.case.expected_to_fail
+    ]
+    expected_failures_seen = [
+        r for r in non_skipped if not r.passed and r.case.expected_to_fail
+    ]
+    passed_count = (
+        len(non_skipped) - len(real_failures) - len(expected_failures_seen)
+    )
     expected_failures_caught = len(expected_failures_seen)
+
+    # Group results by category for the slice-by-scenario section.
+    by_category: dict[str, list[CaseResult]] = {}
+    for r in results:
+        by_category.setdefault(r.case.category, []).append(r)
 
     lines: list[str] = []
     lines.append(f"# Eval run — {timestamp}")
     lines.append("")
     lines.append(f"**Mode:** `{mode}`  ")
     lines.append(f"**Cases:** {total}  ")
+    lines.append(f"**Clean passes:** {passed_count}  ")
     lines.append(f"**Real failures:** {len(real_failures)}  ")
     lines.append(f"**Expected-fail cases that fired:** {expected_failures_caught}  ")
-    lines.append(f"**Clean passes:** {passed_count}")
+    lines.append(f"**Skipped (live-LLM-only):** {len(skipped)}")
     lines.append("")
 
-    for r in results:
-        if r.passed:
-            badge = "✅ PASS"
-        elif r.case.expected_to_fail:
-            badge = "✅ PASS (expected-fail caught)"
-        else:
-            badge = "❌ FAIL"
+    # Per-category pass rate — labeled-scenario surface that lets a
+    # reviewer see at a glance which classes of failure mode are passing
+    # vs which are gaps.
+    if by_category:
+        lines.append("## Pass rate by category")
+        lines.append("")
+        lines.append("| Category | Cases | Passed | Real failures | Skipped |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for cat in sorted(by_category):
+            cat_results = by_category[cat]
+            cat_skipped = sum(1 for r in cat_results if r.skipped)
+            cat_passed = sum(
+                1 for r in cat_results
+                if not r.skipped and (r.passed or r.case.expected_to_fail)
+            )
+            cat_failed = sum(
+                1 for r in cat_results
+                if not r.skipped and not r.passed and not r.case.expected_to_fail
+            )
+            lines.append(
+                f"| `{cat}` | {len(cat_results)} | {cat_passed} | {cat_failed} | {cat_skipped} |"
+            )
+        lines.append("")
 
-        lines.append(f"## {badge} — `{r.case.name}`")
-        if r.case.description:
+    # Per-case detail, grouped by category so the report reads as
+    # "happy path: ✓✓✓✓; auth: ✓; refusal: ✓; edge case: ✓; ambiguous:
+    # ✓; prompt_injection: ✓".
+    for cat in sorted(by_category):
+        lines.append(f"## Category: `{cat}`")
+        lines.append("")
+        for r in by_category[cat]:
+            if r.skipped:
+                badge = "⏭ SKIPPED"
+            elif r.passed:
+                badge = "✅ PASS"
+            elif r.case.expected_to_fail:
+                badge = "✅ PASS (expected-fail caught)"
+            else:
+                badge = "❌ FAIL"
+
+            lines.append(f"### {badge} — `{r.case.name}`")
+            if r.case.description:
+                lines.append("")
+                lines.append(r.case.description)
             lines.append("")
-            lines.append(r.case.description)
-        lines.append("")
-        lines.append(f"- HTTP status: `{r.status_code}`")
-        lines.append(f"- Response status: `{r.response.get('status')}`")
-        if r.failures:
-            lines.append("- Assertion failures:")
-            for f in r.failures:
-                lines.append(f"  - `{f}`")
-        lines.append("")
+            if r.skipped:
+                lines.append(f"- Skip reason: {r.skip_reason}")
+            else:
+                lines.append(f"- HTTP status: `{r.status_code}`")
+                lines.append(f"- Response status: `{r.response.get('status')}`")
+                if r.failures:
+                    lines.append("- Assertion failures:")
+                    for f in r.failures:
+                        lines.append(f"  - `{f}`")
+            lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
@@ -283,8 +374,16 @@ def write_report(results: list[CaseResult], path: Path | None = None) -> Path:
 def main() -> None:
     results = run_all()
     path = write_report(results)
+    skipped = [r for r in results if r.skipped]
+    real_failures = [
+        r for r in results
+        if not r.skipped and not r.passed and not r.case.expected_to_fail
+    ]
     print(f"Wrote eval report: {path}")
-    real_failures = [r for r in results if not r.passed and not r.case.expected_to_fail]
+    if skipped:
+        print(f"\n{len(skipped)} case(s) skipped (live-LLM-only):")
+        for r in skipped:
+            print(f"  - {r.case.name}")
     if real_failures:
         print(f"\n{len(real_failures)} real failure(s):")
         for r in real_failures:

@@ -5,6 +5,28 @@
  * with .oe-copilot-* so it can't conflict with OpenEMR's existing styles.
  */
 
+/* Citation -> chart-record highlight. Applied by chart-bootstrap.js when
+ * a citation badge is clicked in the chat panel and the corresponding row
+ * is found in the active tab's iframe. Yellow flash that settles into a
+ * persistent highlight; cleared when the user closes the popover.
+ *
+ * `!important` because chart rows have their own background-color rules
+ * (alternating zebra striping, hover, etc.) that would otherwise win. */
+.oe-copilot-chart-highlight,
+.oe-copilot-chart-highlight > td,
+.oe-copilot-chart-highlight > th {
+    background-color: #fef3c7 !important;
+    transition: background-color 240ms ease, box-shadow 240ms ease;
+}
+.oe-copilot-chart-highlight {
+    box-shadow: inset 0 0 0 2px #f59e0b;
+    animation: oe-copilot-highlight-flash 700ms ease-out;
+}
+@keyframes oe-copilot-highlight-flash {
+    0%   { background-color: #fde68a; }
+    100% { background-color: #fef3c7; }
+}
+
 /* Page-heading toggle icon (rendered server-side via PageHeadingSubscriber).
  * Lives in the action row alongside expand/contract + help. Two visual
  * states: inactive (drawer closed) shows a muted outline icon; active
@@ -195,17 +217,25 @@ html.oe-copilot-open .oe-copilot-chevron__icon {
     color: #111827;
     margin: 0;
 }
-.oe-copilot-drawer__close {
+.oe-copilot-drawer__close,
+.oe-copilot-drawer__refresh {
     border: none;
     background: transparent;
     color: #6b7280;
-    font-size: 22px;
     line-height: 1;
     cursor: pointer;
     padding: 4px 8px;
     border-radius: 6px;
 }
-.oe-copilot-drawer__close:hover {
+.oe-copilot-drawer__close {
+    font-size: 22px;
+}
+.oe-copilot-drawer__refresh {
+    font-size: 18px;
+    margin-left: auto;
+}
+.oe-copilot-drawer__close:hover,
+.oe-copilot-drawer__refresh:hover {
     background: #e5e7eb;
     color: #111827;
 }

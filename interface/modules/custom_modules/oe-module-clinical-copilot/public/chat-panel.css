@@ -49,6 +49,15 @@ html, body {
     margin-bottom: 0.25rem;
 }
 
+.copilot-paragraph {
+    /* Mimic <p> margins. Used instead of <p> so the citation popover
+     * (also a <div>) renders cleanly when inserted as a sibling. */
+    margin: 0 0 0.5rem;
+}
+.copilot-paragraph:last-child {
+    margin-bottom: 0;
+}
+
 .copilot-message__body p:last-child,
 .copilot-message__body ul:last-child {
     margin-bottom: 0;
@@ -102,6 +111,7 @@ html, body {
 }
 
 .copilot-citation {
+    display: inline-block !important;
     margin: 0 2px;
     padding: 0.15rem 0.4rem;
     cursor: pointer;
@@ -109,6 +119,7 @@ html, body {
     font-family: var(--bs-font-monospace, monospace);
     font-size: 0.75rem;
     line-height: 1;
+    vertical-align: baseline;
 }
 
 .copilot-citation:focus {
@@ -117,33 +128,36 @@ html, body {
 }
 
 .copilot-citation__popover {
-    margin: 0.25rem 0 0.5rem;
+    display: block;
+    margin: 0.35rem 0;
     padding: 0.5rem 0.75rem;
     background-color: #ffffff;
+    color: #111827;
     border: 1px solid #dee2e6;
     border-radius: 0.25rem;
     font-size: 0.8125rem;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 .copilot-citation__header {
     font-weight: 600;
     margin-bottom: 0.25rem;
+    color: #111827;
 }
 
-.copilot-citation__popover dl {
-    margin: 0;
+.copilot-citation__fields {
     display: grid;
     grid-template-columns: max-content 1fr;
     column-gap: 0.5rem;
     row-gap: 0.15rem;
 }
 
-.copilot-citation__popover dt {
+.copilot-citation__field-label {
     font-weight: 500;
     color: #495057;
 }
 
-.copilot-citation__popover dd {
-    margin: 0;
+.copilot-citation__field-value {
+    color: #111827;
+    word-break: break-word;
 }

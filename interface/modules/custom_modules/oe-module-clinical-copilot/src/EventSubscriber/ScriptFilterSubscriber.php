@@ -48,7 +48,8 @@ final class ScriptFilterSubscriber implements EventSubscriberInterface
     {
         $scripts = $event->getScripts();
         $scripts[] = OEGlobalsBag::getInstance()->getWebRoot()
-            . self::MODULE_PUBLIC_PATH . '/chart-bootstrap.js';
+            . self::MODULE_PUBLIC_PATH . '/chart-bootstrap.js'
+            . $this->mtimeQuery('/chart-bootstrap.js');
         $event->setScripts($scripts);
     }
 
@@ -56,7 +57,21 @@ final class ScriptFilterSubscriber implements EventSubscriberInterface
     {
         $styles = $event->getStyles();
         $styles[] = OEGlobalsBag::getInstance()->getWebRoot()
-            . self::MODULE_PUBLIC_PATH . '/chart-bootstrap.css';
+            . self::MODULE_PUBLIC_PATH . '/chart-bootstrap.css'
+            . $this->mtimeQuery('/chart-bootstrap.css');
         $event->setStyles($styles);
+    }
+
+    /**
+     * Return a `?_t=<mtime>` query string so dev edits to module
+     * JS/CSS aren't masked by browser caching. OpenEMR's Header
+     * also appends `&v={v_js_includes}`, but that's tied to the OpenEMR
+     * version and doesn't change on local module edits.
+     */
+    private function mtimeQuery(string $publicRelativePath): string
+    {
+        $abs = __DIR__ . '/../../public' . $publicRelativePath;
+        $mtime = @filemtime($abs);
+        return $mtime ? ('?_t=' . $mtime) : '';
     }
 }

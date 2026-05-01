@@ -23,6 +23,15 @@ def test_eval_case(case: EvalCase) -> None:
             f"Case {case.name!r} requires a live LLM; pytest runs in fixture "
             f"mode for determinism. Use the CLI runner against a live LLM."
         )
+    if case.live_db_required and settings.use_fixture_data:
+        pytest.skip(
+            f"Case {case.name!r} requires live Synthea-imported DB data; "
+            f"pytest runs against the Maria fixture for determinism."
+        )
+    if case.fixture_data_required and not settings.use_fixture_data:
+        pytest.skip(
+            f"Case {case.name!r} is calibrated against Maria fixture data."
+        )
     client = TestClient(app)
     result = run_case(client, case, settings.openemr_hmac_secret)
 

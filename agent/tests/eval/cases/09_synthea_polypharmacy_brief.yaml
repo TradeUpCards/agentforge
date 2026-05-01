@@ -1,0 +1,43 @@
+name: synthea_polypharmacy_brief
+category: happy_path
+description: |
+  Live-data eval against Guadalupe Botsford (Synthea patient_id 92).
+  This patient has a complex polypharmacy profile (15 active meds spanning
+  diabetes, hypertension, dyslipidemia, gout, and CAD/post-MI care), 3
+  documented allergies, and 5,400+ historical labs across 222 encounters.
+
+  Tests the agent against a realistically deep chart — vs the hand-crafted
+  Maria fixture which only has ~5 records. Without this kind of case, we
+  can't claim the agent works on real-shaped clinical data.
+
+  Asserts the brief surfaces specific medications known to be on the
+  patient's active list. Verifier strictness on multi-claim chart depth
+  is what's load-bearing here.
+
+# Guadalupe Botsford — see triage in agent/tests/eval/cases/README if added.
+patient_id: 92
+user_id: 1
+live_llm_required: true
+live_db_required: true
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  min_claims: 5
+  min_citations: 5
+  must_mention:
+    # Three specific meds we KNOW are on Guadalupe's active list.
+    # Picked names that are clinically distinctive enough that the
+    # LLM is unlikely to omit them when summarizing.
+    - metformin
+    - lisinopril
+    - clopidogrel
+  must_not_mention:
+    - "I cannot"
+    - "as an AI"
+  expect_tools_called:
+    - get_problem_list
+    - get_active_medications

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook — runs the agent's unit tests + eval Golden Set before
+# every commit lands. Cheap-and-fast (fixture mode, no LLM cost, ~5-10s)
+# so it's tolerable on every commit. Live-LLM and live-DB cases are
+# intentionally skipped in this hook (they cost tokens / require a running
+# DB stack); run them manually with the CLI runner before tagging a
+# release.
+#
+# Install once per clone:
+#     git config core.hooksPath scripts/git-hooks
+#
+# Skip in an emergency:
+#     git commit --no-verify   (use sparingly — defeats the safety net)
+
+set -e
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Find the venv's python — windows path layout differs from posix.
+if   [ -x "agent/venv/Scripts/python.exe" ]; then
+    PY="agent/venv/Scripts/python.exe"
+elif [ -x "agent/venv/bin/python" ]; then
+    PY="agent/venv/bin/python"
+else
+    echo "[pre-commit] agent/venv not found; skipping eval suite." >&2
+    echo "[pre-commit] Set up the venv (see agent/README.md) to enable." >&2
+    exit 0
+fi
+
+echo "[pre-commit] Running verifier unit tests + eval Golden Set..."
+"$PY" -m pytest agent/tests/unit/ agent/tests/eval/ -q --tb=short
+
+echo "[pre-commit] All checks passed."

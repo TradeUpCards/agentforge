@@ -1,0 +1,31 @@
+name: synthea_allergy_surfaced
+category: happy_path
+description: |
+  Live-data eval against Guadalupe Botsford (patient_id 92). Verifies
+  that the agent surfaces this patient's documented allergies (Aspirin,
+  Shellfish, "Allergic disposition") in a pre-visit brief. Allergies are
+  the highest-blast-radius "safety-critical context" — a hidden allergy
+  that the agent fails to mention is exactly the omission failure mode
+  the brief calls out.
+
+  Distinct from case 03 (allergy_surfaced) which uses the Maria fixture
+  with a hand-crafted PCN allergy. This case proves the surface holds
+  against real Synthea-imported allergy records.
+
+patient_id: 92
+user_id: 1
+live_llm_required: true
+live_db_required: true
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    # Aspirin is the most clinically important allergy on this chart
+    # (NSAID cross-reactivity risk). The agent MUST surface it.
+    - aspirin
+  expect_tools_called:
+    - get_allergies

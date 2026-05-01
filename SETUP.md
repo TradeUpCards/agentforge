@@ -1,8 +1,8 @@
 # SETUP.md — Local Development Setup
 
-**For:** AgentForge Clinical Co-Pilot — a fork of OpenEMR with an embedded AI agent (planned).
+**For:** AgentForge Clinical Co-Pilot — a fork of OpenEMR with an embedded AI agent.
 **Audience:** anyone setting this fork up for development, including future-you.
-**Scope:** Stage 1 of the Week 1 brief — getting OpenEMR running locally with sample data.
+**Scope:** end-to-end local development — OpenEMR + Synthea-populated demo data + the Python agent service + the chat drawer reachable from any patient chart page.
 
 This document captures **what was actually required** to get the OpenEMR fork running, including the gotchas discovered along the way. Where this differs from upstream `README.md` / `DOCKER_README.md`, this file is the source of truth for AgentForge.
 
@@ -103,19 +103,66 @@ docker compose exec mysql mariadb -uopenemr -popenemr openemr -e \
   "SELECT COUNT(*) FROM patient_data;"
 ```
 
-Should return `3`. The bundled demo is intentionally small — **3 patients with thin clinical histories** (3 problems, 1 medication, 1 allergy, 0 labs, 3 encounters). It is enough to verify the install works and click around the UI; it is **not** enough to develop the agent against. See Step 2.
+Should return `3`. The bundled demo is intentionally small — **3 patients with thin clinical histories** (3 problems, 1 medication, 1 allergy, 0 labs, 3 encounters). Enough to verify the install works; **not** enough to develop the agent against. See Step 2.
 
-### Step 2 — Realistic clinical data (deferred — see ARCHITECTURE.md §5.2)
+### Step 2 — Layer in Synthea patients with realistic histories
 
-For the agent to be evaluable, patients need richer histories — multiple encounters, lab trends, medication changes. The bundled demo doesn't provide this. The plan (per `ARCHITECTURE.md` §5.2 and `AUDIT.md` finding D-4) is:
+The agent's verifier story (strict-on-numerics, lenient-on-qualifiers, multi-encounter delta narratives) is only defensible when shown across multiple patients with real lab trends and medication histories. We pulled this forward into week 1 — see DECISIONS.md appendix `2026-04-30 — Pull forward real-DB tools + Synthea-populated demo data` for the rationale.
 
-- **MVP (week 1):** ~5–8 hand-crafted edge-case patients via a Python seed script — engineered to exercise specific verifier behaviors (warfarin + NSAID, A1c +1.5 trend, PCN allergy, no recent labs, etc.)
-- **Week 2:** layer in Synthea-generated synthetic patients via OpenEMR's `import-random-patients` devtool for broader eval coverage:
-  ```bash
-  docker compose exec openemr /root/devtools import-random-patients 20
-  ```
+```bash
+# From docker/development-easy/
+MSYS_NO_PATHCONV=1 docker compose exec openemr /root/devtools import-random-patients 200
+```
 
-Neither is part of Stage 1 setup.
+This generates ~200 Synthea patients with multi-year clinical histories: encounters, lab trends (LOINC-coded), medication changes, allergies. Takes ~10–20 minutes depending on disk speed.
+
+Verify:
+
+```bash
+docker compose exec mysql mariadb -uopenemr -popenemr openemr -e \
+  "SELECT COUNT(*) FROM patient_data;
+   SELECT COUNT(*) FROM lists WHERE type='medical_problem';
+   SELECT COUNT(*) FROM procedure_result;"
+```
+
+Should be in the ballpark of 200 / 6,000+ / 50,000+.
+
+### Step 3 — Seed today's appointments
+
+The Co-Pilot demo narrative is "PCP looks at today's schedule, picks the next patient, summons Co-Pilot, walks in." That story needs appointments on the *current day* for a handful of imported patients. The `agent/seed_appointments.sql` script does this — pick ~5 patients you'd like to see on the schedule and run:
+
+```bash
+MSYS_NO_PATHCONV=1 docker compose exec -T mysql \
+  mariadb -uopenemr -popenemr openemr < ../../agent/seed_appointments.sql
+```
+
+Edit the script first to use real patient IDs from your import — the file has placeholders to find/replace. After running, the OpenEMR calendar (Calendar → today) will show the seeded appointments.
+
+### Step 4 — Create the read-only DB user the agent connects with
+
+The Python agent never connects as `openemr` (which has full DDL/DML rights). It connects as `agent_ro` with `SELECT`-only privileges, per ARCHITECTURE.md §4.1 / DECISIONS.md §3:
+
+```bash
+MSYS_NO_PATHCONV=1 docker compose exec mysql mariadb -uroot -proot -e "
+  CREATE USER IF NOT EXISTS 'agent_ro'@'%' IDENTIFIED BY 'agent_ro_dev_password';
+  GRANT SELECT ON openemr.* TO 'agent_ro'@'%';
+  FLUSH PRIVILEGES;
+"
+```
+
+The agent's `agent/.env` should reference this user (see `agent/.env.example`).
+
+### Step 5 — Configure agent secrets
+
+The agent needs three categories of credentials, all wired through `agent/.env` (gitignored — copy from `agent/.env.example`):
+
+| Category | Required? | Notes |
+|---|---|---|
+| **LLM provider** (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`) | Optional for first boot | Without a key, the agent runs in **fixture mode** — canned LLM responses, full loop still exercised. With a real key it flips to live. Direct Anthropic uses `https://api.anthropic.com`; OpenRouter uses `https://openrouter.ai/api` (no trailing `/v1` — the SDK appends it). On OpenRouter, models are `anthropic/<model>` prefixed. |
+| **Observability** (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`) | Optional | Without keys, traces are simply not emitted. With keys, every `/chat` request appears in Langfuse with per-step latency, token usage, verifier verdict, and stripped-claim detail. Get keys from https://cloud.langfuse.com → project settings. Free tier is sufficient for development (50k observations/mo). |
+| **OpenEMR ↔ agent integrity** (`OPENEMR_HMAC_SECRET`) | **Required** | Pre-shared secret used by the OpenEMR PHP module to sign requests and the agent to verify them. Generate with `openssl rand -hex 32`. The **same** value must also be set in `docker/development-easy/docker-compose.override.yml` for the openemr container — see `agent/README.md` "Local OpenEMR integration". |
+
+The `agent_ro` DB password from Step 4 also goes in `agent/.env` as `AGENT_DB_PASS`. Full variable list and trade-offs in [`agent/.env.example`](./agent/.env.example) and [`agent/README.md`](./agent/README.md).
 
 ---
 
@@ -146,7 +193,7 @@ These are the things that aren't obvious from the upstream docs but matter for d
 
 4. **HTTPS uses a self-signed cert** at `localhost:9300`. Browsers will warn; accept the risk for local dev.
 
-5. **Patient data is sparse by default.** This is documented in the audit (`AUDIT.md` finding D-4) and shaped the eval plan.
+5. **Patient data is sparse by default.** The bundled `dev-reset-install-demodata` only seeds 3 thin patients (`AUDIT.md` finding D-4). Step 2 above (Synthea import) is what makes the install evaluable; without it, the agent has nothing meaningful to summarize.
 
 ---
 
@@ -186,8 +233,87 @@ The OpenEMR stack instructions above are sufficient to run OpenEMR on its
 own. To run the full agent integration locally, you need three things up
 at the same time:
 
-1. **OpenEMR dev-easy stack** — see "First-time setup" above.
-2. **Python agent service** — see [`agent/README.md`](./agent/README.md). Runs as a uvicorn process on the host, port 8000.
+1. **OpenEMR dev-easy stack** — see "First-time setup" above, plus Step 2 (Synthea data) and Step 4 (`agent_ro` DB user).
+2. **Python agent service** — see [`agent/README.md`](./agent/README.md). Runs as a uvicorn process on the host, port 8000. Uses `agent_ro` to query OpenEMR's MariaDB.
 3. **Docker-compose override** at `docker/development-easy/docker-compose.override.yml` — adds `AGENT_BASE_URL=http://host.docker.internal:8000` and `OPENEMR_HMAC_SECRET` to the openemr container so the PHP module can reach the host-bound agent service. Gitignored; create from the example in `agent/README.md`.
 
+### Reaching the chat drawer from a chart
+
+Once the stack is up, open any patient's chart in OpenEMR. The drawer is reachable from three affordances, all wired through the custom module under `interface/modules/custom_modules/oe-module-clinical-copilot/`:
+
+- **Page-heading icon** — top-right of the chart's heading row, left of the expand/contract icon. Outline when closed, filled blue when open. Renders only on patient-context pages.
+- **Floating "Co-Pilot" button** — bottom-right corner of the viewport, persistent across tabs.
+- **Right-edge chevron handle** — vertically centered against the active tab's iframe; click to toggle. Stays visible whether the drawer is on- or off-screen.
+
+All three call the same top-window `OE_COPILOT.toggle()`. The drawer iframes `chat-panel.php`, which enforces session + CSRF + ACL before forwarding the request to the Python agent (HMAC-signed).
+
 End-to-end click-through walkthrough lives in [`.gauntlet/week1/local-openemr-runbook.md`](./.gauntlet/week1/local-openemr-runbook.md) (gitignored — local notes only).
+
+---
+
+## Pre-commit hook (eval-on-commit)
+
+Every commit runs the agent's verifier unit tests + eval Golden Set in
+fixture mode (~5–10s, no LLM cost). The hook lives in
+`scripts/git-hooks/pre-commit`. **Enable it once per clone:**
+
+```bash
+git config core.hooksPath scripts/git-hooks
+```
+
+Verify it's wired:
+
+```bash
+git config core.hooksPath
+# → scripts/git-hooks
+```
+
+Live-LLM and live-DB eval cases are intentionally skipped in the hook
+(they cost tokens / require the docker stack running). Run them
+manually before tagging a release:
+
+```bash
+USE_FIXTURE_DATA=false USE_FIXTURE_LLM=false \
+  agent/venv/Scripts/python.exe -m agent.tests.eval.runner
+```
+
+Reports land in `agent/tests/eval/results/<timestamp>.md`. Preview the
+latest in your browser:
+
+```bash
+agent/venv/Scripts/python.exe -m agent.tests.eval.preview_latest
+```
+
+Skip the hook in an emergency: `git commit --no-verify` (sparingly —
+defeats the safety net).
+
+---
+
+## Verifying everything works
+
+Five checks, in order. Each one isolates a layer so a failure points at one specific thing.
+
+**1. OpenEMR is up and demo data loaded.**
+```bash
+curl -ksI https://localhost:9300/ | head -1     # HTTP/2 200 (or HTTP/1.1 200)
+docker compose exec mysql mariadb -uopenemr -popenemr openemr -e \
+  "SELECT COUNT(*) FROM patient_data;"           # >> 3 if Step 2 (Synthea) ran
+```
+
+**2. Agent service responds.** With `agent/venv` active and uvicorn running on port 8000:
+```bash
+curl -s http://localhost:8000/health
+# {"status":"ok","llm_mode":"fixture"}   # or "live" if ANTHROPIC_API_KEY set
+```
+
+**3. Agent unit tests pass.**
+```bash
+agent/venv/Scripts/pytest agent/tests/unit/ -v
+# 16 passed
+```
+
+**4. End-to-end click-through.** Sign in to OpenEMR, open any patient's chart, then summon the drawer (header icon, floating button, or right-edge chevron — see "Reaching the chat drawer from a chart" above). Click "Pre-visit brief" or type a question. Within ~6 seconds you should see a streamed response with citations to record IDs.
+
+If you see *"Something went wrong. Please retry."*, check the browser console first (likely 401 from a session-bag mismatch or a malformed URL) before suspecting the agent. The agent's uvicorn log will show the inbound request and the verifier verdict — those are the next two diagnostic surfaces.
+
+**5. Langfuse trace lands** (only if Langfuse keys are configured). Open https://cloud.langfuse.com → your project → Traces. Each `/chat` request appears as a top-level span with per-tool nested spans, generation tokens/cost, and a `verifier_verdict` metadata field.

@@ -58,7 +58,13 @@ if ($patientName === '') {
         content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
     <title><?php echo xlt('Clinical Co-Pilot'); ?></title>
     <?php Header::setupHeader(['common']); ?>
-    <link rel="stylesheet" href="chat-panel.css">
+    <?php
+    // Cache-bust by file mtime so JS/CSS edits show up without users
+    // having to hard-reload. Falls back to time() if filemtime fails.
+    $cssVer = @filemtime(__DIR__ . '/chat-panel.css') ?: time();
+    $jsVer = @filemtime(__DIR__ . '/chat-panel.js') ?: time();
+    ?>
+    <link rel="stylesheet" href="chat-panel.css?v=<?php echo (int) $cssVer; ?>">
 </head>
 <body class="container-fluid<?php echo $isEmbedded ? ' copilot-embedded' : ''; ?>">
     <div class="copilot-app d-flex flex-column">
@@ -140,6 +146,6 @@ if ($patientName === '') {
             }
         };
     </script>
-    <script src="chat-panel.js"></script>
+    <script src="chat-panel.js?v=<?php echo (int) $jsVer; ?>"></script>
 </body>
 </html>
