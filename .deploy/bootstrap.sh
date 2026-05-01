@@ -137,6 +137,11 @@ services:
       - nodemodules:/var/www/localhost/htdocs/openemr/node_modules:rw
       - vendordir:/var/www/localhost/htdocs/openemr/vendor:rw
       - logvolume:/var/log
+      # The flex image's startup runs `rsync /couchdb/data ...` and
+      # exits 23 if the source dir doesn't exist. Mount an empty
+      # volume there so the rsync no-ops cleanly. We don't actually
+      # use CouchDB; this is just to keep the startup script happy.
+      - couchdbvolume:/couchdb/data:rw
     environment:
       MYSQL_HOST: mysql
       MYSQL_ROOT_PASS: \${MYSQL_ROOT_PASSWORD}
@@ -228,6 +233,7 @@ volumes:
   themevolume: {}
   nodemodules: {}
   vendordir: {}
+  couchdbvolume: {}
 COMPOSE
 
 cat > Caddyfile <<'CADDY'
