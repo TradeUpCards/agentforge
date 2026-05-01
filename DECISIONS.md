@@ -75,7 +75,7 @@
 - **BAA framing.** Per the brief footnote, we treat both Anthropic (LLM) and Langfuse (observability) as covered services under a hypothetical signed BAA. Real production requires actual signed BAAs — flagged as a pre-production gate. ([ARCHITECTURE.md §4.4](./ARCHITECTURE.md))
 - **What we explicitly deferred to week 3 and why:**
   - **External audit-log forwarding (ATNA syslog)** — log integrity is application-enforced today, not schema-enforced. Same is true for OpenEMR's existing log. Documented honestly rather than papered over. ([AUDIT.md C-2](./AUDIT.md))
-  - **PHI redaction in observability traces** — Langfuse traces include patient context in dev mode for the demo; production hardens this with redaction at log-write time. ([ARCHITECTURE.md §7](./ARCHITECTURE.md))
+  - **PHI redaction in observability traces** — Langfuse traces include patient context in dev mode for the demo; production hardens this with redaction at log-write time. **Detailed plan in [§4a](#4a-phi-redaction-implementation-plan) below.** ([ARCHITECTURE.md §7](./ARCHITECTURE.md))
   - **Anomalous-access alerting** — the structured `agent_log` makes this trivial to add later, but it's not in MVP. ([ARCHITECTURE.md §10 #4](./ARCHITECTURE.md))
   - **Langfuse HIPAA-compliant region** (`us-hipaa.cloud.langfuse.com`) under signed BAA on the Enterprise tier — current setup uses the standard `us.cloud.langfuse.com` free tier, which is NOT HIPAA-compliant. Per the brief's footnote (page 3) we operate under the *assumption* of a signed BAA across all third-party services for the bootcamp; real production migration is a config change (one URL + Enterprise account provisioning), not architectural. The same applies to Anthropic — production needs their enterprise BAA with PHI commitments.
 
@@ -83,9 +83,144 @@
 
 1. **Move Langfuse to the HIPAA region** under a signed BAA. URL changes from `https://us.cloud.langfuse.com` to `https://us-hipaa.cloud.langfuse.com` in `agent/.env`. Enterprise plan required.
 2. **Sign a BAA with Anthropic** (their enterprise tier offers PHI commitments). API base URL likely unchanged; the contract is the change.
-3. **Wire PHI redaction at log-write time** in the agent — strip patient identifiers from prompts/responses sent to Langfuse before they leave the trust boundary, even with the BAA. Defense in depth; minimizes blast radius if anything in the observability pipeline is later breached.
+3. **Wire PHI redaction at log-write time** in the agent — strip patient identifiers from prompts/responses sent to Langfuse before they leave the trust boundary, even with the BAA. Defense in depth; minimizes blast radius if anything in the observability pipeline is later breached. **Detailed plan in [§4a](#4a-phi-redaction-implementation-plan) below.**
 
 **Tradeoff accepted.** This is a v0.5 with a defined v1 path. A CTO would treat it as deployable for pilot/sandbox use today; full production deployment requires the week-3 hardening list to land.
+
+---
+
+### 4a. PHI redaction implementation plan
+
+> *"Specifically — what gets redacted, where in the call path, and how do you prove it works?"*
+
+This sub-section addresses MVP-feedback gap #2 (the original §4 flagged PHI redaction as week-3 work but didn't say *what* gets redacted, *where in the call path*, or *how* the redaction is verified). Expanded so the gate #3 above is concrete enough that an engineer could implement it from this doc alone.
+
+#### The 18 HIPAA Safe Harbor identifiers (§164.514(b)(2))
+
+Each tagged for our agent's actual I/O surface. The bar for "in-scope" is whether the identifier could plausibly appear in our prompts to the LLM, our responses back to the user, or our trace metadata sent to Langfuse.
+
+| # | Identifier | Status | Notes |
+|---|---|---|---|
+| 1 | **Names** (patient, family, employer) | **IN-SCOPE** | `patient_data.fname/lname/mname` — present in chart context if the prompt includes patient context blocks. |
+| 2 | **Geographic subdivisions** smaller than state (street, city, county, ZIP, precinct) | **IN-SCOPE** | Address fields in `patient_data` — currently NOT in our tool SELECTs, but could leak via free-text notes. |
+| 3 | **Dates** related to individual (birth, admission, discharge, death; ages > 89) | **IN-SCOPE — partial redaction** | Clinical reasoning needs date precision (lab trends, med start dates, encounter sequence). Year-month-day stripping breaks the agent's utility. **Strategy: redact DOB; preserve clinical event dates.** Documented honest tension below. |
+| 4 | **Telephone numbers** | IN-SCOPE | Patient phone fields. NOT in our current tool SELECTs but easy to leak via narrative SOAP notes. |
+| 5 | **Vehicle identifiers** (license plates, VINs) | NOT-RELEVANT | Not in our schema; not in tool returns. |
+| 6 | **Fax numbers** | NOT-RELEVANT | Same as #5. |
+| 7 | **Device identifiers and serial numbers** | NOT-RELEVANT | Same as #5. |
+| 8 | **Email addresses** | IN-SCOPE | Patient email field. NOT in our SELECTs; could leak via free-text. |
+| 9 | **Web URLs** | NOT-RELEVANT | Not in our queried fields. |
+| 10 | **Social Security numbers** | NOT-RELEVANT | Explicitly NOT in our tool SELECTs (per [AUDIT.md C-3](./AUDIT.md)) — narrowed away at the tool layer. |
+| 11 | **IP addresses** | NOT-RELEVANT | Not in chart data. |
+| 12 | **Medical record numbers** | **IN-SCOPE** | `patient_data.pid` and `pubpid` are foundational to our citation system (records are addressed by `<table>:<id>`). **Cannot be stripped without breaking the verifier.** Strategy: hash for stable trace-correlation, retain in audit log. |
+| 13 | **Biometric identifiers** (fingerprints, voice prints) | NOT-RELEVANT | Not in our schema. |
+| 14 | **Health plan beneficiary numbers** | NOT-RELEVANT | Billing-side; not in tool returns. |
+| 15 | **Full-face photographs and comparable images** | NOT-RELEVANT | Binary blobs; not in our queried fields. |
+| 16 | **Account numbers** | NOT-RELEVANT | Billing-side. |
+| 17 | **Any other unique identifying number, characteristic, or code** | **IN-SCOPE — case-by-case** | Catch-all. Encounter IDs (`form_encounter.encounter`) are in this category — also load-bearing for citations; same hash-for-correlation approach as #12. |
+| 18 | **Certificate / license numbers** | NOT-RELEVANT | Driver's license — explicitly excluded from our SELECTs. |
+
+#### Per-category redaction strategy
+
+| Category | Strategy | Why |
+|---|---|---|
+| **Names** | Substitute (`[NAME]`) | Stable substitution preserves prose readability; no need to correlate names across traces. |
+| **DOB** | Year only (substitute `[DOB-YYYY]`) | Age-relevant clinical reasoning preserved (e.g., "65-year-old patient"); exact day stripped. |
+| **Clinical event dates** | **PRESERVE** | Lab trends, med-start sequencing, encounter ordering require day precision. The agent's value collapses without this. **This is the honest HIPAA tension below.** |
+| **Phone / email / address** | Strip (replace with `[REDACTED-PHONE]` / `[REDACTED-EMAIL]` / `[REDACTED-ADDR]`) | Never clinically necessary; cheap to strip. |
+| **Medical record numbers** (pid, pubpid, encounter IDs) | Hash with a per-environment salt (`hashed:abc123…`) | Citations need stable IDs across a single trace; hashing preserves correlation without exposing the raw value. Salt rotates per deploy environment so dev hashes don't correlate to prod hashes. |
+| **Catch-all unique identifiers** | Strip unless in a known-good list | Default closed: anything that looks like a UUID, GUID, or unrecognized numeric ID gets stripped. Allowlist: cited record IDs (handled by the hashing rule above). |
+
+#### The honest tension on dates
+
+> "Clinical event dates are PHI. We're preserving them. Why is that defensible?"
+
+HIPAA Safe Harbor de-identification under §164.514(b)(2) requires stripping dates more granular than year. **For a research dataset that's the right call.** For an operational clinical tool sending traces to a BAA-covered observability provider, the calculus is different:
+
+- Dates are essential to clinical reasoning (lab trend direction, med-start sequencing).
+- The receiver (Langfuse under signed BAA on `us-hipaa.cloud.langfuse.com`) is a covered entity for our purposes — they're not a public dataset.
+- The minimum-necessary rule (§164.502(b)) says "limit PHI to the minimum necessary to accomplish the intended purpose." For us, the intended purpose is debugging agent behavior on real-shape clinical data — that requires dates.
+
+**Defensible position:** under signed BAA + HIPAA-region observability, preserving clinical event dates is permissible because (a) the recipient is not the public, (b) the use is the agent's own observability not external research, (c) stripping dates would break the operational purpose. Document this explicitly in the BAA as a covered use.
+
+**This is a real call we're making, not a paper-over.** A reviewer who disagrees should know we considered it; here's the reasoning. If clinic policy is more conservative, the redaction layer below has a flag to fall back to year-only on event dates too — the architecture supports it.
+
+#### Code seam — where redaction lands
+
+**File:** `agent/agent.py`. **Function:** `redact_phi(payload: str | dict, policy: RedactionPolicy) -> str | dict`. **Call sites:** every `langfuse.get_client().update_current_span(input=...)` and `update_current_generation(input=..., output=...)` invocation.
+
+Today the relevant calls are at `agent.py` lines 338, 351, 372, 389, 433, 459, 486 (per current code; line numbers may drift). The redaction layer wraps each one:
+
+```python
+# Before (current):
+get_client().update_current_span(input={"prompt": prompt, "patient_context": ctx})
+
+# After:
+get_client().update_current_span(
+    input=redact_phi({"prompt": prompt, "patient_context": ctx}, _redaction_policy)
+)
+```
+
+`_format_patient_context` (line 131) is the upstream point where raw record fields enter the prompt — that's the right place to add a parallel `_format_patient_context_redacted` for the trace path, leaving the LLM-input path unchanged. **The LLM still receives unredacted context** (it needs to reason on real data); only the *trace copy* sent to Langfuse is redacted.
+
+This split matters: redaction is a observability concern, not an agent-behavior concern. The verifier still operates on raw data; the audit log still has the real values; only the third-party-trace destination gets the scrubbed version.
+
+#### Test plan
+
+Two test layers:
+
+**Unit (`agent/tests/unit/test_phi_redaction.py`):**
+
+```python
+@pytest.mark.parametrize("identifier_type, raw_value, expected_pattern", [
+    ("name", "John Smith", r"\[NAME\]"),
+    ("dob", "1962-04-15", r"\[DOB-1962\]"),
+    ("phone", "(555) 123-4567", r"\[REDACTED-PHONE\]"),
+    ("email", "patient@example.com", r"\[REDACTED-EMAIL\]"),
+    ("ssn", "123-45-6789", r"\[REDACTED-ID\]"),
+    ("mrn", "12345", r"hashed:[a-f0-9]{8,}"),
+    # ...18 cases total, one per identifier from the table above
+])
+def test_redact_phi_strips_identifier(identifier_type, raw_value, expected_pattern):
+    out = redact_phi(raw_value, _default_policy())
+    assert re.search(expected_pattern, out)
+    assert raw_value not in out  # the literal MUST NOT survive
+```
+
+Plus a structural test that `redact_phi` is idempotent (running twice = same as once) and a test that asserts NO value passes through unchanged for IN-SCOPE categories.
+
+**Integration (`agent/tests/integration/test_phi_redaction_in_traces.py`):**
+
+```python
+def test_langfuse_trace_does_not_contain_seed_phi(langfuse_test_client):
+    # Seed the request with marker PHI a real prompt wouldn't contain
+    request = make_chat_request(
+        patient_id=999998,  # the prompt-injection sentinel; we add seeds via patient_data
+        seeded_phi={
+            "name": "PHI_TEST_NAME_xY9z",
+            "phone": "PHI_TEST_PHONE_aB3c",
+        },
+    )
+    run_chat(request)
+
+    captured = langfuse_test_client.flush_and_capture()
+    assert "PHI_TEST_NAME_xY9z" not in str(captured)
+    assert "PHI_TEST_PHONE_aB3c" not in str(captured)
+```
+
+Marker strings are intentionally improbable; if any survive into the trace, the assertion fires. Run both test suites in CI as part of the pre-commit hook.
+
+#### What we're NOT solving here
+
+- **Free-text leakage in narrative SOAP notes.** A clinician writing "patient John Smith called from 555-1234" in an `assessment` field will leak via the agent's tool returns regardless of our redaction layer. **That's a chart-content problem, not an agent problem** — it pre-existed the agent and won't be fixed by us. Production deployments should pair this redaction with chart-side de-id tooling (e.g., regex sweep + spaCy NER pass on free-text fields at write time).
+- **The OpenEMR-side audit log (`agent_log` table).** We chose to retain raw values there per §4 (it's the legal-defensibility audit surface; reducing detail weakens HIPAA §164.312(b) defense). Redaction applies only to the *third-party observability* destination.
+- **Anthropic prompt content.** We rely on the Anthropic BAA + their own data-handling commitments. If a clinic's policy doesn't allow LLM-side PHI exposure even under BAA, the answer is self-hosting (Bedrock with private VPC, or a self-hosted open model) — not our redaction layer.
+
+#### Status
+
+**As of 2026-05-01: planned, not implemented.** Implementation is week-3 hardening per the [pre-production gates list](#3-pre-production-gates) above. This sub-section makes the plan concrete enough that an engineer could implement and ship it without further design work. Scoped to ~3-4 hours for the redaction function + test layers; scoped to ~1 hour for wiring it into the existing `update_current_span` call sites.
+
+**Implementation will land alongside the BAA-region Langfuse migration** (gate #1) — both are pre-production gates and both touch the trace pipeline. Do them as one commit to keep the trust-boundary change atomic.
 
 ---
 
@@ -399,5 +534,6 @@ pid: (missing)
 | 2026-04-30 (late-morning) | §2 verifier-limits expanded with temporal-coherence gap (LLM produced backwards-in-time delta narrative; values + dates verified individually; narrative direction not checked). Flagged as week-2 fix. | AgentForge build |
 | 2026-04-30 (mid-day) | §2 verifier-limits expanded with token-level-vs-semantic-pairing gap (digit groups matched individually; non-ISO date formats decompose to bare digits; (value, date) not validated as a tuple from a single record). Week-2 fix path documented. | AgentForge build |
 | 2026-04-30 (afternoon) | Closed the token-level / date-normalization gap in `verifier.py` — date-format normalization (ISO / `MM/DD/YYYY` / `MM-DD-YYYY` → canonical ISO) and proximity-based `(value, date)` tuple pairing against single-record fields. Sentence-splitter bugfix found via test failure. 4 new unit tests; all 16 pass. §2 limits list reduced from 3 to 1 (temporal-coherence remains as week-2 work). | AgentForge build |
+| 2026-05-01 (Fri) | §4a expansion — PHI redaction implementation plan (response to MVP grader feedback gap #2). 18 HIPAA Safe Harbor identifiers tagged IN-SCOPE/NOT-RELEVANT for our I/O surface; per-category redaction strategy (substitute / hash with rotated salt / strip / preserve clinical event dates with documented HIPAA tension); code seam at `agent/agent.py`'s `update_current_span(input=...)` calls; two-layer test plan (per-identifier unit + seeded-marker integration); honest scoping of what's not solved (free-text leakage in SOAP notes; chart-side de-id is a separate concern). Implementation deferred to week-3 hardening alongside the BAA-region Langfuse migration. | AgentForge build |
 
 When updating, add a row to this table and date-stamp any modified appendix entries inline.
