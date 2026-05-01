@@ -45,8 +45,9 @@ docker/development-easy-redis/docker-compose.override.yml
 # GauntletAI project notes (local only, not for upstream)
 /.gauntlet/
 
-# Local deployment scripts (droplet-specific; not for upstream)
-/.deploy/
+# Deployment scripts are tracked so the droplet can `git pull` fresh
+# bootstrap. Secrets generate at runtime in /opt/agentforge/.env (which
+# stays out via the universal `.env` rule above).
 
 # Claude Code session state (local only)
 /.claude/
