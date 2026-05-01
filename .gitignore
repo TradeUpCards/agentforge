@@ -4,6 +4,14 @@
 # environment vars
 .env
 
+# Database dumps and OpenEMR sites tarballs — sensitive (PHI in dumps,
+# encryption drive keys in sites tarballs). Never commit. One-off
+# artifacts from the local→droplet deploy dance.
+*.sql
+oe_sites*.tar.gz
+openemr*.sql
+openemr*.tar.gz
+
 # vendor and assets
 node_modules
 /vendor/*
