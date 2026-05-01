@@ -561,8 +561,9 @@ def _real_get_recent_encounters(patient_id: int) -> list[RetrievedRecord]:
         FROM form_encounter AS fe
         LEFT JOIN forms AS fo
                ON fo.encounter = fe.encounter
-              AND fo.formdir = 'soap'
-              AND fo.deleted = 0
+              AND fo.pid       = fe.pid
+              AND fo.formdir   = 'soap'
+              AND fo.deleted   = 0
         LEFT JOIN form_soap AS fs
                ON fs.id = fo.form_id AND fs.pid = fe.pid
         WHERE fe.pid = %s
