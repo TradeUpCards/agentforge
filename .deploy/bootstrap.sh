@@ -115,17 +115,28 @@ services:
 
   openemr:
     restart: always
-    image: openemr/openemr:latest
+    # `flex` image (development variant) bind-mounts the source from
+    # the host. Required for running our forked OpenEMR code on the
+    # droplet — the upstream `latest` image bakes in stock OpenEMR and
+    # is missing class methods (e.g. OEGlobalsBag::getWebRoot) that our
+    # custom module + restored database expect. First boot runs
+    # composer install + asset compilation (~10-15 min); subsequent
+    # boots are fast.
+    image: openemr/openemr:flex
     expose:
       - "80"
       - "443"
     volumes:
+      - $REPO_DIR:/openemr:ro
+      - $REPO_DIR:/var/www/localhost/htdocs/openemr:rw
+      # Named volumes for build artifacts so first-boot composer/npm/asset
+      # output persists across restarts and doesn't pollute the host repo.
+      - assetvolume:/var/www/localhost/htdocs/openemr/public/assets:rw
+      - themevolume:/var/www/localhost/htdocs/openemr/public/themes:rw
+      - sitevolume:/var/www/localhost/htdocs/openemr/sites:rw
+      - nodemodules:/var/www/localhost/htdocs/openemr/node_modules:rw
+      - vendordir:/var/www/localhost/htdocs/openemr/vendor:rw
       - logvolume:/var/log
-      - sitevolume:/var/www/localhost/htdocs/openemr/sites
-      # Bind-mount our custom module from the repo so the chat panel,
-      # event subscribers, and chart-bootstrap.js are available inside
-      # the openemr container without baking a custom image.
-      - $REPO_DIR/interface/modules/custom_modules/oe-module-clinical-copilot:/var/www/localhost/htdocs/openemr/interface/modules/custom_modules/oe-module-clinical-copilot:ro
     environment:
       MYSQL_HOST: mysql
       MYSQL_ROOT_PASS: \${MYSQL_ROOT_PASSWORD}
@@ -133,6 +144,9 @@ services:
       MYSQL_PASS: \${MYSQL_USER_PASSWORD}
       OE_USER: admin
       OE_PASS: \${OE_ADMIN_PASSWORD}
+      # Triggers the flex image's first-boot composer + asset build.
+      EASY_DEV_MODE: "yes"
+      EASY_DEV_MODE_NEW: "yes"
       # Wire the PHP module to the Python agent on the internal network.
       AGENT_BASE_URL: "http://agent:8000"
       OPENEMR_HMAC_SECRET: \${OPENEMR_HMAC_SECRET}
@@ -141,10 +155,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "/usr/bin/curl", "--fail", "--insecure", "--location", "--show-error", "--silent", "https://localhost/meta/health/readyz"]
-      start_period: 5m
-      start_interval: 10s
+      start_period: 15m
+      start_interval: 15s
       interval: 1m
-      timeout: 5s
+      timeout: 10s
       retries: 3
 
   agent:
@@ -209,6 +223,11 @@ volumes:
   databasevolume: {}
   caddy_data: {}
   caddy_config: {}
+  # flex-image build artifacts (first-boot composer + asset compilation).
+  assetvolume: {}
+  themevolume: {}
+  nodemodules: {}
+  vendordir: {}
 COMPOSE
 
 cat > Caddyfile <<'CADDY'
@@ -241,8 +260,9 @@ docker compose up -d
 # Create the read-only DB user the agent connects with. Idempotent.
 # Has to wait until MariaDB is healthy AND OpenEMR has run its install
 # to create the openemr schema. ~5 min on first boot.
-echo "==> Waiting for openemr container health (up to 8 min)..."
-for i in $(seq 1 48); do
+echo "==> Waiting for openemr container health (up to 18 min — flex image runs"
+echo "    composer install + asset compilation on first boot)..."
+for i in $(seq 1 108); do
   status=$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q openemr)" 2>/dev/null || echo "starting")
   if [[ "$status" == "healthy" ]]; then break; fi
   sleep 10
