@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import time
 
 from fastapi.testclient import TestClient
 
@@ -18,8 +19,12 @@ from agent.main import app
 from agent.schemas import Role
 
 
-def _sign(user_id: int, patient_id: int, contents: list[str], secret: str) -> str:
-    payload = f"{user_id}|{patient_id}|" + "|".join(contents)
+def _sign(
+    user_id: int, patient_id: int, contents: list[str], secret: str, timestamp: int,
+) -> str:
+    """Match agent.py:verify_hmac payload layout — including the timestamp
+    inside the signed bytes is what makes the request replay-resistant."""
+    payload = f"{user_id}|{patient_id}|{timestamp}|" + "|".join(contents)
     return hmac.new(
         secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
     ).hexdigest()
@@ -37,10 +42,12 @@ def test_chat_uc1_starter_returns_verified_response() -> None:
     client = TestClient(app)
 
     user_message = "Generate a pre-visit brief for this patient."
+    timestamp = int(time.time())
     body = {
         "user_id": 1,
         "patient_id": 1,
-        "hmac": _sign(1, 1, [user_message], settings.openemr_hmac_secret),
+        "timestamp": timestamp,
+        "hmac": _sign(1, 1, [user_message], settings.openemr_hmac_secret, timestamp),
         "messages": [{"role": "user", "content": user_message}],
     }
     r = client.post("/chat", json=body)
@@ -65,8 +72,35 @@ def test_chat_with_bad_hmac_returns_refusal() -> None:
     body = {
         "user_id": 1,
         "patient_id": 1,
+        "timestamp": int(time.time()),
         "hmac": "deadbeef" * 8,  # invalid
         "messages": [{"role": "user", "content": "hi"}],
+    }
+    r = client.post("/chat", json=body)
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["status"] == "refused"
+    assert "integrity" in payload["reason"].lower()
+
+
+def test_chat_with_stale_timestamp_is_rejected() -> None:
+    """Replay-protection regression: a request signed with the correct
+    secret but a timestamp >30s old (stand-in for a captured + replayed
+    request body) must be refused."""
+    settings = get_settings()
+    client = TestClient(app)
+
+    user_message = "Generate a pre-visit brief for this patient."
+    stale_timestamp = int(time.time()) - 120  # 2 minutes old; well outside the 30s window
+    body = {
+        "user_id": 1,
+        "patient_id": 1,
+        "timestamp": stale_timestamp,
+        # Sign with the stale timestamp so the signature itself is valid —
+        # what trips the rejection is the timestamp-window check, not the
+        # signature mismatch path.
+        "hmac": _sign(1, 1, [user_message], settings.openemr_hmac_secret, stale_timestamp),
+        "messages": [{"role": "user", "content": user_message}],
     }
     r = client.post("/chat", json=body)
     assert r.status_code == 200

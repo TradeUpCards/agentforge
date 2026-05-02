@@ -267,17 +267,49 @@ def _format_patient_context(records: list[RetrievedRecord]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def verify_hmac(request: ChatRequest, secret: str) -> bool:
+_HMAC_MAX_AGE_SECONDS = 30
+"""Reject requests whose signed timestamp is more than this many seconds
+off the agent's clock, in either direction. Per ai-security-review
+blocker #3 (2026-05-02 audit) — captured request bodies can't be
+replayed beyond this window. 30s is generous for clock-drift between
+PHP and Python over an internal Docker network and matches the audit
+recommendation; could be tightened later."""
+
+
+def verify_hmac(
+    request: ChatRequest,
+    secret: str,
+    *,
+    now: float | None = None,
+) -> str | None:
     """Verify the HMAC the OpenEMR module attached to the request.
 
-    Payload-to-sign convention (must match the PHP module):
-      f"{user_id}|{patient_id}|" + "|".join(m.content for m in messages)
+    Payload-to-sign convention (must match the PHP module's `computeHmac`):
+      f"{user_id}|{patient_id}|{timestamp}|" + "|".join(m.content for m in messages)
+
+    Returns None on success, or a short failure-reason string on failure so
+    callers can distinguish replay attempts ("hmac_timestamp_skew") from
+    cryptographic mismatches ("hmac_signature_mismatch") in the audit log
+    and Langfuse metadata. The empty-secret case returns
+    "hmac_no_secret_configured" so a misconfigured deploy is loud, not
+    silently insecure.
+
+    `now` is injectable for unit tests; production callers leave it unset
+    so the wall clock is read.
     """
     if not secret:
         # Defense in depth: if the agent has no secret configured, fail closed.
-        return False
+        return "hmac_no_secret_configured"
+    if now is None:
+        now = time.time()
+    age = now - request.timestamp
+    if abs(age) > _HMAC_MAX_AGE_SECONDS:
+        # Both directions matter: age too positive = request too old (replay),
+        # age too negative = request from the future (clock-skew sanity check
+        # or attacker trying to extend their replay window). Reject both.
+        return "hmac_timestamp_skew"
     payload = (
-        f"{request.user_id}|{request.patient_id}|"
+        f"{request.user_id}|{request.patient_id}|{request.timestamp}|"
         + "|".join(m.content for m in request.messages)
     )
     expected = hmac.new(
@@ -285,7 +317,9 @@ def verify_hmac(request: ChatRequest, secret: str) -> bool:
         payload.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    return hmac.compare_digest(expected, request.hmac)
+    if not hmac.compare_digest(expected, request.hmac):
+        return "hmac_signature_mismatch"
+    return None
 
 
 def verify_score_hmac(user_id: int, patient_id: int, trace_id: str, name: str, value: float, hmac_str: str, secret: str) -> bool:
@@ -592,16 +626,25 @@ async def run_chat(
         }
     )
 
-    # 1. HMAC check (fail closed)
-    if not verify_hmac(request, settings.openemr_hmac_secret):
+    # 1. HMAC check (fail closed). Returns None on success, or a
+    # short failure-reason string for the audit log + trace metadata.
+    hmac_failure = verify_hmac(request, settings.openemr_hmac_secret)
+    if hmac_failure is not None:
         get_client().update_current_span(
-            metadata={"verifier_verdict": "refused", "refusal_reason": "hmac"}
+            metadata={
+                "verifier_verdict": "refused",
+                "refusal_reason": hmac_failure,
+            }
         )
         trace_id = get_client().get_current_trace_id()
         _flush_langfuse()
         audit.outcome = "refused"
-        audit.refusal_reason = "hmac"
+        audit.refusal_reason = hmac_failure
         audit.verifier_verdict = "refused"
+        # The user-facing reason stays generic — don't leak which leg of
+        # the check failed (signature mismatch vs timestamp skew vs no
+        # secret configured). The audit row + Langfuse trace have the
+        # specific reason for operators.
         return _close_audit(audit, started_at, RefusalResponse(
             reason="Request integrity check failed.",
             searched=[],

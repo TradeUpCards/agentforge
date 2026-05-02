@@ -170,9 +170,22 @@ class ChatRequest(BaseModel):
     body downstream of the OpenEMR module — the module must derive from
     $_SESSION['pid'] before calling this service."""
 
+    timestamp: int
+    """Unix epoch seconds at the moment the OpenEMR module signed this
+    request. Included in the HMAC payload so a captured request body
+    cannot be replayed later — the agent rejects requests whose timestamp
+    is more than 30 seconds off the agent's clock (in either direction;
+    future-dated requests are also rejected as a clock-skew sanity check).
+
+    Per ai-security-review production blocker #3 (2026-05-02 audit pass).
+    The 30-second window is generous for clock-drift between PHP and
+    Python over an internal Docker network; it could be tightened later."""
+
     hmac: str
-    """HMAC-SHA256 of (user_id|patient_id|<message-bodies-joined>) using
-    OPENEMR_HMAC_SECRET. Defense-in-depth: agent verifies before any tool runs.
+    """HMAC-SHA256 of (user_id|patient_id|timestamp|<message-bodies-joined>)
+    using OPENEMR_HMAC_SECRET. Defense-in-depth: agent verifies before any
+    tool runs. The timestamp inside the signed payload is what makes this
+    replay-resistant — see `timestamp` field above.
 
     Note: session_id is intentionally NOT in the HMAC payload. It's
     observability metadata only — tampering with it would corrupt Langfuse

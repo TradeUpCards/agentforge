@@ -250,9 +250,13 @@ def _validate_case_schema(path: Path, data: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _sign(case: EvalCase, secret: str) -> str:
+def _sign(case: EvalCase, secret: str, timestamp: int) -> str:
+    """Replay-protected signing: include the unix timestamp inside the
+    payload (must match the layout in agent.py:verify_hmac). Caller is
+    responsible for passing the same `timestamp` it puts in the request
+    body — the agent rejects any mismatch as a signature failure."""
     payload = (
-        f"{case.user_id}|{case.patient_id}|"
+        f"{case.user_id}|{case.patient_id}|{timestamp}|"
         + "|".join(m["content"] for m in case.messages)
     )
     return hmac.new(
@@ -373,10 +377,15 @@ def _looks_transient(result: CaseResult) -> bool:
 
 
 def _run_case_once(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
-    sig = "deadbeef" * 8 if case.bad_hmac else _sign(case, secret)
+    # Sign with current timestamp so the request stays inside the agent's
+    # 30s freshness window. Replay-protection coverage proper lives in the
+    # verify_hmac unit tests; here we just need the sig + body to validate.
+    timestamp = int(time.time())
+    sig = "deadbeef" * 8 if case.bad_hmac else _sign(case, secret, timestamp)
     body = {
         "user_id": case.user_id,
         "patient_id": case.patient_id,
+        "timestamp": timestamp,
         "hmac": sig,
         "messages": case.messages,
     }
