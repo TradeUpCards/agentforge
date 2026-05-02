@@ -6,7 +6,7 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 
 # LLM SDK (Anthropic; supports tool use, prompt caching)
-anthropic>=0.40.0
+anthropic>=0.97.0
 
 # Data validation / DTOs
 pydantic>=2.5.0
