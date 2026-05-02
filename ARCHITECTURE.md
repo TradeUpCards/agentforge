@@ -264,6 +264,8 @@ If every sentence required a citation the verifier would strip 80% of any answer
 
 ### 3.5 Domain-rule enforcement (Tier 1 corpus)
 
+> **Updated 2026-05-01.** Selection criteria + per-rule "adjacent rule considered + why this won" defenses now live in [`RULE_CORPUS.md`](./RULE_CORPUS.md) (added in response to MVP grader feedback). The corpus has grown from "~5 pairings" to a **structured 7-rule initial set** with explicit FP-cost tiering. Engine implementation is week-2 work; the corpus doc is the spec the engine will be built against.
+
 The verifier consults a small hand-coded rule corpus, with citations to published clinical guidelines:
 
 **Drug-drug / allergy rules** (~5 high-prevalence pairings):
