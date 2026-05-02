@@ -63,6 +63,17 @@ The document upload helper accepts a `skip_acl_check` flag that bypasses ACL enf
 
 **Agent implication:** the agent never calls `addNewDocument()` with `skip_acl_check=true`. Documents are out of MVP scope, but flagging this for future awareness — it's emblematic of a pattern (escape hatches in legacy code) we should avoid leveraging.
 
+### S-5 [HIGH — ACCEPTED FOR MVP] — Session `pid` is not authorized per-patient
+**Citations:** `src/Common/Session/PatientSessionUtil.php:22-59` (`setPid` does no ACL check); `library/ajax/set_pt.php:26-28` (only requires CSRF + valid session); `src/Common/Acl/AclMain.php` (no `aclCheckPatient` helper exists).
+
+`CoPilotController` correctly sources `patient_id` from `$_SESSION['pid']` (per S-2) and gates on `aclCheckCore('patients', 'med')`. However, `aclCheckCore` is a coarse role check — it asks "can this user view *any* patient's medical info" — not "can this user view *this specific patient*." OpenEMR has no `AclMain::aclCheckPatient($pid)` helper; per-patient access is enforced ad-hoc inside individual queries when the `restrict_user_facility` global is on (joins against `users_facility`).
+
+The exposure: `library/ajax/set_pt.php` accepts any integer pid, runs only a CSRF check, and writes it directly to the session via `PatientSessionUtil::setPid()`. The patient-finder UI filters which pids a user *sees*, but a logged-in user can `GET /library/ajax/set_pt.php?set_pid=<arbitrary_pid>&csrf_token=...` and pivot the session to any patient in the database. The agent then queries records for that pid because it inherits OpenEMR's session trust model.
+
+**Agent decision (week 1 MVP):** **accept and document.** The agent inherits OpenEMR's existing `set_pt` trust model rather than introducing a parallel authorization layer. This is consistent with A-1 (do not patch legacy code) and with S-2's framing (patient ID from session, not request body).
+
+**Hardening candidate (week 3 if time allows):** add a per-patient facility-scope check inside `CoPilotController::dispatch()` before the HMAC computation. Approach: `SELECT 1` joining `patient_data` against `users_facility` for the authenticated user (subject to the `restrict_user_facility` global). Controller-side authorization re-check using non-PHI columns only — stays compliant with C-3 — and closes the `set_pt` bypass for the agent specifically without modifying OpenEMR core.
+
 ### S-4 [GOOD] — Modern code is genuinely modern
 **Citations:** `src/Common/Auth/AuthHash.php`, `src/Common/Csrf/CsrfUtils.php`.
 
@@ -209,6 +220,7 @@ Per the brief footnote (Week 1 doc, p.3): *"act as if you have a signed Business
 | S-2 | Security | IDOR pattern across recent advisories | HIGH | Mandatory: validate patient access on every request |
 | S-3 | Security | `skip_acl_check` escape hatch in document upload | MEDIUM | Avoid this API surface; documents out of MVP scope anyway |
 | S-4 | Security | Modern auth, CSRF, FHIR are well-implemented | GOOD | Build on modern paths |
+| S-5 | Security | Session `pid` is not authorized per-patient (`set_pt.php` bypass) | HIGH (accepted for MVP) | Documented; week-3 candidate: add facility-scope check in `CoPilotController` |
 | P-1 | Performance | Data layer is fast enough for agent latency targets | INFO | Validates LLM-tier optimization strategy |
 | P-2 | Performance | No app-level caching layer | INFO | Prompt caching at LLM tier *is* our cache |
 | P-3 | Performance | Long-running ops are synchronous | DEFER | Week 3 concern (document ingestion) |
