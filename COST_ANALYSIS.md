@@ -13,7 +13,7 @@
 | Component | Spend | Source |
 |---|---:|---|
 | LLM (OpenRouter, billing for Anthropic models) | **$1.64** | OpenRouter dashboard, 2026-04-27 to 2026-05-01 |
-| Langfuse Cloud | **$0.00** | Free tier (50K observations/month). 226 traces captured to date. |
+| Langfuse Cloud | **$0.00** | Free tier (50K observations/month). **1,327 observations across 226 traces** captured to date — averaging ~5.9 observations per trace, matching our pipeline shape (run-chat span + composite-fetch span + 5 tool spans + LLM generation + verifier span; lower average from bad-HMAC short-circuits and fixture-mode runs). At our current ~265 obs/day pace we'd hit ~8K/month — still 6× under the free-tier limit. |
 | DigitalOcean droplet (4 GB / 2 vCPU) | **~$24.00** (monthly) | $0.83/day × ~5 days running ≈ $4.15 actual to date |
 | **Total week-1 dev spend** | **~$5.79** | LLM + prorated infra |
 
@@ -28,7 +28,7 @@
 
 Multi-model tiering + automatic prefix caching saved an estimated **~$4 of LLM spend in week 1 alone**. That delta scales linearly with usage — at 1K PCPs running similar daily traffic, the same architectural choice saves ~$50K/month.
 
-**Sanity check on the unit cost:** $1.64 ÷ 226 Langfuse-captured generations = **~$0.0073 per request**. Slightly under the $0.010 blended per-request estimate in §2 below, because dev-burn requests were Haiku-heavy (synthesis-shaped) and contexts were shallower (Maria fixture ~500 tokens vs Synthea-Guadalupe ~3,400 tokens). The forward projections in §4–7 use the conservative $0.010 baseline to avoid over-promising.
+**Sanity check on the unit cost:** $1.64 ÷ 226 Langfuse-captured traces = **~$0.0073 per request**. (The observations-per-trace fanout is structural — every `/chat` produces one trace with multiple spans + a generation; the dollar cost lives on the generation only, so traces is the right denominator for per-request math.) Slightly under the $0.010 blended per-request estimate in §2 below, because dev-burn requests were Haiku-heavy (synthesis-shaped) and contexts were shallower (Maria fixture ~500 tokens vs Synthea-Guadalupe ~3,400 tokens). The forward projections in §4–7 use the conservative $0.010 baseline to avoid over-promising.
 
 ---
 
@@ -134,7 +134,7 @@ Same as week 1, scaled vertically:
 | Line item | Monthly | Notes |
 |---|---:|---|
 | LLM (100 PCPs × $6.60) | $660 | At observed ~50% cache rate |
-| Langfuse Pro | $59 | 100K observations/mo (≈ 30K traces) |
+| Langfuse Pro | $59 | 100K observations/mo. At ~6 obs/trace and 30 requests/PCP/day × 100 PCPs × 22 days = ~66K traces → ~390K observations. Pro tier scales with usage; budget shown is for 100K-obs slot. Real-world overage at $59 + ~$0.0001 per extra observation tracks linearly. |
 | DigitalOcean droplet (8 GB / 4 vCPU) | $48 | Single host |
 | Anthropic BAA delta | included | Bundled in enterprise tier (no per-call markup) |
 | **Tier 1 total** | **~$770/mo** | |
