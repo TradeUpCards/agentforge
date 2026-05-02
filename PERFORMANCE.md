@@ -268,6 +268,8 @@ The first item is concrete enough to ship now. Items 2 and 3 are deferred to "po
 
 These are all reasonable to defer to "production-readiness" hardening (week 3+), not week-1 / week-2 work.
 
+**Live LLM-call latency** (the dominant component of end-to-end response time — ~97% per the n=50 baseline) is *not* the subject of this document. It's captured per-request in `agent_log.llm_calls[0].latency_ms` (added 2026-05-02 commit `b52f701a4`) and tracked against SLO targets in [`SLO.md`](./SLO.md) — see §2a there for the empirical baseline. This document focuses on the *read-path* DB queries that feed the LLM call's prompt; the LLM call itself is tracked separately because it's Anthropic-bound and has different optimization levers (model tiering, prompt caching, output-token cap) than the DB queries.
+
 ---
 
 ## Defense talking points

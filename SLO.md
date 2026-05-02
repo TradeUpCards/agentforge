@@ -94,6 +94,39 @@ The latency targets are anchored in [PERFORMANCE.md](./PERFORMANCE.md)'s tool-fe
 
 ---
 
+## 2a. Empirical baseline (2026-05-02, n=50 live calls)
+
+The targets above are aspirational; this section records the **actual measured behavior** at week-1 close so future drift is detectable. Data: 50 live Anthropic Haiku 4.5 calls against the 5 LLM-invoking smoke-tier eval cases (10 iterations each). Spend: $0.26.
+
+| SLO | Target | n=50 baseline | Headroom |
+|---|---|---|---|
+| **SLO-1 Availability** | ≥99.5% / 30d | 100% (50/50 returned `outcome='success'`) | n too small for availability — rebaseline after ≥1 week of production traffic |
+| **SLO-2 Verifier pass rate** | ≥95% / 7d | 100% (0/50 hit the 30% atomic-strip threshold) | substantial — full headroom against target |
+| **SLO-3 Citation match rate** | ≥85% / 7d avg | 100% (every claim passed verification on every call) | substantial — full headroom |
+| **SLO-4 End-to-end p95** | <8s | **5413ms** | ~32% headroom; comfortably under |
+| **SLO-4 End-to-end p99** | <15s | 5727ms | ~62% headroom |
+| **SLO-4 End-to-end median** | <4s | 4990ms | **slightly OVER target by ~1s** ⚠️ |
+| **SLO-5 Tool failure rate** | <1% / 7d | 0% (all 250 tool calls succeeded — 5 tools × 50 requests) | substantial |
+
+**Sub-metric breakdown for SLO-4** (LLM call dominates):
+
+| Stage | avg | p95 | % of total |
+|---|---:|---:|---:|
+| Anthropic LLM call (`llm_calls[0].latency_ms`) | 4820ms | 5254ms | ~97% |
+| Tool fetch + verifier + audit-write | 143ms | ~250ms | ~3% |
+| **Total (`total_latency_ms`)** | **4963ms** | **5413ms** | 100% |
+
+The LLM call is essentially the entire latency. Tool fetch + verifier + audit-write together are noise. This concentrates the optimization lever on Anthropic-side performance: prompt caching, model selection, output token cap.
+
+**One concerning observation:** the median at 4990ms is **just over** the documented <4s P50 target. n=50 may not be enough to draw a strong conclusion (smoke-tier shape is one of the lighter shapes the system handles), but this is the closest existing numbers come to *missing* a target. Worth re-baselining once the cache anomaly in §3 is resolved — explicit caching alone could drop median latency 30-50% according to Anthropic's documented prompt-cache savings.
+
+**Where the baseline lives:**
+- Raw rows: `agent_log` table, `outcome='success' AND created_at BETWEEN '2026-05-02 21:26' AND '21:32'`
+- Per-LLM-call latency: `JSON_EXTRACT(llm_calls, '$[0].latency_ms')` — populated for every request going forward (added 2026-05-02 commit `b52f701a4`)
+- Per-eval-case latency: surfaces in `agent/tests/eval/results/<timestamp>.md` `## Latency` section on every run
+
+---
+
 ## 3. The cost-side guardrail (operational metric, not a hard SLO)
 
 ### Prompt cache hit rate
@@ -109,6 +142,18 @@ Not an SLO in the traditional sense — caching is a cost optimization, not a co
 | **Signal source** | Langfuse generation `usage` field (auto-emitted from Anthropic SDK) |
 
 This isn't a paging condition — it's a weekly review item. A persistent <15% over a week triggers a one-line config change (drop the `cache_control` key in `agent/agent.py:run_chat`). Documented in DECISIONS.md as a designed-in kill switch, not a regression.
+
+**⚠ Observed 2026-05-02 (n=50): cache hit rate is 0%.** Every one of 50 live calls came back with `cache_read_input_tokens=0`. The 50 calls were: 5 different smoke-tier cases × 10 iterations, all using identical patient context (Maria fixture, patient_id=1) and identical "Generate a pre-visit brief" message, with iteration-to-iteration spacing well under the 5-minute cache TTL. Under the documented design (`cache_control: ephemeral` on the patient-context system block per `agent/agent.py:run_chat`), iterations 2-10 of any case should have hit the cache. None did.
+
+This means the kill-switch threshold is **already triggered** under the current cache configuration — but it's not yet a kill-switch decision because the root cause hasn't been investigated. Three plausible explanations, each pointing to a different fix:
+
+1. **Min-cacheable-prefix threshold not met.** Anthropic Haiku 4.5 requires ≥1024 tokens of prefix before caching activates. The static system block alone may be under that threshold; if so, the breakpoint placement in `agent/agent.py` needs to move *down* the prompt to capture more prefix.
+2. **Per-request variation in the prefix.** Some field (timestamp, request_id, session_id) might be ending up in the cached prefix when it shouldn't. The fix is identifying the variant field and excluding it.
+3. **Anthropic-side fingerprinting.** Less likely but possible — some property of how the SDK constructs the request (e.g., `cache_control` being applied with the wrong `type` value) silently disables caching.
+
+**Investigation cost:** ~30 minutes to inspect one Langfuse trace and verify which of the three is the actual cause. Worth doing **before** considering the kill switch, because the cost-economics in [COST_ANALYSIS.md](./COST_ANALYSIS.md) assume cache savings are real. If the cache *can* work and we just have a misconfiguration, fixing it is much higher leverage than killing it.
+
+Filed as a P2 finding from the n=50 baseline measurement. Not blocking SLO targets above (SLO-4's p95 is well under target without cache), but it's load-bearing for the cost projections.
 
 ---
 

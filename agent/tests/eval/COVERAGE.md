@@ -148,23 +148,48 @@ Goal for week 2+: every case promoted from a real production trace gets a `sourc
 
 ## Identified Gaps For Week-2 Expansion
 
-These are the explicit holes in the current suite, ordered by signal value:
+These are the explicit holes in the current suite, ordered by signal value. Items 1-3 are the **breadth gaps** flagged 2026-05-02 after the latency-baseline run revealed that the entire smoke + full tier exercises a single use case (UC1) against a single patient body (Maria fixture); per-case latency stddev was 311ms which sounds tight but is also misleading because the cases barely vary the prompt/context shape. The eval suite is comprehensive *vertically* (depth of failure modes per case shape) and thin *horizontally* (variety of case shapes).
 
-1. **Verifier-targeted negative cases live as unit tests, not eval cases.** `agent/tests/unit/test_verifier.py` has `test_value_date_pair_must_come_from_same_record` and `test_value_date_pair_passes_when_co_located_in_same_record`. Plan step 5's "Frankenstein-lab eval cases" were de-scoped because of this overlap. Strong choice — eval cases are the wrong shape for value/date pair regression testing. Worth documenting elsewhere too.
+1. **Use-case coverage is UC1-heavy.** Of 26 cases:
+   - **UC1 (pre-visit brief)** is exercised by ~20 cases — the canned starter prompt + most synthetic-fixture variants
+   - **UC2 (delta since last visit)** is exercised by 1 case (`maria_uc2_delta_query`)
+   - **UC3 (in-visit free Q&A)** is exercised by 2-3 cases obliquely (`ambiguous_query`, `synthea_followup_medications`, `synthea_focused_diabetes_status`)
 
-2. **`get_allergies` thinly covered (4 cases).** Allergies are clinically high-stakes and the brief explicitly calls out missed-allergy as the worst failure mode. Add 1-2 more allergy-focused cases in week 2: severe-allergy + contradictory chart, allergy with multiple cross-reactivities (e.g., PCN → cephalosporin), or allergy-buried-in-narrative-only.
+   Week-2 expansion should add **explicit UC2 and UC3 case families**: 4-6 UC2 cases against varied "last visit" anchors (recent vs. months-old, different specialties, cancelled-and-rebooked), and 4-6 UC3 cases for free-text follow-up shapes (clarifying questions, pivots between topics, drug-interaction queries, "summarize the labs" focused queries, "what's the trend on X" history queries).
 
-3. **No DDI rule corpus tests yet.** Fixture 999101 deliberately embeds a warfarin + ibuprofen DDI; a follow-up case can assert "must_mention 'bleeding risk' or 'NSAID interaction'" once `RULE_CORPUS.md`'s anticoagulant-NSAID rule ships.
+2. **Patient-shape variety is narrow.** The synthetic-patient fixtures cover specific failure modes (sparse data, polypharmacy + DDI, free-text-heavy, contradictory progression, pediatric T1DM) but are still a small handful. Week-2 expansion should add patient bodies with varied **clinical histories**, not just varied failure modes:
+   - Multi-comorbid older adult (5+ chronic conditions; long medication list)
+   - Recent hospitalization with discharge complications
+   - Pregnancy + medication management
+   - Mental-health-significant chart (depression/anxiety with med changes)
+   - Workers'-comp / legal-significant chart (different consent shape)
+   - Geriatric with polypharmacy + cognitive decline
+   - Recent-onset diagnosis (rapid diagnostic workup)
+   - Long-tail rare-disease patient (atypical pattern)
 
-4. **No cost-spiral / token-exhaustion cases.** The plan's generation strategy listed "50KB user message history" as an attack — not implemented. Pending the rate-limit + cost-budget guardrails from `ai-security-review` blockers; once those land, write `expected_to_fail: true` regression tests for them.
+   Each of these tests how the agent handles different chart *texture* — narrative density, problem-list cardinality, lab variety, encounter-specialty mix. Pairs naturally with UC2/UC3 expansion in item 1.
 
-5. **No HMAC variant coverage beyond case 05.** Plan listed: empty body, replayed body, wrong key, wrong header layout. Currently we have one `bad_hmac: true` case. If the HMAC replay-protection from `ai-security-review` blocker #3 lands, all four variants are easy to add.
+3. **No latency baselines for shapes other than smoke.** The 2026-05-02 baseline (n=50) covers UC1 against Maria fixture only. SLO-4 in [`SLO.md`](../../../SLO.md) needs separate baselines for: UC1 against Synthea-deep-chart (target unknown until measured), UC2 (multi-tool fetches, possibly more LLM tokens), UC3 multi-turn (cache *should* fire here, but see the cache anomaly note below). Each baseline run is ~$0.30-0.50 of Anthropic spend at n=50.
 
-6. **4 cases lack declared `tool_mix`** (see "Cases Without tool_mix Declared" above). Backfill is ~30 minutes of mechanical work and would put the consistency-check rule at 100% coverage.
+4. **Verifier-targeted negative cases live as unit tests, not eval cases.** `agent/tests/unit/test_verifier.py` has `test_value_date_pair_must_come_from_same_record` and `test_value_date_pair_passes_when_co_located_in_same_record`. Plan step 5's "Frankenstein-lab eval cases" were de-scoped because of this overlap. Strong choice — eval cases are the wrong shape for value/date pair regression testing. Worth documenting elsewhere too.
 
-7. **Coverage matrix is per-(category × difficulty) and (category × tier) only.** A 3-way matrix (category × difficulty × tool_mix) would surface combination gaps like "we have 0 advanced cases that exercise only `get_allergies`." Worth adding to the runner's auto-generated report when the suite grows past ~50 cases.
+5. **`get_allergies` thinly covered (4 cases).** Allergies are clinically high-stakes and the brief explicitly calls out missed-allergy as the worst failure mode. Add 1-2 more allergy-focused cases in week 2: severe-allergy + contradictory chart, allergy with multiple cross-reactivities (e.g., PCN → cephalosporin), or allergy-buried-in-narrative-only.
 
-8. **No live-LLM-mode pre-commit gate.** Smoke tier is fixture-only by design; nightly tier requires manual invocation. A weekly cron that runs `python -m agent.tests.eval.runner --tier=nightly` against live Anthropic + live Synthea DB would catch live-mode regressions earlier.
+6. **No DDI rule corpus tests yet.** Fixture 999101 deliberately embeds a warfarin + ibuprofen DDI; a follow-up case can assert "must_mention 'bleeding risk' or 'NSAID interaction'" once `RULE_CORPUS.md`'s anticoagulant-NSAID rule ships.
+
+7. **No cost-spiral / token-exhaustion cases.** The plan's generation strategy listed "50KB user message history" as an attack — implemented now that the rate-limit + cost-budget guardrails landed (commit `c15d6a0af`). Add `expected_to_fail: false` regression tests now: a 60-message conversation that should trigger the per-user RPM limit; a 200K-token conversation that should trigger the hourly budget. Both should refuse cheaply with `n_tools=NULL`.
+
+8. **HMAC variant coverage beyond case 05 + replay protection coverage.** Now that replay protection landed (commit `aadc2a40c`), the existing `05_auth_boundary_bad_hmac` case can be expanded into a family: empty body, replayed body, wrong key, wrong header layout, **stale-timestamp replay**, **future-dated request**. The unit-test coverage in `test_hmac_replay.py` covers the replay-window logic end-to-end; eval-case coverage is for the request-shape-and-response-shape contract.
+
+9. **0% prompt-cache hit rate observed in the n=50 baseline.** Surfaces a real misconfiguration (or design issue) in `agent/agent.py:run_chat`'s `cache_control` placement. The eval suite is well-positioned to gate this once it's diagnosed: a UC3-shaped multi-turn case against a single patient should produce ≥85% cache_read on iterations 2+. Filed as a P2 finding in [`SLO.md §3`](../../../SLO.md). Worth ~30min of investigation against a Langfuse trace from the baseline run before adding more scope.
+
+10. **4 cases lack declared `tool_mix`** (see "Cases Without tool_mix Declared" above). Backfill is ~30 minutes of mechanical work and would put the consistency-check rule at 100% coverage.
+
+11. **Coverage matrix is per-(category × difficulty) and (category × tier) only.** A 3-way matrix (category × difficulty × tool_mix) would surface combination gaps like "we have 0 advanced cases that exercise only `get_allergies`." Worth adding to the runner's auto-generated report when the suite grows past ~50 cases.
+
+12. **No live-LLM-mode pre-commit gate.** Smoke tier is fixture-only by design; nightly tier requires manual invocation. A weekly cron that runs `python -m agent.tests.eval.runner --tier=nightly` against live Anthropic + live Synthea DB would catch live-mode regressions earlier.
+
+13. **Latency-regression assertions in cases.** The runner now captures per-case `latency_ms` (commit `b52f701a4`), but no case asserts a latency ceiling. Once we have stable per-case baselines, individual cases could carry `expected: { max_latency_ms: 6000 }` so a case-specific latency regression fails the build. Premature today (single-case n=10 isn't a real baseline yet); ready when n=50+ per case lands.
 
 ---
 
