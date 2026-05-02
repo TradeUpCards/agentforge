@@ -1,0 +1,97 @@
+# GitLab CI pipeline for the AgentForge fork.
+#
+# Mirrors what `.github/workflows/agent-eval.yml` runs on GitHub — same
+# Python image, same fixture-mode env vars, same pytest invocation —
+# so reviewers seeing this fork on GitLab get the same green/red gate
+# on Merge Requests that reviewers on GitHub get on Pull Requests.
+#
+# Cost: zero. USE_FIXTURE_LLM + USE_FIXTURE_DATA both true keep this
+# off the Anthropic API and out of the live MariaDB. Nightly-tier
+# eval cases auto-skip via live_llm_required / live_db_required flags
+# in the YAML cases.
+#
+# What this catches:
+#   - Verifier rule regressions (16 tests)
+#   - PHI date-bucketing mask regressions (12 tests)
+#   - Eval Golden Set regressions across smoke + full tier (~9 cases in CI)
+#   - End-to-end smoke (/health + UC1 happy path + bad-HMAC refusal)
+#
+# What this does NOT catch (intentional, see EVAL_SUITE.md §6):
+#   - Live-LLM behavior (covered by manual nightly tier)
+#   - Live-DB queries against Synthea-imported MariaDB (covered nightly)
+#   - LLM-as-judge quality scoring (week-2+)
+#
+# Upstream OpenEMR has no .gitlab-ci.yml at the time of this fork —
+# this is purely AgentForge tooling.
+
+default:
+  image: python:3.11-slim
+  # Don't fetch tags + LFS objects — they're not needed for the agent
+  # tests, and the OpenEMR upstream history has many of both.
+  tags: []
+
+stages:
+  - test
+
+# Workflow rules — controls whether ANY pipeline runs at all.
+# Without these, GitLab can run the same pipeline twice (once for the
+# branch push, once for the merge_request_event). The rules below pick
+# exactly one trigger per situation: MR pipeline if there's an open MR,
+# branch pipeline otherwise.
+workflow:
+  rules:
+    # Always run on merge requests targeting any branch.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # Always run on pushes to master.
+    - if: '$CI_COMMIT_BRANCH == "master"'
+    # Run on pushes to feature branches that DON'T have an open MR yet
+    # (once an MR opens, the MR pipeline takes over to avoid duplicates).
+    - if: '$CI_COMMIT_BRANCH =~ /^agentforge\// && $CI_OPEN_MERGE_REQUESTS == null'
+
+agent-eval:
+  stage: test
+  # Skip if the change doesn't touch agent code, the pre-commit hook,
+  # or this CI file itself. Saves CI minutes on doc-only changes.
+  rules:
+    - changes:
+        - agent/**/*
+        - scripts/git-hooks/pre-commit
+        - .gitlab-ci.yml
+  variables:
+    # Both fixture flags ON — keeps the run deterministic + free.
+    USE_FIXTURE_LLM: "true"
+    USE_FIXTURE_DATA: "true"
+    # HMAC secret needs *some* value for the eval runner to compute
+    # signatures. Actual content doesn't matter in fixture mode —
+    # verify_hmac runs against this same env value.
+    OPENEMR_HMAC_SECRET: "ci-fixture-mode-not-a-real-secret"
+    # Audit-log DB user is intentionally empty — _audit_log.py no-ops
+    # when credentials are not configured (graceful for CI).
+    DB_AUDIT_USER: ""
+    DB_AUDIT_PASSWORD: ""
+    # Pip cache lives inside the project so GitLab can cache it.
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+  cache:
+    key:
+      files:
+        - agent/requirements.txt
+    paths:
+      - .pip-cache/
+  before_script:
+    - python --version
+    - pip install --upgrade pip
+    - pip install -r agent/requirements.txt
+  script:
+    - echo "--- Verifier + PHI mask unit tests ---"
+    - python -m pytest agent/tests/unit/ -v --tb=short
+    - echo "--- Eval Golden Set (smoke + full tier, fixture mode) ---"
+    - python -m pytest agent/tests/eval/ -v --tb=short
+  artifacts:
+    # Always upload the eval run report (success or failure) for post-mortem.
+    when: always
+    paths:
+      - agent/tests/eval/results/
+    expire_in: 14 days
+  timeout: 10 minutes
+  # Allow a newer commit on the same ref to cancel an in-flight pipeline.
+  interruptible: true
