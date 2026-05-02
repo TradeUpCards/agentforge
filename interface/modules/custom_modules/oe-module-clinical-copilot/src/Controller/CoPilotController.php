@@ -186,7 +186,13 @@ final class CoPilotController
             return;
         }
 
-        $hmac = $this->computeHmac($userId, $patientId, $messages, $secret);
+        // Replay protection: the timestamp is signed alongside the rest of
+        // the payload; the agent rejects any request whose timestamp is
+        // more than 30 seconds off its clock in either direction. See
+        // agent/agent.py:_HMAC_MAX_AGE_SECONDS for the window value.
+        $timestamp = time();
+
+        $hmac = $this->computeHmac($userId, $patientId, $timestamp, $messages, $secret);
 
         // session_id is browser-generated (UUID per chat-panel-open) and used
         // only as the Langfuse trace's session_id for multi-turn grouping.
@@ -203,6 +209,7 @@ final class CoPilotController
         $payload = [
             'user_id' => $userId,
             'patient_id' => $patientId,
+            'timestamp' => $timestamp,
             'hmac' => $hmac,
             'messages' => $messages,
             'session_id' => $sessionIdNormalized,
@@ -258,15 +265,20 @@ final class CoPilotController
     /**
      * Compute the HMAC the Python agent expects.
      *
-     * Layout (must match the agent's verification exactly):
-     *   payload = "{user_id}|{patient_id}|{m1.content}|{m2.content}|..."
+     * Layout (must match agent.py:verify_hmac exactly):
+     *   payload = "{user_id}|{patient_id}|{timestamp}|{m1.content}|{m2.content}|..."
      *   hmac    = hex(HMAC-SHA256(secret, payload))
+     *
+     * The timestamp is included inside the signed bytes so a captured
+     * request body cannot be replayed past the 30-second freshness window
+     * the Python agent enforces (`_HMAC_MAX_AGE_SECONDS`). Replay protection
+     * tracks back to the 2026-05-02 ai-security-review production blocker.
      *
      * @param list<array{role: string, content: string}> $messages
      */
-    private function computeHmac(int $userId, int $patientId, array $messages, string $secret): string
+    private function computeHmac(int $userId, int $patientId, int $timestamp, array $messages, string $secret): string
     {
-        $payload = $userId . '|' . $patientId . '|' . implode('|', array_map(
+        $payload = $userId . '|' . $patientId . '|' . $timestamp . '|' . implode('|', array_map(
             static fn (array $m): string => $m['content'],
             $messages
         ));
