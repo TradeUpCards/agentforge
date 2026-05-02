@@ -172,10 +172,19 @@ class ChatRequest(BaseModel):
 
     hmac: str
     """HMAC-SHA256 of (user_id|patient_id|<message-bodies-joined>) using
-    OPENEMR_HMAC_SECRET. Defense-in-depth: agent verifies before any tool runs."""
+    OPENEMR_HMAC_SECRET. Defense-in-depth: agent verifies before any tool runs.
+
+    Note: session_id is intentionally NOT in the HMAC payload. It's
+    observability metadata only — tampering with it would corrupt Langfuse
+    trace grouping but cannot bypass auth, leak PHI, or alter agent behavior."""
 
     messages: list[Message]
     """Full conversation history including the latest user turn."""
+
+    session_id: str | None = None
+    """Browser-generated UUID stable across all turns of one chat-panel
+    session. Used as the Langfuse trace's `session_id` so multi-turn UC3
+    conversations group together. Optional — when absent, traces stand alone."""
 
 
 class AgentResponse(BaseModel):

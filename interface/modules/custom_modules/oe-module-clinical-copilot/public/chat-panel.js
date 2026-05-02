@@ -44,6 +44,28 @@
     /** @type {Object<string, Object>} record_id -> retrieved_records entry. */
     var lastRetrievedRecords = {};
 
+    /**
+     * Per-panel-open session UUID. Sent in every /chat request so the
+     * backend can use it as the Langfuse trace's session_id, grouping
+     * all turns of a single chat session together in the Sessions view.
+     *
+     * Stable for the lifetime of this iframe (one panel-open). When the
+     * user closes + reopens the drawer, a new session_id is generated.
+     * That matches the user's mental model — "this conversation" =
+     * "this open panel."
+     */
+    var sessionId = (function () {
+        try {
+            if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                return window.crypto.randomUUID();
+            }
+        } catch (e) { /* fall through to fallback */ }
+        // Fallback for environments without crypto.randomUUID. Time +
+        // random suffix; not cryptographic but fine for trace grouping.
+        return 'sess-' + Date.now().toString(36) + '-' +
+               Math.random().toString(36).slice(2, 10);
+    })();
+
     var $messagesEl = document.getElementById('copilot-messages');
     var $form = document.getElementById('copilot-form');
     var $input = document.getElementById('copilot-input');
@@ -437,7 +459,7 @@
             method: 'POST',
             credentials: 'same-origin',
             headers: headers,
-            body: JSON.stringify({ messages: messages })
+            body: JSON.stringify({ messages: messages, session_id: sessionId })
         }).then(function (response) {
             return response.text().then(function (text) {
                 var parsed = null;

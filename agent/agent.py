@@ -25,10 +25,13 @@ import hashlib
 import hmac
 import json
 import time
+import re
 import uuid
 from typing import Any
 
 from langfuse import Langfuse, get_client, observe
+from langfuse._client.attributes import LangfuseOtelSpanAttributes
+from opentelemetry import trace as otel_trace
 
 from .config import Settings, get_settings
 from .llm_client import LLMClient, build_llm_client
@@ -51,9 +54,84 @@ from .verifier import verify_claims
 _langfuse_client: Langfuse | None = None
 
 
+# ---------------------------------------------------------------------------
+# Langfuse PHI mask — observability-only date bucketing
+# ---------------------------------------------------------------------------
+#
+# Runs at the SDK serialization boundary, ONLY on the copy of inputs/outputs
+# being shipped to Langfuse Cloud. Does NOT affect what the LLM, the verifier,
+# the OpenEMR module, or the user sees — those all see real PHI because the
+# work requires it.
+#
+# What this mask currently does (week-1 first cut):
+#   - Year-month bucketing on dates: `2026-03-15` → `2026-03`
+#     * ISO format (`YYYY-MM-DD`)
+#     * US slash (`MM/DD/YYYY`)
+#     * US dash (`MM-DD-YYYY`)
+#   - Walks dicts/lists/strings recursively
+#
+# What this mask does NOT yet do (deferred — see DECISIONS.md §4a):
+#   - Patient names, DOBs, MRNs, phone numbers, addresses
+#   - Free-text date detection (e.g. "March 15, 2026", "3 months ago")
+#   - Other 18 HIPAA Safe Harbor identifiers
+#
+# Year-month bucketing rationale: removes day-precision PHI per HIPAA
+# Safe Harbor §3 (dates more granular than year), but preserves enough
+# signal in Langfuse traces to debug agent behavior — we can still see
+# "recent vs old" and month-level event clustering.
+
+_DATE_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_DATE_US_SLASH = re.compile(r"\b(\d{2})/(\d{2})/(\d{4})\b")
+_DATE_US_DASH = re.compile(r"\b(\d{2})-(\d{2})-(\d{4})\b")
+
+
+def _bucket_dates_in_string(s: str) -> str:
+    """Replace day-precision dates with year-month buckets in a string."""
+    s = _DATE_ISO.sub(r"\1-\2", s)
+    s = _DATE_US_SLASH.sub(r"\3-\1", s)
+    s = _DATE_US_DASH.sub(r"\3-\1", s)
+    return s
+
+
+def _mask_phi(data: Any) -> Any:
+    """Langfuse mask callback. Recursively bucket day-precision dates to
+    year-month. Called on every input + output payload before Langfuse
+    Cloud export. Must be defensive — return data unchanged on any error
+    so observability doesn't break the request.
+
+    Handles Pydantic models (the typical /chat input + AgentResponse output)
+    by dumping to dict first, then recursing. Without this, the isinstance
+    checks would miss Pydantic models and return them unmasked."""
+    try:
+        if isinstance(data, str):
+            return _bucket_dates_in_string(data)
+        if isinstance(data, dict):
+            return {k: _mask_phi(v) for k, v in data.items()}
+        if isinstance(data, (list, tuple)):
+            return [_mask_phi(v) for v in data]
+        # Pydantic v2 (BaseModel.model_dump) — covers ChatRequest, AgentResponse,
+        # RefusalResponse, and all nested Claim/RetrievedRecord/ToolSummary models.
+        if hasattr(data, "model_dump") and callable(data.model_dump):
+            return _mask_phi(data.model_dump())
+        return data
+    except Exception:
+        return data
+
+
 def _langfuse() -> Langfuse | None:
     """Lazy-init the Langfuse client (uses env vars). Returns None if keys
-    aren't configured — every Langfuse call site is no-op safe."""
+    aren't configured — every Langfuse call site is no-op safe.
+
+    The PHI mask is wired here so it's applied on every traced
+    input/output across the process lifetime.
+
+    Important singleton wrinkle: Langfuse v4's `LangfuseResourceManager`
+    is a per-public-key singleton. If ANY code path triggered SDK init
+    before this function runs, the constructor's `mask=` parameter is
+    silently ignored (the existing instance is returned unchanged). We
+    defend against that by directly patching `_mask` on both the
+    client instance and the underlying resource manager after construction
+    — that guarantees the mask is in effect regardless of init order."""
     global _langfuse_client
     if _langfuse_client is not None:
         return _langfuse_client
@@ -64,7 +142,23 @@ def _langfuse() -> Langfuse | None:
         public_key=settings.langfuse_public_key,
         secret_key=settings.langfuse_secret_key,
         host=settings.langfuse_host,
+        mask=_mask_phi,
     )
+    # Defensive: if an earlier code path raced us to construct the
+    # singleton without the mask, force-set it now. Safe to do
+    # unconditionally — re-setting to the same callable is a no-op.
+    _langfuse_client._mask = _mask_phi
+    if hasattr(_langfuse_client, "_resources") and _langfuse_client._resources is not None:
+        _langfuse_client._resources.mask = _mask_phi
+    # Also patch what get_client() returns, since some code paths use that
+    # directly rather than our module-level _langfuse_client.
+    try:
+        _shared = get_client()
+        _shared._mask = _mask_phi
+        if hasattr(_shared, "_resources") and _shared._resources is not None:
+            _shared._resources.mask = _mask_phi
+    except Exception:
+        pass
     return _langfuse_client
 
 
@@ -338,12 +432,28 @@ async def run_chat(
     llm = llm or build_llm_client(settings)
     request_id = str(uuid.uuid4())
 
+    # Promote user_id + session_id to top-level Langfuse trace attributes
+    # so the Users + Sessions dashboards work (per-user spend rollups,
+    # multi-turn UC3 conversation grouping). The Langfuse v4 SDK uses
+    # OpenTelemetry under the hood — these attributes need to be set on
+    # the OTel span directly. patient_id stays in metadata only —
+    # promoting it would put PHI on the trace's primary index.
+    current_otel_span = otel_trace.get_current_span()
+    current_otel_span.set_attribute(
+        LangfuseOtelSpanAttributes.TRACE_USER_ID, str(request.user_id)
+    )
+    if request.session_id:
+        current_otel_span.set_attribute(
+            LangfuseOtelSpanAttributes.TRACE_SESSION_ID, request.session_id
+        )
+
     # Tag this trace with request-shape metadata for filtering in Langfuse.
     get_client().update_current_span(
         metadata={
             "request_id": request_id,
             "user_id": request.user_id,
             "patient_id": request.patient_id,
+            "session_id": request.session_id,
             "message_count": len(request.messages),
             "llm_mode": "fixture" if settings.use_fixture_llm else "live",
             "data_mode": "fixture" if settings.use_fixture_data else "live",

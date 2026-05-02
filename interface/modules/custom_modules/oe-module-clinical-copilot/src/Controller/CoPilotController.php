@@ -188,11 +188,24 @@ final class CoPilotController
 
         $hmac = $this->computeHmac($userId, $patientId, $messages, $secret);
 
+        // session_id is browser-generated (UUID per chat-panel-open) and used
+        // only as the Langfuse trace's session_id for multi-turn grouping.
+        // Intentionally NOT in the HMAC payload — observability metadata,
+        // not security-sensitive. Tampering would only corrupt trace
+        // grouping, no auth/PHI impact.
+        $sessionId = $decoded['session_id'] ?? null;
+        if (is_string($sessionId) && $sessionId !== '' && strlen($sessionId) <= 128) {
+            $sessionIdNormalized = $sessionId;
+        } else {
+            $sessionIdNormalized = null;
+        }
+
         $payload = [
             'user_id' => $userId,
             'patient_id' => $patientId,
             'hmac' => $hmac,
             'messages' => $messages,
+            'session_id' => $sessionIdNormalized,
         ];
 
         // 8. Forward to the Python agent service.

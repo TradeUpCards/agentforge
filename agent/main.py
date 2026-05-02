@@ -50,15 +50,20 @@ logger = logging.getLogger("agent")
 def _maybe_init_langfuse() -> None:
     """Initialize Langfuse SDK if keys are configured.
 
-    Langfuse picks env vars up automatically; we just validate they're
-    present and log status. The SDK is initialized via the @observe decorator
-    pattern in the agent loop where applicable.
+    We instantiate the client explicitly (via agent.agent._langfuse) at
+    startup so the PHI mask is wired into the SDK singleton BEFORE any
+    @observe-decorated function fires. Without this, the SDK would
+    self-init on first @observe call without the mask.
     """
+    from agent.agent import _langfuse
+
     settings = get_settings()
     if settings.langfuse_public_key and settings.langfuse_secret_key:
+        client = _langfuse()
         logger.info(
-            "Langfuse configured (host=%s); traces enabled.",
+            "Langfuse configured (host=%s); traces enabled. PHI mask: %s",
             settings.langfuse_host,
+            "active" if client is not None else "disabled (init failed)",
         )
     else:
         logger.info("Langfuse keys not configured; observability disabled.")
