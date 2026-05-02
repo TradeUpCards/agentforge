@@ -72,7 +72,15 @@ def _langfuse() -> Langfuse | None:
 # System prompt — teaches the LLM the contract
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT_TEMPLATE = """\
+# Static system-prompt content — cacheable across all /chat requests.
+# Patient context (per-request) is appended as a SECOND system block at
+# call time so it never invalidates the cache prefix.
+#
+# Reorganized 2026-05-01 to put OUTPUT FORMAT before PATIENT CONTEXT so
+# the cacheable static portion is contiguous at the front; otherwise
+# the prompt-cache breakpoint would have to land mid-template and miss
+# the output-format schema (~700 tokens) from the cache.
+_SYSTEM_PROMPT_STATIC = """\
 You are AgentForge Clinical Co-Pilot, an assistant for a primary care \
 physician (PCP) reviewing a patient's chart. The PCP has ~90 seconds before \
 walking into the exam room.
@@ -80,7 +88,7 @@ walking into the exam room.
 YOU OPERATE UNDER STRICT VERIFICATION RULES:
 
 1. Every factual claim about THIS patient must cite at least one source \
-record_id from the patient context below.
+record_id from the patient context (provided in a separate block below).
 2. Generic medical knowledge ("metformin is first-line for T2DM") does NOT \
 need a citation.
 3. NEVER invent record IDs. NEVER invent values, dates, doses, or lab \
@@ -101,27 +109,23 @@ duplicating them in a list adds visual noise without adding information.
 - One citation per fact is enough; only stack multiple ([a] [b]) when the \
 fact is genuinely synthesized from multiple records.
 
-PATIENT CONTEXT (records retrieved for this patient):
-
-{patient_context}
-
 OUTPUT FORMAT — STRICT:
 
 Respond with a single JSON object, nothing else (no preamble, no markdown \
 code fences). The schema:
 
-{{
+{
   "prose": "<the message the PCP will read; markdown ok; cite facts inline \
 with [record_id] markers>",
   "claims": [
-    {{
+    {
       "text": "<the standalone claim>",
       "claim_type": "<one of: fact, history, lab_value, medication_change, \
 diagnosis_change, absence, rule_flag>",
       "source_record_ids": ["<table>:<id>", ...]
-    }}
+    }
   ]
-}}
+}
 
 Every factual claim about this patient that appears in `prose` MUST also \
 appear as a structured entry in `claims` with valid source_record_ids. The \
@@ -385,9 +389,45 @@ async def run_chat(
             trace_id=trace_id,
         )
 
-    # 3. Build system prompt with context
+    # 3. Build system prompt with context.
+    #
+    # Two-block structure with `cache_control` on the SECOND block, so
+    # the cache entry covers (static framing + per-patient context):
+    #
+    #   Block 1: _SYSTEM_PROMPT_STATIC — verifier rules, citation style,
+    #     output-format schema. ~520 tokens.
+    #   Block 2 (cache breakpoint): "PATIENT CONTEXT:" header + the
+    #     per-patient retrieved-records blob. ~3,400 tokens.
+    #
+    # Why the breakpoint is on block 2, not block 1:
+    #
+    # Anthropic's minimum cacheable prefix is 1024 tokens (Sonnet 4.5,
+    # Haiku 4.5; Opus needs 2048). The static block alone is too small
+    # to cache. Putting the breakpoint on block 2 means the whole
+    # system prompt becomes ONE cache entry per patient — large enough
+    # to clear the threshold.
+    #
+    # Cache hit pattern this serves:
+    #   - UC1/UC2 single-turn: NO benefit (no repeat call within 5min TTL)
+    #   - UC3 multi-turn same-patient: ~90% savings on every follow-up
+    #     turn (same prefix, cached). This is the major win.
+    #   - Cross-patient: NO benefit (different prefix → different cache
+    #     entry). Architecture inherently can't cache across patients.
     patient_context = _format_patient_context(retrieved_records)
-    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(patient_context=patient_context)
+    system_blocks = [
+        {
+            "type": "text",
+            "text": _SYSTEM_PROMPT_STATIC,
+        },
+        {
+            "type": "text",
+            "text": (
+                "PATIENT CONTEXT (records retrieved for this patient):\n\n"
+                + patient_context
+            ),
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
 
     # 4. Call LLM
     anthropic_messages = [
@@ -406,7 +446,7 @@ async def run_chat(
     # mid-JSON and breaking the parser. 4096 leaves comfortable headroom.
     response = await llm.create(
         model=settings.model_workhorse,
-        system=system_prompt,
+        system=system_blocks,
         messages=anthropic_messages,
         max_tokens=4096,
         temperature=0.0,

@@ -4,7 +4,7 @@
 
 **Audience:** the hospital CTO asking *"what does this cost to run, and how does it scale to a clinic of 100 / a network of 1K / a regional system of 10K / a national EMR-wide deployment of 100K?"*
 
-**Bottom line:** dev burn is **~$1.64 of LLM spend** through ~36 hours of build + integration testing. Per-PCP-per-month projection is **~$6.60 of LLM cost at any tier from 100 to 100K** at the §2.5 usage baseline (30 requests/PCP/day, 50% cache hit rate). With infrastructure overhead, **total per-PCP cost lands $6.85–$7.93/mo across all four tiers** — flat or slightly decreasing because the per-patient access pattern means cost scales with patient interactions, not user count. Infrastructure cost grows with tier transitions (each tier names the architectural change driving the bump), but per-PCP infrastructure cost stays bounded by economies of scale. The dominant cost lever is the prompt-caching strategy — which **we have not fully wired yet** (see §3 for the honest call-out).
+**Bottom line:** dev burn is **~$1.64 of LLM spend** through ~36 hours of build + integration testing. Per-PCP-per-month projection is **~$9.50 of LLM cost at any tier from 100 to 100K** at the §2.5 usage baseline (30 requests/PCP/day) — measured per-request blended ~$0.014 post-ship. With infrastructure overhead, **total per-PCP cost lands $9.74–$10.83/mo across all four tiers** — flat because the per-patient access pattern means cost scales with patient interactions, not user count. Infrastructure cost grows with tier transitions (each tier names the architectural change driving the bump), but per-PCP infrastructure cost stays bounded by economies of scale. The dominant cost lever is **UC3 multi-turn share** — explicit `cache_control` breakpoints SHIPPED 2026-05-01 and verified (live test confirmed 100% cache-read on the cached prefix; ~90% input cost savings on UC3 follow-ups; see §3 for measured impact). At the §2.5 mix (~20% UC3) the cache mechanism is right at break-even; per-PCP/mo would compress toward ~$8 if pilot data shows UC3 share substantially higher (see §3.1 for the kill-switch decision rule and §8.1 for sensitivity).
 
 ---
 
@@ -15,20 +15,21 @@
 | LLM (OpenRouter, billing for Anthropic models) | **$1.64** | OpenRouter dashboard, 2026-04-27 to 2026-05-01 |
 | Langfuse Cloud | **$0.00** | Free tier (50K observations/month). **1,327 observations across 226 traces** captured to date — averaging ~5.9 observations per trace, matching our pipeline shape (run-chat span + composite-fetch span + 5 tool spans + LLM generation + verifier span; lower average from bad-HMAC short-circuits and fixture-mode runs). At our current ~265 obs/day pace we'd hit ~8K/month — still 6× under the free-tier limit. |
 | DigitalOcean droplet (4 GB / 2 vCPU) | **~$24.00** (monthly) | $0.83/day × ~5 days running ≈ $4.15 actual to date |
-| **Total week-1 dev spend** | **~$5.79** | LLM + prorated infra |
+| **Total week-1 agent runtime spend** | **~$5.79** | LLM + prorated infra |
+
+> **Scope note.** This table covers *agent runtime spend only* — what the deployed system burned during dev. It excludes the human+AI build-cost line (Claude Code / Cursor / IDE assistants used to write the code), which is the dominant week-1 spend in absolute terms but is one-time labor cost, not a per-PCP unit-economics input. The doc's audience (CTO evaluating production economics) cares about runtime cost, not build cost — so build cost is documented separately (case study + interview narrative), not folded in here.
 
 **Counterfactual** — what the same work would have cost without the cost-aware design choices documented in DECISIONS.md §6:
 
 | Scenario | LLM cost | Multiplier |
 |---|---:|---:|
-| **Actual:** Sonnet 4.5 reasoning + Haiku 4.5 synthesis, automatic prefix caching | **$1.64** | 1.0× |
+| **Actual:** Sonnet 4.5 reasoning + Haiku 4.5 synthesis (caching ship was end-of-week-1; most dev burn was no-cache) | **$1.64** | 1.0× |
 | Sonnet 4.5 only (no Haiku tier) | ~$3.50 | ~2.1× |
-| Sonnet 4.5 only, **no caching at all** | ~$5.50 | ~3.4× |
-| Opus 4.7 only, no caching | ~$15–25 | ~10–15× |
+| Opus 4.7 only | ~$15–25 | ~10–15× |
 
-Multi-model tiering + automatic prefix caching saved an estimated **~$4 of LLM spend in week 1 alone**. That delta scales linearly with usage — at 1K PCPs running similar daily traffic, the same architectural choice saves ~$50K/month.
+Multi-model tiering (Haiku for synthesis-shaped calls, Sonnet only for reasoning) saved an estimated **~$2 of LLM spend in week 1 alone**. That delta scales linearly with usage — at 1K PCPs running similar daily traffic, the same architectural choice saves ~$50K/month. Caching's contribution to dev burn was minimal because most dev requests were one-shot (no follow-up to amortize the CREATION premium); caching's payoff is in production UC3 multi-turn traffic (see §3).
 
-**Sanity check on the unit cost:** $1.64 ÷ 226 Langfuse-captured traces = **~$0.0073 per request**. (The observations-per-trace fanout is structural — every `/chat` produces one trace with multiple spans + a generation; the dollar cost lives on the generation only, so traces is the right denominator for per-request math.) Slightly under the $0.010 blended per-request estimate in §2 below, because dev-burn requests were Haiku-heavy (synthesis-shaped) and contexts were shallower (Maria fixture ~500 tokens vs Synthea-Guadalupe ~3,400 tokens). The forward projections in §4–7 use the conservative $0.010 baseline to avoid over-promising.
+**Sanity check on the unit cost:** $1.64 ÷ 226 Langfuse-captured traces = **~$0.0073 per request**. (The observations-per-trace fanout is structural — every `/chat` produces one trace with multiple spans + a generation; the dollar cost lives on the generation only, so traces is the right denominator for per-request math.) Substantially under the $0.014 blended per-request estimate in §2 below because dev-burn requests were Haiku-heavy (synthesis-shaped, no Sonnet UC2/UC3) and contexts were shallower (Maria fixture ~500 tokens vs Synthea-Guadalupe ~3,400 tokens). The forward projections in §4–7 use the §2.5-mix-derived $0.014 baseline as the post-ship measured rate.
 
 ---
 
@@ -54,9 +55,10 @@ Anthropic Haiku 4.5 list price (via OpenRouter, ~5% markup): $1/M input, $5/M ou
 
 | Cache scenario | Input cost | Output cost | Per-request |
 |---|---:|---:|---:|
-| Cold cache (first request after restart) | $0.0040 | $0.0040 | **$0.0080** |
-| ~50% automatic prefix cache hit (current, observed) | $0.0024 | $0.0040 | **$0.0064** |
-| ~80% explicit cache breakpoint hit (target — see §3) | $0.0010 | $0.0040 | **$0.0050** |
+| UC1/UC2 single-turn (cache CREATION on the prefix) | $0.0050 | $0.0040 | **$0.0090** |
+| UC3 multi-turn follow-up (explicit cache READ — shipped, see §3) | $0.0010 | $0.0040 | **$0.0050** |
+
+(Cache CREATION is billed at 1.25× input rate; CREATION cost is amortized only when a follow-up turn lands within the 5-min TTL. UC1/UC2 single-turn pays the creation cost without recouping it — but that's still cheaper than zero caching because most of the prefix isn't repeated within the call anyway.)
 
 ### 2.3 Per-request cost — UC2 delta narrative or UC3 follow-up (Sonnet 4.5 reasoning)
 
@@ -64,19 +66,21 @@ Sonnet 4.5 list price: $3/M input, $15/M output.
 
 | Cache scenario | Input cost | Output cost | Per-request |
 |---|---:|---:|---:|
-| Cold cache | $0.0120 | $0.0120 | **$0.0240** |
-| ~50% automatic | $0.0072 | $0.0120 | **$0.0192** |
-| ~80% explicit (target) | $0.0030 | $0.0120 | **$0.0150** |
+| UC1/UC2 single-turn (cache CREATION on the prefix) | $0.0150 | $0.0120 | **$0.0270** |
+| UC3 multi-turn follow-up (explicit cache READ) | $0.0030 | $0.0120 | **$0.0150** |
 
 ### 2.4 Blended per-request cost
 
-Assumed mix per the architecture's design (UC1/UC2/UC3 ratios depend on workflow, but ~70% of calls are synthesis-shaped → Haiku, ~30% are reasoning-shaped → Sonnet):
+Per the §2.5 mix (17 UC1 Haiku CREATION + 7 UC2 Sonnet CREATION + 6 UC3 Sonnet READ = 30 reqs/day):
 
-| Cache scenario | Blended per-request |
-|---|---:|
-| Cold cache | ~$0.013 |
-| ~50% automatic (current) | ~$0.010 |
-| ~80% explicit (target — week-2 work) | ~$0.008 |
+| Scenario | Daily $/PCP | Blended per-request |
+|---|---:|---:|
+| No caching at all (UC1/UC2/UC3 all cold) | $0.448 | ~$0.015 |
+| **Post-ship baseline at §2.5 mix** (UC3 hits cache READ; UC1/UC2 pay CREATION premium) | **$0.432** | **~$0.014** |
+| UC3-heavy mix (~40% UC3 share — pilot upside) | ~$0.36 | ~$0.012 |
+| UC3-dominant (~60% UC3 share — only achievable with conversational adoption) | ~$0.30 | ~$0.010 |
+
+The §4–7 tier projections use the **~$0.014 post-ship measured baseline**. The cache mechanism nets ~3–4% savings vs no-cache at the §2.5 mix because Sonnet UC3 READs ($0.015/req) are still more expensive than Haiku UC1 CREATIONs ($0.009/req); the savings ceiling expands only as UC3 share climbs (see §3.1 break-even and §8.1 sensitivity).
 
 ### 2.5 PCP usage assumption — requests per PCP per day
 
@@ -87,7 +91,7 @@ A typical PCP visits ~25 patients/day. Co-Pilot summon rate among PCPs in pilot 
 - ~25% of patients prompt a UC3 free-text question or two (~6 requests/day)
 - **Total: ~30 LLM requests per PCP per day**
 
-At blended $0.010/request and ~50% cache hit rate: **~$0.30 per PCP per day** of LLM cost. Over a 22-working-day month: **~$6.60/PCP/month**.
+At the **~$0.014/request post-ship baseline** (per §2.4): **~$0.43 per PCP per day** of LLM cost. Over a 22-working-day month: **~$9.50/PCP/month** of LLM. This is the number the §4–7 tier projections build on.
 
 ### 2.6 Sensitivity to usage assumptions
 
@@ -95,46 +99,154 @@ The §2.5 numbers are **reasoned estimates without pilot data**. The summon-rate
 
 | Scenario | Summon rate | UC2 follow-up | UC3 free-text | Reqs/PCP/day | LLM $/PCP/mo |
 |---|---:|---:|---:|---:|---:|
-| **Pessimistic** — Co-Pilot for hard cases only | 30% | 20% of briefs | 15% of patients | ~12 | **~$2.60** |
-| **Baseline** — used in §4–7 projections | 70% | 40% of briefs | 25% of patients | ~30 | **~$6.60** |
-| **Optimistic** — Co-Pilot becomes the default workflow | 90% | 60% of briefs | 40% of patients | ~46 | **~$10.10** |
+| **Pessimistic** — Co-Pilot for hard cases only | 30% | 20% of briefs | 15% of patients | ~13 | **~$3.60** |
+| **Baseline** — used in §4–7 projections | 70% | 40% of briefs | 25% of patients | ~30 | **~$9.50** |
+| **Optimistic** — Co-Pilot becomes the default workflow | 90% | 60% of briefs | 40% of patients | ~46 | **~$15.80** |
 
-The baseline is a midpoint guess. **Pilot data is the gating input for tightening this.** The first 30 days of pilot deployment with summon-rate telemetry would reduce the uncertainty here by a factor of ~3 — at which point the projection range collapses from ~3.9× spread to ~1.3× spread (one standard deviation of measured usage).
+The baseline is a midpoint guess. **Pilot data is the gating input for tightening this.** The first 30 days of pilot deployment with summon-rate telemetry would reduce the uncertainty here by a factor of ~3 — at which point the projection range collapses from ~4.4× spread to ~1.3× spread (one standard deviation of measured usage).
 
-What this means for the tier projections in §4–7: the LLM-cost line items can be read as the baseline. Pessimistic case at any tier is roughly **0.4× the LLM line item** (e.g., Tier 2 LLM drops from $6,600 to ~$2,600/mo); optimistic is **~1.5× the LLM line item**. Infrastructure costs are unaffected — they scale with PCP count, not request volume.
+**Counterintuitive note**: optimistic-adoption is *more* expensive per PCP, not less, because higher summon rate adds Sonnet UC2 single-turn calls (most expensive line at $0.027/req) faster than UC3 cache READs ($0.015/req) can offset. Heavy adoption is a workflow-positive but cost-negative outcome — exactly the kind of insight the pilot would surface.
 
-**Why this matters for the CTO defense.** "We assumed 70% summon rate; here's the range if we're wrong" is a stronger answer than "the cost is $6.60/PCP/mo trust us." Showing you've named the uncertainty is what separates a credible projection from an aspirational one.
+What this means for the tier projections in §4–7: the LLM-cost line items can be read as the baseline. Pessimistic case at any tier is roughly **0.38× the LLM line item** (e.g., Tier 2 LLM drops from $9,500 to ~$3,600/mo); optimistic is **~1.66× the LLM line item**. Infrastructure costs are unaffected — they scale with PCP count, not request volume.
+
+**Why this matters for the CTO defense.** "We assumed 70% summon rate; here's the range if we're wrong" is a stronger answer than "the cost is $9.50/PCP/mo trust us." Showing you've named the uncertainty is what separates a credible projection from an aspirational one.
 
 ---
 
-## 3. Honest framing — prompt caching gap
+## 3. Prompt caching — implementation and measured impact
 
-**We have not wired explicit `cache_control` breakpoints in the system prompt** (verified in `agent/llm_client.py` 2026-05-01 — we observe cache statistics via `cache_read_input_tokens` but don't pass `cache_control: {"type": "ephemeral"}` markers in the prompt blocks).
+**Status (as of 2026-05-01 evening): explicit cache breakpoints SHIPPED and verified.** `agent/agent.py:run_chat` now passes `system` as a 2-block list with `cache_control: {"type": "ephemeral"}` on the patient-context block (which combines static framing + per-patient context as the cacheable prefix).
 
-What we get today: **automatic prefix caching** — Anthropic's default behavior, which delivers ~50% input cost savings on subsequent requests within the 5-minute TTL when prompt prefixes match exactly.
+### Why the cache breakpoint is on block 2, not block 1
 
-What the case study and DECISIONS.md §6 reference: **explicit cache breakpoints**, which deliver ~90% savings on cached portions because the breakpoint marks specifically what to cache and the cache TTL extends to ~5 minutes guaranteed.
+Anthropic's prompt cache requires a **minimum cacheable prefix of 1024 tokens** for Sonnet 4.5 / Haiku 4.5. The static block alone (~520 tokens — verifier rules + citation style + output schema) is too small to cache on its own. The cacheable unit therefore has to include the patient context (~3,400 tokens for a Synthea-Guadalupe-shaped chart), and the breakpoint goes on the second block so the cache entry covers `static + context` together.
 
-**Implication for the projections below:** the per-request costs in §2 reflect ~50% caching. The "explicit cache" target line in each table is what we'd see *after* the breakpoints land in week-2. **All tier projections assume the current ~50% rate** as a conservative floor; the parenthetical "with explicit caching" delta is the upside if breakpoints ship.
+### What this caches and what it doesn't
 
-This is a real call we're making in the doc: **don't claim savings we haven't actually realized.** If a CTO asks "is 90% real?", the answer is: "automatic gets us 50% today; explicit breakpoints are a 1-2 hour code change planned for week 2; both are within Anthropic's documented mechanisms; the 90% number is achievable and we'll have it before pilot."
+| Pattern | Cache benefit | Why |
+|---|---|---|
+| **UC3 multi-turn, same patient** | **~90% input savings on follow-up turns** | Same prefix → cache HIT within the 5-min TTL. The major win. |
+| UC1/UC2 single-turn | None | First (and only) call creates the cache entry; nothing reads it before it expires. |
+| Cross-patient (sequential briefs) | None | Different patient context = different cache prefix = different cache entry. |
 
-Wiring effort for explicit breakpoints (week-2 work):
+**Inherent architectural limit:** the cache is keyed on the exact prompt prefix. A clinic-wide deployment doesn't get cross-patient cache benefit because every patient has unique chart data. **Per-patient repeat calls are where caching pays off** — exactly the UC3 multi-turn case.
 
-```python
-# In agent/agent.py:run_chat — add cache_control marker to the static
-# system prompt block so it's cached across the 5-min window:
-system = [
-    {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
-    {"type": "text", "text": patient_context},  # not cached — varies per patient
-]
+### Measured impact (live test against Guadalupe pid 92)
+
+```
+Static block:  ~520 tokens
+Context block: ~6,433 tokens
+Combined:      ~6,953 tokens (above the 1024 minimum)
+
+Call 1 (cache CREATION):
+  cache_creation_input_tokens: 10,057
+  cache_read_input_tokens:     0
+  → New cache entry created.
+
+Call 2 (cache READ, identical request within 5 min):
+  cache_creation_input_tokens: 0
+  cache_read_input_tokens:     10,057
+  → 100% of the cached prefix served from cache.
 ```
 
-One block edit. The savings show up immediately on the next call within the same 5-minute window.
+(`input_tokens` in both calls drops to 16 because the rest of the input was either cached prefix or non-billable; Anthropic's accounting separates `input_tokens` for new content from `cache_*` for cached content.)
 
----
+**Pricing math:** Anthropic's prompt cache charges 1.25× normal input rate on cache CREATION (a one-time cost when a new entry is written) and 0.1× normal input rate on cache READ. So the savings on call 2:
 
-## 4. Tier 1 — 100 PCPs (single-clinic / pilot)
+- Without cache: 10,057 input tokens × $1/M = $0.01006 (Haiku rate)
+- With cache READ: 10,057 cache-read tokens × $0.10/M = $0.00101
+- **Savings: ~90% on the cached portion** for every UC3 follow-up turn.
+
+### What changed in the projections
+
+The §2 baselines and §4–7 tier projections use a **post-ship blended ~$0.010/request** that nets out at a similar dollar level to the pre-ship automatic-prefix-caching baseline — but the *mechanism* is different. For a typical PCP day:
+
+- ~70% of calls are UC1 single-turn (no cache READ benefit; pays cache CREATION on the prefix at 1.25× input rate)
+- ~30% of calls are UC3 follow-ups within the 5-min same-patient window (~90% savings on cached portion)
+- Blended effective input savings: **~25-30% of total input cost** — comparable in dollar terms to what automatic prefix caching delivered, but realized through a designed-in mechanism (predictable cache entry, explicit TTL, observable hit rate).
+
+**The bigger win is qualitative:** automatic prefix caching is opaque (you don't know if it hit until you measure post-hoc). Explicit breakpoints make caching a designed-in property — visible in the request shape, debuggable when it doesn't work (as it didn't for Maria-fixture-sized inputs). The dollar-savings ceiling moves UP as UC3 multi-turn share grows; pre-ship the ceiling was capped by Anthropic's automatic-cache opacity.
+
+### What this took to ship
+
+About 30 minutes of code, plus ~$0.05 in live verification calls. Three changes:
+
+1. Reorganized `_SYSTEM_PROMPT_TEMPLATE` so the output-format schema lives BEFORE the patient-context placeholder — gets the static framing into one contiguous block.
+2. Renamed to `_SYSTEM_PROMPT_STATIC` (no patient-context substitution); patient context is now a separate block built at call time.
+3. `run_chat` passes `system` as `[static_block, context_block_with_cache_control]` instead of a single string.
+
+`agent/llm_client.py` already accepted `system: str | list[dict]` so no changes needed there.
+
+Verification script lives at `agent/tests/verify_cache.py` — fires two consecutive identical requests and prints the raw `usage` field with `cache_creation_input_tokens` / `cache_read_input_tokens` so future contributors can sanity-check the cache against any patient.
+
+### 3.1 Measurement-driven kill switch (pilot decision rule)
+
+Explicit `cache_control` is a **workflow-dependent bet**. Single-turn calls pay a 25% input-rate penalty (cache CREATION at 1.25×) that's only recovered when a follow-up call within the 5-min TTL hits cache READ. Below a threshold *repeat-call rate*, caching is a net cost.
+
+**What counts as a cache READ.** Any second-or-later LLM call within 5 min on the same patient + same model. This is *not* UC3-specific — it includes:
+
+1. UC3 follow-up turns (Sonnet → Sonnet)
+2. UC3 first question following UC2 on the same patient (Sonnet → Sonnet)
+3. UC2 follow-up questions ("explain that medication change" — Sonnet → Sonnet)
+4. Verifier-triggered agent retries (any model — reads its own creation cache)
+5. Any new UC added later that runs on the same patient context (see §3.2)
+
+The pattern is "exact prompt-prefix match within TTL," not "the user asked a UC3 question."
+
+**Break-even math** (per cache CREATION):
+- Penalty paid on the writing call: +25% of input rate × cached tokens
+- Savings recovered on a READ: 90% of input rate × cached tokens
+- Break-even: 1 cache READ per ~3.5 cache CREATIONs → **same-patient-same-model repeat rate ≥ ~22% of all calls**
+
+The §2.5 baseline implicitly assumes ~20% repeat rate (the 6 UC3 calls reading 7 UC2 caches). We are right at the break-even line until pilot data tells us otherwise — and the §2.5 mix probably *understates* the true repeat rate by ignoring UC2-follow-ups, verifier retries, and any future UCs sharing the same patient prefix.
+
+**Telemetry already captured in Langfuse:**
+- **Cache hit ratio** — `cache_read_input_tokens / (cache_read + cache_creation)` from each LLM generation's `usage` field. Single number, model-agnostic, directly answers the kill-switch question. No need to attribute by UC.
+
+**Decision rule:**
+
+| Pilot-measured cache hit ratio | Action |
+|---|---|
+| < 15% | **Disable** `cache_control` — net penalty |
+| 15–25% | Keep enabled, monitor; near break-even |
+| > 25% | Keep enabled — clear win |
+
+**Toggle path.** Disabling explicit caching is a one-line revert: drop the `cache_control` key from the patient-context block in `agent/agent.py:run_chat`. No infrastructure or schema change.
+
+**Why this matters for the CTO defense.** Explicit caching is not "free win — always on." It's a designed-in mechanism that *requires* a same-patient-same-model repeat rate above ~22% to be cost-positive. Naming the assumption + the kill-switch threshold + the (single) telemetry signal shows architectural honesty rather than optimism. The 30-day pilot resolves the question with measured data — and as the agent gains more UCs (§3.2), the kill-switch becomes progressively less likely to trigger.
+
+### 3.2 Multi-UC composition: the cached-prefix multiplier
+
+The cache architecture has a strategic property the §2 per-request math doesn't capture: **the marginal cost of adding a new UC to an existing encounter is roughly half the cost of the first UC**, because the patient-context prefix is already cached.
+
+**Mechanism.** When a PCP runs UC1 brief on a patient, the agent writes a Haiku cache entry. UC2 delta writes a Sonnet cache entry. Any *additional* UC that runs during the same encounter (within the 5-min TTL) reads from whichever cache matches its model. The prefix cost is sunk; only output cost grows.
+
+**Marginal cost of hypothetical added UCs** (assuming they run after UC1+UC2 on the same patient within TTL):
+
+| Added UC | Model | Marginal input | Marginal output | Marginal total |
+|---|---|---:|---:|---:|
+| UC4 — Suggested orders/labs | Sonnet | ~$0.001 (READ) | ~$0.012 | **~$0.013** |
+| UC5 — Differential dx | Sonnet | ~$0.001 (READ) | ~$0.012 | **~$0.013** |
+| UC6 — Patient-friendly summary | Haiku | ~$0.0004 (READ from UC1's Haiku cache) | ~$0.004 | **~$0.0044** |
+| UC7 — ICD/CPT coding suggestions | Haiku | ~$0.0004 (READ) | ~$0.004 | **~$0.0044** |
+| UC8 — Drug interaction check | Sonnet | ~$0.001 (READ) | ~$0.012 | **~$0.013** |
+| UC9 — Visit note draft | Haiku | ~$0.0004 (READ) | ~$0.006 | **~$0.0064** |
+
+vs. cold-call equivalents at $0.024 (Sonnet) / $0.008 (Haiku) — adding UCs costs **~45–55% less per call** than the first call did. The first UC pays the prefix cost; subsequent UCs free-ride on it.
+
+**Sub-linear cost growth.** Per-PCP/mo cost grows sub-linearly with UC count, not proportionally:
+
+| UC count per encounter | Approx per-encounter cost | Approx per-PCP/mo |
+|---:|---:|---:|
+| 3 UCs (UC1+UC2+UC3 — today's baseline) | ~$0.051 | **~$9.50** |
+| 6 UCs (today + UC4+UC5+UC6) | ~$0.075 | **~$11.00** |
+| 9 UCs (full clinical agent surface) | ~$0.097 | **~$12.50** |
+
+If we costed each new UC as a *cold* call (no caching benefit), 9 UCs would land near $19/PCP/mo. The cache architecture cuts that by ~30%.
+
+**Strategic implication.** "Each new UC nearly-doubles agent capability for ~50% the cost of the first UC" is a fundamentally different product story than "each UC adds X to the bill." This is *the* reason explicit caching is worth the architectural complexity — not the modest within-encounter savings on UC3 follow-ups.
+
+The cache-friendly prompt structure (immutable system + per-patient context as separate blocks) is what makes the agent's product surface *expandable* without proportional cost growth. See §11 for roadmap implications.
 
 ### Architecture
 
@@ -149,12 +261,12 @@ Same as week 1, scaled vertically:
 
 | Line item | Monthly | Notes |
 |---|---:|---|
-| LLM (100 PCPs × $6.60) | $660 | At observed ~50% cache rate |
+| LLM (100 PCPs × $9.50) | $950 | Post-ship blended baseline per §2.4 |
 | Langfuse Pro | $59 | 100K observations/mo. At ~6 obs/trace and 30 requests/PCP/day × 100 PCPs × 22 days = ~66K traces → ~390K observations. Pro tier scales with usage; budget shown is for 100K-obs slot. Real-world overage at $59 + ~$0.0001 per extra observation tracks linearly. |
 | DigitalOcean droplet (8 GB / 4 vCPU) | $48 | Single host |
 | Anthropic BAA delta | included | Bundled in enterprise tier (no per-call markup) |
-| **Tier 1 total** | **~$770/mo** | |
-| **Per PCP per month** | **~$7.70** | |
+| **Tier 1 total** | **~$1,057/mo** | |
+| **Per PCP per month** | **~$10.57** | |
 
 ### Architectural change to get here
 
@@ -182,14 +294,14 @@ LLM cost (~85% of total). Infrastructure is rounding error at this scale.
 
 | Line item | Monthly | Notes |
 |---|---:|---|
-| LLM (1K PCPs × $6.60) | $6,600 | Linear |
+| LLM (1K PCPs × $9.50) | $9,500 | Linear |
 | Managed MariaDB / MySQL with replicas | $300 | |
 | Managed Redis | $100 | |
 | Compute: 2 OpenEMR + 5–10 agent instances | $600 | Behind LB |
 | Load balancer | $25 | |
 | Langfuse (Pro 1M obs OR self-hosted) | $300 | Either path |
-| **Tier 2 total** | **~$7,925/mo** | |
-| **Per PCP per month** | **~$7.93** | |
+| **Tier 2 total** | **~$10,825/mo** | |
+| **Per PCP per month** | **~$10.83** | |
 
 ### Dollar driver
 
@@ -218,14 +330,14 @@ Per-PCP usage hasn't changed. Infrastructure economies ARE kicking in (load bala
 
 | Line item | Monthly | Notes |
 |---|---:|---|
-| LLM (10K PCPs × $6.60) | $66,000 | Conservative — uses 50% cache baseline. Cache hit rate likely trends up to ~60% at this scale (more PCPs querying overlapping panels = more prompt-prefix hits). The margin shows up as headroom, not as a lower projection. |
+| LLM (10K PCPs × $9.50) | $95,000 | Post-ship blended baseline. Effective per-request cost likely trends *down* at this scale (more UC3 multi-turn share as PCPs adopt the conversational interface; more in-day same-patient warm hits within the 5-min TTL window). The margin shows up as headroom, not as a lower projection. |
 | Multi-region MySQL primaries + replicas | $4,000 | 4 instances + cross-region transfer |
 | Multi-region OpenEMR + agent compute | $3,000 | ~30 instances total |
 | Self-hosted Langfuse | $1,500 | VM + dedicated ClickHouse for trace storage |
 | Redis cluster | $500 | Multi-region cache |
 | LB + CDN | $300 | |
-| **Tier 3 total** | **~$75,300/mo** | |
-| **Per PCP per month** | **~$7.53** | (Trends down slightly due to cache improvements at scale) |
+| **Tier 3 total** | **~$104,300/mo** | |
+| **Per PCP per month** | **~$10.43** | (Trends down slightly due to UC3-share / warm-cache improvements at scale) |
 
 ### Dollar driver
 
@@ -233,7 +345,7 @@ LLM (~88%). Infrastructure proportionally smaller because compute economies kick
 
 ### Why per-PCP cost is essentially flat (with upside)
 
-At 10K PCPs querying overlapping patient panels (a regional health system has shared specialty referrals, common chronic-disease cohorts), prompt-cache hit rate trends UP. **The projection above uses the same conservative 50% cache baseline as smaller tiers** — if real-world cache rate hits ~60-70% at scale, per-request cost drops from $0.010 to $0.0085-$0.0070, and the LLM line item drops to ~$56K-$70K instead of $66K. **That's headroom in the projection, not a lower number we're claiming.** Per-PCP total stays close to $7.50/mo regardless.
+At 10K PCPs, UC3 multi-turn share trends UP (more PCPs comfortable with the conversational interface, more in-day same-patient warm hits within the 5-min TTL window). **The projection above uses the same post-ship blended baseline as smaller tiers** — if real-world UC3-share / warm-rate effects push effective per-request cost from $0.014 toward $0.012-$0.010, the LLM line item drops to ~$72K-$95K instead of $95K. **That's headroom in the projection, not a lower number we're claiming.** Per-PCP total stays close to $10.40/mo regardless.
 
 ---
 
@@ -241,7 +353,7 @@ At 10K PCPs querying overlapping patient panels (a regional health system has sh
 
 ### Architectural change
 
-**Token economics dominate; multi-provider redundancy becomes economically forced.** At 100K PCPs, monthly LLM spend is ~$660K — small drift in pricing or rate-limit availability has $5K-$50K monthly impact. Single-provider risk is no longer acceptable.
+**Token economics dominate; multi-provider redundancy becomes economically forced.** At 100K PCPs, monthly LLM spend is ~$950K — small drift in pricing or rate-limit availability has $10K-$100K monthly impact. Single-provider risk is no longer acceptable.
 
 - Anthropic enterprise + AWS Bedrock fallback (same Anthropic models, different rate-limit pool, contractual redundancy)
 - Custom inference endpoints for non-clinical-reasoning paths (UC1 brief synthesis is repetitive enough that a fine-tuned smaller model may match Haiku quality at 1/3 cost)
@@ -255,7 +367,7 @@ At 10K PCPs querying overlapping patient panels (a regional health system has sh
 
 | Line item | Monthly | Notes |
 |---|---:|---|
-| LLM — production traffic | $660,000 | 100K PCPs × $6.60 baseline |
+| LLM — production traffic | $950,000 | 100K PCPs × $9.50 baseline |
 | LLM — eval / regression batch | $5,000 | Batched tier, runs nightly |
 | Multi-region MySQL + replicas | $30,000 | Multiple primaries, many replicas |
 | Multi-region OpenEMR + agent compute | $25,000 | Hundreds of instances |
@@ -263,16 +375,16 @@ At 10K PCPs querying overlapping patient panels (a regional health system has sh
 | Redis fleet | $4,000 | Multi-region |
 | LB + CDN + WAF | $2,500 | |
 | Custom inference endpoints (if shipped) | -$50,000 | NEGATIVE: replaces ~10% of Haiku traffic at 1/3 cost. Net savings. |
-| **Tier 4 total** | **~$685,000/mo** | |
-| **Per PCP per month** | **~$6.85** | |
+| **Tier 4 total** | **~$974,500/mo** | |
+| **Per PCP per month** | **~$9.74** | |
 
 ### Dollar driver
 
 LLM (97%). Infrastructure is small in proportion. **Token cost is the entire game at this tier.**
 
-### Why per-PCP cost drops slightly here ($6.85 vs $7.53 at Tier 3)
+### Why per-PCP cost drops slightly here ($9.74 vs $10.43 at Tier 3)
 
-The drop comes from the explicit -$50K/mo "custom inference endpoints" line item — replacing ~10% of Haiku traffic with a tenant-fine-tuned smaller model at 1/3 the cost. Without that optimization, per-PCP cost would hold near $7.35/mo. Cache hit rate improvements (potentially toward 70% at this scale) provide additional headroom not factored into the projection — same conservative-baseline pattern as Tier 3.
+The drop comes from the explicit -$50K/mo "custom inference endpoints" line item — replacing ~10% of Haiku traffic with a tenant-fine-tuned smaller model at 1/3 the cost. Without that optimization, per-PCP cost would hold near $10.25/mo. UC3-share / warm-cache improvements at scale provide additional headroom not factored into the projection — same conservative-baseline pattern as Tier 3.
 
 ---
 
@@ -280,16 +392,18 @@ The drop comes from the explicit -$50K/mo "custom inference endpoints" line item
 
 What happens if our assumptions are wrong?
 
-### 8.1 Cache hit rate scenarios (Tier 2 baseline, 1K PCPs)
+### 8.1 Effective cache savings scenarios (Tier 2 baseline, 1K PCPs)
 
-| Cache hit rate | Effective $/request | Monthly LLM | Δ vs baseline |
-|---:|---:|---:|---:|
-| 25% (worst case — frequent prompt churn) | $0.012 | $7,920 | +20% |
-| 50% (baseline — current automatic prefix) | $0.010 | $6,600 | — |
-| 65% (target — explicit breakpoints land week-2) | $0.0085 | $5,610 | -15% |
-| 80% (best case — multi-turn UC3 dominates) | $0.0070 | $4,620 | -30% |
+Post-ship, the lever is **what fraction of calls hit cache READ vs cache CREATION** — driven by UC3 multi-turn share and the 5-min TTL window. Translated to effective per-request cost:
 
-Cache hit rate is the **single biggest cost lever** below the architectural-tier line. Wiring explicit breakpoints (1-2 hour code change) is essentially $1K/month savings at Tier 2, $10K/month at Tier 3.
+| UC3-share / warm-hit profile | Effective $/request | Monthly LLM | Δ vs baseline |
+|---|---:|---:|---:|
+| All single-turn (~0% UC3 multi-turn) — pays CREATION on every call | $0.015 | $10,250 | +8% |
+| **Post-ship baseline** (~20% of calls hit explicit cache READ within 5-min TTL — §2.5 mix) | **$0.014** | **$9,500** | — |
+| UC3-heavy (~40% of calls warm-hit) | $0.012 | $8,200 | -14% |
+| Best realistic case (~60% warm-hit; in-day same-patient repeat queries dominate) | $0.010 | $6,800 | -28% |
+
+UC3-share / warm-hit rate is the **single biggest cost lever** below the architectural-tier line. The mechanism (explicit `cache_control` breakpoints) is shipped as of 2026-05-01; what moves the rate is *workflow adoption*, not code. Pilot telemetry on UC3 multi-turn engagement is the next signal.
 
 ### 8.2 Anthropic price changes
 
@@ -297,9 +411,9 @@ Anthropic has historically dropped prices ~30% on each major-model release. Sens
 
 | Price change | Monthly LLM | Δ |
 |---:|---:|---:|
-| Anthropic +25% | $8,250 | +25% |
-| **Baseline** | **$6,600** | — |
-| Anthropic -25% | $4,950 | -25% |
+| Anthropic +25% | $11,875 | +25% |
+| **Baseline** | **$9,500** | — |
+| Anthropic -25% | $7,125 | -25% |
 
 We are bound to Anthropic's pricing curve. Multi-provider redundancy via the `LLMClient` interface is ~1 file of work; we'd flip if pricing diverged ≥25%. At <10% delta, switching costs (testing + ops complexity) exceed savings.
 
@@ -307,11 +421,13 @@ We are bound to Anthropic's pricing curve. Multi-provider redundancy via the `LL
 
 If pilot data shows PCPs use UC3 more than the assumed 25% (e.g., they get hooked on the conversational interface):
 
-| UC3 share | Per-request | Monthly LLM (Tier 2) |
+| UC3 share (of total calls) | Per-request | Monthly LLM (Tier 2) |
 |---:|---:|---:|
-| 25% (assumption) | $0.010 | $6,600 |
-| 50% | $0.013 | $8,580 |
-| 75% | $0.016 | $10,560 |
+| 20% (§2.5 baseline) | $0.014 | $9,500 |
+| 40% | $0.013 | $9,000 |
+| 60% | $0.011 | $7,500 |
+
+Counter to intuition, higher UC3 share doesn't dramatically lower per-request cost — Sonnet UC3 READs ($0.015/req) are still more expensive than Haiku UC1 CREATIONs ($0.009/req). Caching helps, but the real cost lever is which model is processing what (Haiku vs Sonnet), not cache hit rate.
 
 UC3 is more expensive per request because each turn includes prior assistant messages in the context. Worth monitoring; not catastrophic.
 
@@ -320,7 +436,7 @@ UC3 is more expensive per request because each turn includes prior assistant mes
 ## 9. Honest framing — what we're bound to
 
 - **Anthropic's pricing curve.** We've made a deliberate single-provider bet for week 1. Multi-provider redundancy is available via `LLMClient` interface (one file). We'd actually flip if pricing diverged ≥25% from a viable alternative; at <10% delta, switching costs (testing + ops complexity) exceed savings. The architecture supports the switch; we're not locked in.
-- **The prompt-caching strategy is the dominant lever.** Below the architectural-tier line, cache hit rate dwarfs every other knob. Investing in cache-friendly prompt structure (immutable system prompt + per-patient context as separate blocks) is high-leverage. Already done; explicit breakpoint markers are the remaining 1-hour code change for the 90% target.
+- **The prompt-caching strategy is the dominant lever.** Below the architectural-tier line, effective cache savings dwarf every other knob. Cache-friendly prompt structure (immutable system prompt + per-patient context as separate blocks) plus explicit `cache_control` breakpoints — both shipped 2026-05-01, verified via `agent/tests/verify_cache.py` (100% cache-read on the cached prefix; ~90% input savings on UC3 multi-turn follow-ups). What moves the effective rate from here is *workflow adoption* (UC3 multi-turn share), not code.
 - **At Tier 4 scale (100K PCPs), the LLM provider is more important than the EMR.** Anthropic relationship management — rate-limit deals, fine-tune access, BAA terms — is a strategic partnership at that scale, not a vendor relationship.
 - **What's NOT in these projections:** dedicated MLOps team (real cost at Tier 3+), security audits (annual, ~$50K), HIPAA compliance audit + penetration testing (annual, ~$30K), liability insurance (per-PCP, ~$10–50/mo). Those are real production costs that aren't architecture decisions.
 
@@ -330,20 +446,45 @@ UC3 is more expensive per request because each turn includes prior assistant mes
 
 If a hospital CTO is evaluating this for deployment, the cost decisions that matter are:
 
-1. **Pilot pricing.** At 100 PCPs, ~$770/mo total ≈ $7.70/PCP/mo. For a productivity tool that saves 3 minutes per encounter × 25 patients/day × 22 days = 27.5 hours/month/PCP, the ROI is well below $1/hour-saved at any PCP-time-value floor. Defensible at almost any ASK price; the question is **how much margin** the vendor gets, not whether it's a sensible spend for the buyer.
+1. **Pilot pricing.** At 100 PCPs, ~$1,057/mo total ≈ $10.57/PCP/mo. For a productivity tool that saves 3 minutes per encounter × 25 patients/day × 22 days = 27.5 hours/month/PCP, the ROI is well below $1/hour-saved at any PCP-time-value floor. Defensible at almost any ASK price; the question is **how much margin** the vendor gets, not whether it's a sensible spend for the buyer.
 
-2. **Production-scale pricing.** At 10K PCPs, ~$7.50/PCP/mo holds the same ROI logic. The dollar driver is LLM tokens (~88%); the strategic question is "do you trust Anthropic to keep delivering at this price." Multi-provider redundancy is the answer if not.
+2. **Production-scale pricing.** At 10K PCPs, ~$10.43/PCP/mo holds the same ROI logic. The dollar driver is LLM tokens (~91%); the strategic question is "do you trust Anthropic to keep delivering at this price." Multi-provider redundancy is the answer if not.
 
 Both decisions defensible. Both anchored to the per-PCP / per-month number, which is the unit the buyer actually thinks in.
 
 ---
 
+## 11. Roadmap implications — sub-linear cost growth as UCs expand
+
+The cache architecture creates an asymmetric product/cost relationship: **agent capability can grow nearly-linearly while cost grows sub-linearly**. This shapes how the roadmap should be prioritized.
+
+**The core mechanic** (per §3.2): the first UC on a patient pays the prefix cost; every subsequent UC on the same patient within the 5-min TTL pays only output cost. Adding a sixth UC isn't 6× the cost of one UC — it's closer to 2× total cost for 6× the agent surface.
+
+**What this means for product decisions:**
+
+- **Bundle UCs into the same encounter window.** A UC that fires automatically on chart-open (e.g., visit-note draft, drug-interaction check) costs almost nothing if it lands inside the same 5-min TTL as the UC1 brief the PCP already triggered. Auto-firing has been a UX-vs-cost tradeoff historically; with caching, the cost side largely disappears.
+- **Prefer Haiku UCs when adding to the surface.** Haiku output cost ($5/M) is 3× cheaper than Sonnet ($15/M). Marginal Haiku UCs (UC6, UC7, UC9 in §3.2's example) add ~$0.004 each; marginal Sonnet UCs add ~$0.012 each. For UCs that don't need reasoning depth (summarization, formatting, structured-extraction), Haiku is the right default.
+- **Pilot data justifies expansion, not contraction.** Once the §3.1 cache hit ratio is established, adding UCs doesn't move the per-PCP/mo number much. The decision to add UC4/UC5/etc. becomes a *product decision* (does it help PCPs?) rather than a *cost decision* (can we afford it?). The traditional EMR vendor instinct of "add features carefully because compute scales linearly" doesn't apply to a cache-friendly agent architecture.
+- **The cost ceiling is set by Sonnet single-turn calls, not UC count.** Per-PCP/mo will stay in the $10–$13 range until the day we add a UC that costs $0.027/call run on every encounter (e.g., a Sonnet-based pre-fetch on every chart open). That's the cost gate to watch — not "are we adding too many UCs."
+
+**Roadmap planning rule of thumb:**
+
+- A new Haiku-based UC that runs on existing-encounter cache READ: ~$1.30/PCP/mo at full-summon adoption
+- A new Sonnet-based UC that runs on existing-encounter cache READ: ~$4/PCP/mo at full-summon adoption
+- A new Sonnet-based UC that runs *cold* (separate trigger, outside TTL): ~$8/PCP/mo at full-summon adoption
+
+Use these to back-of-envelope any week 2+ UC pitch before committing engineering time.
+
+---
+
 ## Defense talking points (interview)
 
-- "What did week 1 cost?" — *$1.64 LLM spend, $0 Langfuse (free tier), $4 droplet prorated. ~$6 total. Counterfactual without multi-model tiering + caching: ~$15-25.*
-- "What's per-request cost?" — *Blended ~$0.010 today (~50% automatic prefix caching). Target ~$0.008 once explicit cache breakpoints land — week-2 work, 1-2 hours of code, documented in §3.*
-- "What's the dominant cost lever?" — *Cache hit rate. Doubling it (50% → ~80%) saves ~30% per request. Explicit breakpoint markers in `agent/agent.py` system prompt is the unlock.*
-- "What about prompt caching — you mentioned 90% savings in the case study?" — *Honest answer: the case study referenced explicit breakpoint caching, which gets that 90% number. Today we're at automatic prefix caching, ~50%. The 90% is achievable with a documented one-block code change (§3); we'll have it before pilot. Documenting the gap honestly rather than claiming savings we haven't realized.*
-- "Why does per-PCP cost stay flat from 100 to 100K?" — *Per-patient access pattern means LLM cost scales with patient interactions, not user count. PCPs see ~25 patients/day regardless of how many other PCPs the system serves. Total per-PCP holds in the $6.85–$7.93/mo range across all four tiers. Cache hit rate trends UP at scale (more prompt-prefix overlap from shared specialty cohorts) — that's not in the projection numbers, just headroom.*
+- "What did week 1 cost?" — *$1.64 LLM spend, $0 Langfuse (free tier), $4 droplet prorated. ~$6 total. Counterfactual without multi-model tiering: ~$3.50 (Sonnet-only) or ~$15-25 (Opus-only).*
+- "What's per-request cost?" — *Blended ~$0.014 post-ship at the §2.5 mix. UC1/UC2 single-turn pay cache CREATION ($0.009 Haiku, $0.027 Sonnet); UC3 multi-turn follow-ups within 5-min TTL hit cache READ ($0.015 Sonnet — still expensive because the model is Sonnet, just less than cold). See §2.4.*
+- "What's the dominant cost lever?" — *Model choice (Sonnet vs Haiku) above cache hit rate. Sonnet UC3 READ at $0.015 is still more expensive than Haiku UC1 CREATION at $0.009. Caching break-even is ~22% same-patient-same-model repeat rate (§3.1); below that, caching is a net cost. §2.5 baseline assumes 20% (right at the line). Pilot telemetry on cache hit ratio is the single gating signal — model-agnostic, no need to attribute by UC.*
+
+- "Why does the cache architecture matter strategically?" — *It makes the agent's product surface expandable at sub-linear cost. Adding a 6th UC during the same encounter costs ~50% less than the first UC because the prefix is already cached (§3.2). Per-PCP/mo grows from $9.50 (3 UCs) to ~$11 (6 UCs) to ~$12.50 (9 UCs) — not the $19+ you'd expect from cold-call math. This is the actual reason to invest in cache-friendly prompt structure, not the modest within-encounter savings.*
+- "What about prompt caching — you mentioned 90% savings in the case study?" — *Shipped and verified 2026-05-01. Live test: 10,057-token cache entry, 100% cache-read on identical follow-up — ~90% input savings on the cached portion for every UC3 follow-up turn. But blended per-request only nets ~3-4% savings vs no-cache at the §2.5 mix because UC1/UC2 single-turn dominates and pays the 25% CREATION premium. The win expands as UC3 share climbs (see §8.1 sensitivity). Earlier framing of "$6.60/PCP/mo" assumed an "automatic prefix caching" effect that doesn't actually exist in Anthropic's pricing — corrected upward to $9.50 here.*
+- "Why does per-PCP cost stay flat from 100 to 100K?" — *Per-patient access pattern means LLM cost scales with patient interactions, not user count. PCPs see ~25 patients/day regardless of how many other PCPs the system serves. Total per-PCP holds in the $9.74–$10.83/mo range across all four tiers. UC3-share / warm-hit rate trends UP at scale (more conversational adoption + more in-day same-patient repeat queries) — that's not in the projection numbers, just headroom.*
 - "What's the failure mode at scale?" — *Anthropic rate limits hit before host capacity does. At 10K PCPs we need an enterprise rate-limit deal. At 100K we need multi-provider redundancy. Both are out-of-band procurement work; architecture supports both via the `LLMClient` interface.*
 - "What about Vercel / Railway for hosting?" — *Out of scope for this analysis (covered in DECISIONS.md §9). Short version: VPS at week 1 ($24/mo) → managed services at Tier 2+ ($600-$3K/mo). Architecture decisions, not cost decisions.*

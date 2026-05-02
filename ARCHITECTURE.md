@@ -140,13 +140,19 @@ Multi-tier within a single provider (Anthropic):
 
 1. **Citations API.** Claude's native Citations feature returns character-level pointers to source documents alongside its answer. Maps directly onto our verification architecture and reduces fabricated citation IDs.
 2. **Prompt caching savings are larger.** Anthropic's explicit cache breakpoints save ~90% on cached input vs. OpenAI's automatic prefix caching at ~50%. Our pattern (large constant system prompt + persistent per-patient context across UC3 turns) is heavily caching-friendly.
+
+   > **Updated 2026-05-01.** The "~90% savings" applies to the *cached portion* of an input on a cache READ — true on UC3 follow-up turns and any same-patient-same-model repeat call within the 5-min TTL. Blended across all calls at the §2.5 mix in [COST_ANALYSIS.md](./COST_ANALYSIS.md), the realized savings vs no-cache is closer to ~3-4% because UC1/UC2 single-turn dominates and pays the 25% cache CREATION premium. The strategic value of the cache architecture isn't the within-encounter savings — it's that adding more UCs (e.g., UC4-UC9) on the same patient is sub-linear in cost (see [COST_ANALYSIS.md §3.2](./COST_ANALYSIS.md#32-multi-uc-composition-the-cached-prefix-multiplier)).
 3. **Existing ecosystem fit.** Developer is on Claude Max + Cursor; one API account.
 
 **OpenAI tradeoffs acknowledged:** GPT-5 input pricing is comparable to Sonnet; OpenAI's strict-JSON structured outputs are slightly cleaner. Prompt caching tilts the math back to Anthropic for our specific workload. Mixed-provider use was considered and rejected for week 1 (two SDKs, two billing relationships, more failure modes).
 
 ### 2.4 Prompt caching strategy
 
+> **Updated 2026-05-01.** Explicit `cache_control: {"type": "ephemeral"}` breakpoint shipped in `agent/agent.py:run_chat`. **Verified live:** call 1 wrote a 10,057-token cache entry; call 2 read all 10,057 tokens from cache (`cache_read_input_tokens=10057, cache_creation_input_tokens=0`). The breakpoint sits on the `static + per-patient context` block (combined ~7K tokens for a Synthea-Guadalupe-shaped chart) — placement chosen because Anthropic's 1024-token minimum prefix would not be met by the static framing alone. See [COST_ANALYSIS.md §3](./COST_ANALYSIS.md#3-prompt-caching--implementation-and-measured-impact) for the full implementation + measured-impact discussion.
+
 The system prompt (instructions, tool definitions, output schema, rule corpus) is identical across every call — fully cached. The patient context (problem list, meds, recent labs) is constant across a UC3 multi-turn conversation — cached for that session. Realistic impact: a UC3 conversation with 5 follow-ups about one patient runs at roughly 20% of naive cost.
+
+> **Updated 2026-05-01.** The "20% of naive cost" claim holds *within a single UC3 conversation on Sonnet* (cache-read pricing is 0.1× input rate, so 5 follow-ups reading the same prefix is roughly 1 CREATION + 5 READs ≈ 1.25 + 0.5 = 1.75 vs 6 cold = 6, ≈ 30% of naive). The blended-across-all-calls impact at the §2.5 mix is much smaller because most calls are single-turn (UC1, UC2 first-call). See [COST_ANALYSIS.md §3](./COST_ANALYSIS.md#3-prompt-caching--implementation-and-measured-impact) for the measured-impact breakdown.
 
 ### 2.5 Cost as a design constraint
 
@@ -158,8 +164,8 @@ Cost is an architectural input, not a post-hoc concern. Several decisions in thi
 |---|---|
 | **Multi-model tiering (§2.3)** | Sonnet 4.6 alone would handle every call, but Haiku 4.5 is ~3× cheaper and adequate for ~70% of the workload (intent routing, claim extraction, free-text summarization first pass). The tiering cuts blended cost from ~$3/$15 per 1M tokens (Sonnet only) to ~$1.60/$8 (blended). |
 | **Sonnet 4.6 over Opus 4.7** | Opus is ~5× the cost of Sonnet at $15/$75 per 1M. The reasoning quality gap doesn't justify the multiplier for any of our use cases. |
-| **Prompt caching (§2.4)** | Anthropic's explicit cache breakpoints save ~90% on cached input tokens. With our pattern (large constant system prompt + per-patient context across UC3 turns), this cuts effective input cost by roughly 80% on multi-turn conversations. |
-| **Anthropic over OpenAI (§2.3)** | OpenAI's per-token prices are similar to Anthropic at the flagship tier, but OpenAI's automatic prefix caching saves only ~50% vs. Anthropic's ~90%. For our caching-heavy workload, Anthropic wins on net cost. |
+| **Prompt caching (§2.4)** | Anthropic's explicit cache breakpoints save ~90% on cached input tokens. With our pattern (large constant system prompt + per-patient context across UC3 turns), this cuts effective input cost by roughly 80% on multi-turn conversations. *Updated 2026-05-01: blended across the §2.5 call mix the realized savings vs no-cache is ~3-4%; the "80%" figure applies within a single UC3 conversation on Sonnet only. The strategic value lives in sub-linear cost growth as new UCs are added — see [COST_ANALYSIS.md §3.2](./COST_ANALYSIS.md#32-multi-uc-composition-the-cached-prefix-multiplier).* |
+| **Anthropic over OpenAI (§2.3)** | OpenAI's per-token prices are similar to Anthropic at the flagship tier, but OpenAI's automatic prefix caching saves only ~50% vs. Anthropic's ~90%. For our caching-heavy workload, Anthropic wins on net cost. *Updated 2026-05-01: see callout under §2.3 — the 90%/50% comparison is per-cached-portion. Anthropic still wins net for our workload (Citations API + multi-UC composition cost story), but the per-cached-portion delta isn't the dominant lever.* |
 | **Single bounded retry (§3.6)** | N retries multiply token cost on cases that often can't succeed (the LLM's claims aren't supportable). One bounded retry covers fixable failures; further retries waste cost. Predictable cost matters as much as predictable latency. |
 | **VPS over Railway (§8.1)** | ~$24/mo VPS vs. ~$30–50/mo Railway (~$10–25/mo cheaper), with no operational simplicity advantage given Railway's translation issues with this compose file. |
 
@@ -169,7 +175,11 @@ Cost is an architectural input, not a post-hoc concern. Several decisions in thi
 - **Hosting:** ~$24/mo (VPS) for the entire deployed stack.
 - **Per-request economics:** a typical UC1 brief runs ~3K–5K tokens input (cached) + ~500–800 output. With 90% input caching applied, marginal cost per brief is roughly $0.005–0.01. UC3 follow-ups within a session amortize the patient context across turns, dropping per-turn marginal cost further.
 
+> **Updated 2026-05-01.** Actual measured week-1 agent runtime burn was **$1.64** of LLM spend (OpenRouter, ~36 hours of dev), not $15–40 — most dev requests were Haiku-heavy with shallow Maria-fixture contexts (~500 tokens vs the ~3,400-token Synthea-Guadalupe target). Caching shipped end-of-week-1, so the bulk of dev-burn LLM was no-cache; caching's payoff is in production traffic, not dev. The per-brief "$0.005-0.01 with 90% caching" is misleading for single-turn UC1 (no cache READ amortization) — actual is ~$0.009 per UC1 brief at the §2.5-mix Synthea-shaped context. See [COST_ANALYSIS.md §1](./COST_ANALYSIS.md#1-actual-week-1-dev-burn) for the measured-burn breakdown and [§2.2](./COST_ANALYSIS.md#22-per-request-cost--uc1--uc2-haiku-45-synthesis) for per-request math.
+
 **Out of scope for this document.** A full cost analysis at 100 / 1K / 10K / 100K users — including the architectural changes required at each tier (managed DB, horizontal agent scaling, batched inference, possible enterprise rate-limit negotiation) — is a final-submission deliverable per the brief. The relevant insight here is that the cost trajectory is bounded by the same scaling levers as the latency trajectory: multi-model tiering, prompt caching, and stateless agents.
+
+> **Updated 2026-05-01.** [COST_ANALYSIS.md](./COST_ANALYSIS.md) is now in repo. Per-PCP/mo lands $9.74–$10.83 across Tiers 1-4 (100→100K PCPs). The cache architecture's strategic value is sub-linear cost growth as the agent's UC surface expands ([§3.2](./COST_ANALYSIS.md#32-multi-uc-composition-the-cached-prefix-multiplier) + [§11](./COST_ANALYSIS.md#11-roadmap-implications--sub-linear-cost-growth-as-ucs-expand)).
 
 ### 2.6 Tool design (hybrid)
 
