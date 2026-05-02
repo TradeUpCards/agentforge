@@ -4,7 +4,7 @@
 
 **Audience:** the hospital CTO asking *"what does this cost to run, and how does it scale to a clinic of 100 / a network of 1K / a regional system of 10K / a national EMR-wide deployment of 100K?"*
 
-**Bottom line:** dev burn is **~$1.64 of LLM spend** through ~36 hours of build + integration testing. Per-PCP-per-month projection is **~$8–13/mo of LLM cost at any tier from 100 to 100K** because the per-patient access pattern means cost scales with patient interactions, not user count. Infrastructure cost grows with tier transitions (each tier names the architectural change driving the bump). The dominant cost lever is the prompt-caching strategy — which **we have not fully wired yet** (see §3 for the honest call-out).
+**Bottom line:** dev burn is **~$1.64 of LLM spend** through ~36 hours of build + integration testing. Per-PCP-per-month projection is **~$6.60 of LLM cost at any tier from 100 to 100K** at the §2.5 usage baseline (30 requests/PCP/day, 50% cache hit rate). With infrastructure overhead, **total per-PCP cost lands $6.85–$7.93/mo across all four tiers** — flat or slightly decreasing because the per-patient access pattern means cost scales with patient interactions, not user count. Infrastructure cost grows with tier transitions (each tier names the architectural change driving the bump), but per-PCP infrastructure cost stays bounded by economies of scale. The dominant cost lever is the prompt-caching strategy — which **we have not fully wired yet** (see §3 for the honest call-out).
 
 ---
 
@@ -202,7 +202,7 @@ Per-PCP usage hasn't changed. Infrastructure economies ARE kicking in (load bala
 
 | Line item | Monthly | Notes |
 |---|---:|---|
-| LLM (10K PCPs × $6.60) | $66,000 | Mostly linear; cache hit rate slightly higher at scale (~60%) so effective cost slightly drops |
+| LLM (10K PCPs × $6.60) | $66,000 | Conservative — uses 50% cache baseline. Cache hit rate likely trends up to ~60% at this scale (more PCPs querying overlapping panels = more prompt-prefix hits). The margin shows up as headroom, not as a lower projection. |
 | Multi-region MySQL primaries + replicas | $4,000 | 4 instances + cross-region transfer |
 | Multi-region OpenEMR + agent compute | $3,000 | ~30 instances total |
 | Self-hosted Langfuse | $1,500 | VM + dedicated ClickHouse for trace storage |
@@ -215,9 +215,9 @@ Per-PCP usage hasn't changed. Infrastructure economies ARE kicking in (load bala
 
 LLM (~88%). Infrastructure proportionally smaller because compute economies kick in harder, but absolute infrastructure cost is now meaningful enough to monitor.
 
-### Why per-PCP cost can decrease here
+### Why per-PCP cost is essentially flat (with upside)
 
-At 10K PCPs querying overlapping patient panels (a regional health system has shared specialty referrals, common chronic-disease cohorts), prompt-cache hit rate trends UP. We've assumed ~60% effective cache rate vs 50% at smaller tiers — the per-request cost moves from $0.010 to ~$0.0085.
+At 10K PCPs querying overlapping patient panels (a regional health system has shared specialty referrals, common chronic-disease cohorts), prompt-cache hit rate trends UP. **The projection above uses the same conservative 50% cache baseline as smaller tiers** — if real-world cache rate hits ~60-70% at scale, per-request cost drops from $0.010 to $0.0085-$0.0070, and the LLM line item drops to ~$56K-$70K instead of $66K. **That's headroom in the projection, not a lower number we're claiming.** Per-PCP total stays close to $7.50/mo regardless.
 
 ---
 
@@ -254,9 +254,9 @@ At 10K PCPs querying overlapping patient panels (a regional health system has sh
 
 LLM (97%). Infrastructure is small in proportion. **Token cost is the entire game at this tier.**
 
-### Why per-PCP cost continues to drop
+### Why per-PCP cost drops slightly here ($6.85 vs $7.53 at Tier 3)
 
-Three compounding effects: (1) cache hit rate trends to ~70% with national-scale prompt overlap; (2) custom inference endpoints replace expensive Haiku calls for highly-repetitive synthesis; (3) batched eval shifts non-real-time traffic to cheaper API tiers. Combined: ~10% reduction vs Tier 3.
+The drop comes from the explicit -$50K/mo "custom inference endpoints" line item — replacing ~10% of Haiku traffic with a tenant-fine-tuned smaller model at 1/3 the cost. Without that optimization, per-PCP cost would hold near $7.35/mo. Cache hit rate improvements (potentially toward 70% at this scale) provide additional headroom not factored into the projection — same conservative-baseline pattern as Tier 3.
 
 ---
 
@@ -328,6 +328,6 @@ Both decisions defensible. Both anchored to the per-PCP / per-month number, whic
 - "What's per-request cost?" — *Blended ~$0.010 today (~50% automatic prefix caching). Target ~$0.008 once explicit cache breakpoints land — week-2 work, 1-2 hours of code, documented in §3.*
 - "What's the dominant cost lever?" — *Cache hit rate. Doubling it (50% → ~80%) saves ~30% per request. Explicit breakpoint markers in `agent/agent.py` system prompt is the unlock.*
 - "What about prompt caching — you mentioned 90% savings in the case study?" — *Honest answer: the case study referenced explicit breakpoint caching, which gets that 90% number. Today we're at automatic prefix caching, ~50%. The 90% is achievable with a documented one-block code change (§3); we'll have it before pilot. Documenting the gap honestly rather than claiming savings we haven't realized.*
-- "Why does per-PCP cost stay flat from 100 to 100K?" — *Per-patient access pattern means LLM cost scales with patient interactions, not user count. PCPs see ~25 patients/day regardless of how many other PCPs the system serves. Cache hit rate actually trends UP at scale (more prompt-prefix overlap), so per-request cost decreases slightly.*
+- "Why does per-PCP cost stay flat from 100 to 100K?" — *Per-patient access pattern means LLM cost scales with patient interactions, not user count. PCPs see ~25 patients/day regardless of how many other PCPs the system serves. Total per-PCP holds in the $6.85–$7.93/mo range across all four tiers. Cache hit rate trends UP at scale (more prompt-prefix overlap from shared specialty cohorts) — that's not in the projection numbers, just headroom.*
 - "What's the failure mode at scale?" — *Anthropic rate limits hit before host capacity does. At 10K PCPs we need an enterprise rate-limit deal. At 100K we need multi-provider redundancy. Both are out-of-band procurement work; architecture supports both via the `LLMClient` interface.*
 - "What about Vercel / Railway for hosting?" — *Out of scope for this analysis (covered in DECISIONS.md §9). Short version: VPS at week 1 ($24/mo) → managed services at Tier 2+ ($600-$3K/mo). Architecture decisions, not cost decisions.*
