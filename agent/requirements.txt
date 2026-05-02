@@ -19,7 +19,7 @@ PyMySQL>=1.1.0
 cryptography>=42.0.0  # required by PyMySQL for some MariaDB auth modes
 
 # Observability
-langfuse>=2.40.0
+langfuse>=2.60.10
 
 # Testing
 pytest>=8.0.0
