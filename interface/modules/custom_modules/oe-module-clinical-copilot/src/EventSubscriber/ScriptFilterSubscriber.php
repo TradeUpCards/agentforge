@@ -11,9 +11,13 @@
  * Both files are filtered through `ModulesApplication::filterSafeLocalModuleFiles`
  * which only allows real local files under the modules root.
  *
- * The subscriber injects unconditionally (every page); chart-bootstrap.js
- * self-determines whether to render the drawer (only on patient chart
- * pages, idempotent across iframes via the top-window check).
+ * Auth gate: only inject when an authenticated user session exists. The
+ * login page (and any other unauthenticated entrypoint) therefore does
+ * not download the module's JS/CSS — avoids disclosing the module's
+ * existence + behavior to anonymous visitors. chart-bootstrap.js itself
+ * already short-circuits on `/login_screen|\/oauth2/` paths, but
+ * preventing the asset download in the first place is the cleaner
+ * defense.
  *
  * @package   OpenEMR
  * @link      https://www.open-emr.org
@@ -26,6 +30,7 @@ declare(strict_types=1);
 
 namespace OpenEMR\Modules\ClinicalCopilot\EventSubscriber;
 
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\Events\Core\ScriptFilterEvent;
 use OpenEMR\Events\Core\StyleFilterEvent;
@@ -46,6 +51,9 @@ final class ScriptFilterSubscriber implements EventSubscriberInterface
 
     public function onScriptFilter(ScriptFilterEvent $event): void
     {
+        if (!$this->isAuthenticated()) {
+            return;
+        }
         $scripts = $event->getScripts();
         $scripts[] = OEGlobalsBag::getInstance()->getWebRoot()
             . self::MODULE_PUBLIC_PATH . '/chart-bootstrap.js'
@@ -55,11 +63,32 @@ final class ScriptFilterSubscriber implements EventSubscriberInterface
 
     public function onStyleFilter(StyleFilterEvent $event): void
     {
+        if (!$this->isAuthenticated()) {
+            return;
+        }
         $styles = $event->getStyles();
         $styles[] = OEGlobalsBag::getInstance()->getWebRoot()
             . self::MODULE_PUBLIC_PATH . '/chart-bootstrap.css'
             . $this->mtimeQuery('/chart-bootstrap.css');
         $event->setStyles($styles);
+    }
+
+    /**
+     * True iff the request has a valid OpenEMR session with an
+     * authenticated user. Mirrors the pid-gate pattern used by
+     * `PageHeadingSubscriber::shouldInject()`. Wraps in a try/catch
+     * because session access can throw on truly bare entrypoints
+     * (no session bootstrapped at all).
+     */
+    private function isAuthenticated(): bool
+    {
+        try {
+            $session = SessionWrapperFactory::getInstance()->getActiveSession();
+            $userId = $session->get('authUserID');
+            return is_numeric($userId) && (int) $userId > 0;
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**
