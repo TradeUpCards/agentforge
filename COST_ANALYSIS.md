@@ -89,6 +89,22 @@ A typical PCP visits ~25 patients/day. Co-Pilot summon rate among PCPs in pilot 
 
 At blended $0.010/request and ~50% cache hit rate: **~$0.30 per PCP per day** of LLM cost. Over a 22-working-day month: **~$6.60/PCP/month**.
 
+### 2.6 Sensitivity to usage assumptions
+
+The §2.5 numbers are **reasoned estimates without pilot data**. The summon-rate / UC2-rate / UC3-rate splits are anchored to "what feels typical for primary care workflow" but haven't been measured. The biggest swing variable is whether PCPs treat Co-Pilot as the default (~70% summon rate) vs as a tool they reach for on the harder cases (~30% summon rate).
+
+| Scenario | Summon rate | UC2 follow-up | UC3 free-text | Reqs/PCP/day | LLM $/PCP/mo |
+|---|---:|---:|---:|---:|---:|
+| **Pessimistic** — Co-Pilot for hard cases only | 30% | 20% of briefs | 15% of patients | ~12 | **~$2.60** |
+| **Baseline** — used in §4–7 projections | 70% | 40% of briefs | 25% of patients | ~30 | **~$6.60** |
+| **Optimistic** — Co-Pilot becomes the default workflow | 90% | 60% of briefs | 40% of patients | ~46 | **~$10.10** |
+
+The baseline is a midpoint guess. **Pilot data is the gating input for tightening this.** The first 30 days of pilot deployment with summon-rate telemetry would reduce the uncertainty here by a factor of ~3 — at which point the projection range collapses from ~3.9× spread to ~1.3× spread (one standard deviation of measured usage).
+
+What this means for the tier projections in §4–7: the LLM-cost line items can be read as the baseline. Pessimistic case at any tier is roughly **0.4× the LLM line item** (e.g., Tier 2 LLM drops from $6,600 to ~$2,600/mo); optimistic is **~1.5× the LLM line item**. Infrastructure costs are unaffected — they scale with PCP count, not request volume.
+
+**Why this matters for the CTO defense.** "We assumed 70% summon rate; here's the range if we're wrong" is a stronger answer than "the cost is $6.60/PCP/mo trust us." Showing you've named the uncertainty is what separates a credible projection from an aspirational one.
+
 ---
 
 ## 3. Honest framing — prompt caching gap
