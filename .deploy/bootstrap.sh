@@ -210,6 +210,12 @@ services:
 
       USE_FIXTURE_DATA: \${USE_FIXTURE_DATA}
       USE_FIXTURE_LLM: \${USE_FIXTURE_LLM}
+
+      # Per-user abuse controls (post-HMAC). Empty values fall through
+      # to config.py defaults: 60 req/min, 200K tokens/hour. Tighten in
+      # .env once real clinician usage shape is known.
+      AGENT_RATE_LIMIT_RPM: \${AGENT_RATE_LIMIT_RPM}
+      AGENT_TOKEN_BUDGET_PER_HOUR: \${AGENT_TOKEN_BUDGET_PER_HOUR}
     depends_on:
       mysql:
         condition: service_healthy

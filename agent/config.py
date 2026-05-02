@@ -46,6 +46,13 @@ class Settings(BaseModel):
     # Auth
     openemr_hmac_secret: str
 
+    # Abuse resistance — per-user, post-HMAC. See agent/_rate_limit.py.
+    # Both default to permissive values that real clinical workflows
+    # should never hit; pathological loops or compromised sessions get
+    # rejected cleanly with a refusal response.
+    rate_limit_requests_per_minute: int
+    token_budget_per_hour: int
+
     # Service
     host: str
     port: int
@@ -114,6 +121,14 @@ def get_settings() -> Settings:
         db_audit_user=os.getenv("AGENT_DB_AUDIT_USER", ""),
         db_audit_password=os.getenv("AGENT_DB_AUDIT_PASS", ""),
         openemr_hmac_secret=os.getenv("OPENEMR_HMAC_SECRET", ""),
+        # `or` falls through both None and empty-string — defensive against
+        # docker-compose env interpolation that sets unset vars to "".
+        rate_limit_requests_per_minute=int(
+            os.getenv("AGENT_RATE_LIMIT_RPM") or "60"
+        ),
+        token_budget_per_hour=int(
+            os.getenv("AGENT_TOKEN_BUDGET_PER_HOUR") or "200000"
+        ),
         host=os.getenv("AGENT_HOST", "0.0.0.0"),
         port=int(os.getenv("AGENT_PORT", "8000")),
         log_level=os.getenv("AGENT_LOG_LEVEL", "info"),

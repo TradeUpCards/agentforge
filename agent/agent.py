@@ -35,6 +35,11 @@ from langfuse._client.attributes import LangfuseOtelSpanAttributes
 from opentelemetry import trace as otel_trace
 
 from ._audit_log import AuditRow, write_audit_row
+from ._rate_limit import (
+    check_request_rate,
+    check_token_budget,
+    record_token_usage,
+)
 from .config import Settings, get_settings
 from .llm_client import LLMClient, build_llm_client
 from .schemas import (
@@ -604,6 +609,73 @@ async def run_chat(
             trace_id=trace_id,
         ))
 
+    # 1a. Per-user request rate (post-HMAC so user_id is trusted).
+    # Cheap rejection — runs before tool fetch + LLM call. Closes the
+    # `public_no_rate_or_cost_controls` cap from ai-security-review.
+    if not check_request_rate(
+        request.user_id,
+        settings.rate_limit_requests_per_minute,
+        60,
+    ):
+        get_client().update_current_span(
+            metadata={
+                "verifier_verdict": "refused",
+                "refusal_reason": "rate_limit",
+                "rate_limit_rpm": settings.rate_limit_requests_per_minute,
+            }
+        )
+        trace_id = get_client().get_current_trace_id()
+        _flush_langfuse()
+        audit.outcome = "refused"
+        audit.refusal_reason = (
+            f"rate_limit (>{settings.rate_limit_requests_per_minute} req/min)"
+        )
+        audit.verifier_verdict = "refused"
+        return _close_audit(audit, started_at, RefusalResponse(
+            reason=(
+                "Request rate limit exceeded for this user. "
+                "Please wait a minute before retrying."
+            ),
+            searched=[],
+            request_id=request_id,
+            trace_id=trace_id,
+        ))
+
+    # 1b. Per-user token budget (rolling hour). Reject before the LLM
+    # call when historical usage already over budget. Closes the cost-
+    # ceiling production blocker from agent-review.
+    budget_ok, current_tokens = check_token_budget(
+        request.user_id,
+        settings.token_budget_per_hour,
+        3600,
+    )
+    if not budget_ok:
+        get_client().update_current_span(
+            metadata={
+                "verifier_verdict": "refused",
+                "refusal_reason": "token_budget_exceeded",
+                "tokens_current_hour": current_tokens,
+                "token_budget_per_hour": settings.token_budget_per_hour,
+            }
+        )
+        trace_id = get_client().get_current_trace_id()
+        _flush_langfuse()
+        audit.outcome = "refused"
+        audit.refusal_reason = (
+            f"token_budget_exceeded ({current_tokens} >= "
+            f"{settings.token_budget_per_hour})"
+        )
+        audit.verifier_verdict = "refused"
+        return _close_audit(audit, started_at, RefusalResponse(
+            reason=(
+                "This user has reached the hourly token budget. "
+                "Please retry in an hour."
+            ),
+            searched=[],
+            request_id=request_id,
+            trace_id=trace_id,
+        ))
+
     # 2. Fetch baseline patient context
     retrieved_records, tool_summaries = await fetch_baseline_context(request.patient_id)
 
@@ -697,6 +769,15 @@ async def run_chat(
     )
     audit.tools_called = _summarize_tools(tool_summaries)
     audit.llm_calls = [_summarize_llm_call(settings.model_workhorse, response)]
+
+    # Record actual tokens spent against the per-user hourly budget.
+    # Done unconditionally — even if the response is later refused by
+    # the verifier, the LLM call already happened and counts as spend.
+    _llm_summary = audit.llm_calls[0]
+    record_token_usage(
+        request.user_id,
+        _llm_summary["input_tokens"] + _llm_summary["output_tokens"],
+    )
 
     # 5. Parse structured output
     raw_text = _extract_text(response)
