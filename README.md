@@ -67,6 +67,7 @@ The week-1 brief lists 8 required deliverables. Each maps to a file in this repo
 | [`RULE_CORPUS.md`](./RULE_CORPUS.md) | The 7-rule clinical corpus the verifier flags against, with selection filters and "adjacent rule considered + why this won." |
 | [`SYNTHETIC_DATA_PLAN.md`](./SYNTHETIC_DATA_PLAN.md) | How the 10 synthetic edge-case patients were designed — sentinel ID range, no-real-PHI validator, per-patient failure mode coverage. |
 | [`SETUP.md`](./SETUP.md) | Local-dev setup: clone, `docker compose up`, agent venv, env vars, pre-commit hook install. |
+| [`WORKFLOW.md`](./WORKFLOW.md) | Git workflow + dual-mirror sync rules. **Read before committing** — explains how to push so both GitLab and GitHub stay at the same SHA (avoid the dual-merge divergence trap). |
 
 ---
 
