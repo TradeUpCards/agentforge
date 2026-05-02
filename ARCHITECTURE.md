@@ -1,7 +1,8 @@
 # ARCHITECTURE.md — Clinical Co-Pilot Agent Integration
 
+> **Related docs:** [`USERS.md`](./USERS.md) (capabilities trace to use cases here) · [`AUDIT.md`](./AUDIT.md) (architecture responds to these findings) · [`DECISIONS.md`](./DECISIONS.md) (rationale for the choices below) · [`COST_ANALYSIS.md`](./COST_ANALYSIS.md) (cost as a design constraint, §2.5) · [`PERFORMANCE.md`](./PERFORMANCE.md) (read-path latency analysis) · [`EVAL_SUITE.md`](./EVAL_SUITE.md) (verifier coverage, §3.6) · [`RULE_CORPUS.md`](./RULE_CORPUS.md) (clinical rules, §3.5)
+
 **Project:** AgentForge Clinical Co-Pilot
-**Source documents this file traces to:** [`USERS.md`](./USERS.md), [`AUDIT.md`](./AUDIT.md)
 
 ---
 

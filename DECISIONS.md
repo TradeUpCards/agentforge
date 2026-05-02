@@ -1,5 +1,7 @@
 # DECISIONS.md — Architectural Choices and Their Defenses
 
+> **Related docs:** [`ARCHITECTURE.md`](./ARCHITECTURE.md) (the choices documented here are made concrete there) · [`AUDIT.md`](./AUDIT.md) (audit findings that drove several decisions) · [`USERS.md`](./USERS.md) (the use cases the choices serve) · [`COST_ANALYSIS.md`](./COST_ANALYSIS.md) (cost decisions, §6) · [`PERFORMANCE.md`](./PERFORMANCE.md) (perf-driven decisions) · [`RULE_CORPUS.md`](./RULE_CORPUS.md) (rule-selection decisions, §2)
+
 **Audience:** the hospital CTO deciding whether to put this in front of their physicians, plus the project's grading reviewers and developers picking the work up cold.
 
 **Purpose:** every meaningful architectural choice in AgentForge Clinical Co-Pilot, organized by the concern a CTO would raise — with our decision, the rationale, the tradeoff we accepted, and the source-of-truth document to drill into.

@@ -1,5 +1,7 @@
 # USERS.md — Target User and Use Cases
 
+> **Related docs:** [`ARCHITECTURE.md`](./ARCHITECTURE.md) (capabilities trace from these use cases) · [`DECISIONS.md`](./DECISIONS.md) (use-case-driven decisions, e.g. "single-agent vs multi-agent") · [`EVAL_SUITE.md`](./EVAL_SUITE.md) (eval cases exercise these UCs)
+
 **Project:** AgentForge Clinical Co-Pilot
 **Source of truth note:** every agent capability built in `ARCHITECTURE.md` and the implementation must trace back to one of the use cases defined here. If a capability does not serve a use case below, it is out of scope.
 

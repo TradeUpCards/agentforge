@@ -1,5 +1,7 @@
 # OpenEMR Audit — Pre-Agent Integration
 
+> **Related docs:** [`ARCHITECTURE.md`](./ARCHITECTURE.md) (architecture choices respond to these findings) · [`DECISIONS.md`](./DECISIONS.md) (some findings drive named architectural decisions, e.g. §1, §4) · [`PERFORMANCE.md`](./PERFORMANCE.md) (deeper read-path follow-up to the perf audit section)
+
 **Project:** AgentForge Clinical Co-Pilot (Gauntlet AI Austin Admission Track)
 **Codebase:** OpenEMR fork at `master`, version `8.0.0.x` line
 **Audit type:** Code review (no live pen testing)

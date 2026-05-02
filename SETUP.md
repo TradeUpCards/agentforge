@@ -1,5 +1,7 @@
 # SETUP.md — Local Development Setup
 
+> **Related docs:** [`README.md`](./README.md) (project overview) · [`ARCHITECTURE.md`](./ARCHITECTURE.md) (system architecture) · [`OPENEMR_README.md`](./OPENEMR_README.md) (upstream OpenEMR docs preserved for reference)
+
 **For:** AgentForge Clinical Co-Pilot — a fork of OpenEMR with an embedded AI agent.
 **Audience:** anyone setting this fork up for development, including future-you.
 **Scope:** end-to-end local development — OpenEMR + Synthea-populated demo data + the Python agent service + the chat drawer reachable from any patient chart page.
