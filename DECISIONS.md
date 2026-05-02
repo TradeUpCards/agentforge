@@ -99,6 +99,26 @@ This sub-section addresses MVP-feedback gap #2 (the original §4 flagged PHI red
 
 > **Updated 2026-05-02.** First-cut implementation shipped using Langfuse's built-in `mask=` callback — runs at the SDK serialization boundary, only on the copy of inputs/outputs sent to Langfuse Cloud. Does NOT affect what the LLM, verifier, or end user sees. The mask currently performs **year-month bucketing on day-precision dates** in three formats (ISO `YYYY-MM-DD`, US slash `MM/DD/YYYY`, US dash `MM-DD-YYYY`), recursively walking dicts, lists, and Pydantic models. Code lives in `agent/agent.py:_mask_phi`; unit tests at `agent/tests/unit/test_mask.py` (12 cases). What's NOT yet redacted (still deferred to full week-3 implementation): names, DOBs, MRNs, phone numbers, addresses, and free-text date detection (e.g. "March 15, 2026"). Singleton-init wrinkle worth flagging: Langfuse v4's `LangfuseResourceManager` is per-public-key — if the SDK is constructed without `mask=` first, later constructions with the mask are silently ignored. The agent forces mask attachment on the singleton in `_langfuse()` to defend against init-order races.
 
+> **Updated 2026-05-02 (Tier-2 outbound expansion).** Closes the high-confidence half of [`AUDIT.md C-6`](./AUDIT.md#c-6-high--outbound-phi-redaction-needed-for-response-narratives) — the cross-patient identifier leakage class surfaced by eval case 26. Implementation in `agent/_phi_scrubber.py` (~24 unit tests at `agent/tests/unit/test_phi_scrubber.py`):
+>
+> - **`find_outbound_violations(text, allowed_patient_id)`** — runs at the response-gate (just before `AgentResponse` construction in `agent.agent.run_chat`); refuses with `refusal_reason: "outbound_phi_leak"` if any of these high-confidence patterns appear:
+>   - `patient_id=N` / `pid:N` / `pid=N` mentions where N ≠ request's `patient_id` (cross-patient ID leakage)
+>   - SSN (`XXX-XX-XXXX`, valid forms only)
+>   - US phone (dash, dot, paren-area-code variants)
+>   - Email addresses (excluding `@example.com` / `@test.*` placeholders)
+>   - MRN-prefixed identifiers (`MRN: 12345678`)
+> - **`mask_observability_patterns(text)`** — extends `_mask_phi` so the same patterns are scrubbed from input/output payloads before Langfuse Cloud export (replaces with `<REDACTED-SSN>` / `<REDACTED-PHONE>` / `<REDACTED-EMAIL>` / `<REDACTED-MRN>` / normalizes `patient_id=N` to `pid:N`).
+>
+> **Why "refuse" not "redact" at the response boundary:** cross-patient leakage is a HIPAA breach class; partially-redacted responses can still ship implied content. Refusing with a clear reason is preferable. Clinician retries; if persistent, manual chart review.
+>
+> **Why name detection is deferred** (the eval case 26 lure also injected the name "Maria Hernandez", and the response repeated it — Tier-2 doesn't catch this):
+>
+> 1. **Plumbing:** detecting "is this name a different patient" requires an allowlist = the request patient's name. The agent doesn't currently know the request patient's name (only `patient_id`); fixing requires either a name-lookup tool call at run_chat start (~10 min) or schema change to pass it from the OpenEMR module (~30 min, larger blast radius). 
+> 2. **False-positive risk:** capitalized First+Last regex matches doctor names in encounter notes ("seen by Dr. Smith"), some drug brand names, common medical terms. Allowlisting requires either retrieved-record provider extraction OR a curated medical-term allowlist — both are project-scope work.
+> 3. **Refuse-on-name-match has high false-positive cost:** clinician fatigue. A scrubber that refuses 1 in 5 valid responses is worse than one that misses 1 in 50.
+>
+> **Realistic estimate** for full name + DOB scrubbing: ~3 hours including the patient-name lookup, allowlist population from retrieved records, FP suppression for honorific-prefixed names, and unit + eval tests. Not undertaken at week-1 final-submission time. Documented as week-3 hardening alongside the broader Safe Harbor sweep below.
+
 #### The 18 HIPAA Safe Harbor identifiers (§164.514(b)(2))
 
 Each tagged for our agent's actual I/O surface. The bar for "in-scope" is whether the identifier could plausibly appear in our prompts to the LLM, our responses back to the user, or our trace metadata sent to Langfuse.

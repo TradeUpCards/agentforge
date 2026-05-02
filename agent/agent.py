@@ -35,6 +35,7 @@ from langfuse._client.attributes import LangfuseOtelSpanAttributes
 from opentelemetry import trace as otel_trace
 
 from ._audit_log import AuditRow, write_audit_row
+from ._phi_scrubber import find_outbound_violations, mask_observability_patterns
 from ._rate_limit import (
     check_request_rate,
     check_token_budget,
@@ -101,17 +102,31 @@ def _bucket_dates_in_string(s: str) -> str:
 
 
 def _mask_phi(data: Any) -> Any:
-    """Langfuse mask callback. Recursively bucket day-precision dates to
-    year-month. Called on every input + output payload before Langfuse
-    Cloud export. Must be defensive — return data unchanged on any error
-    so observability doesn't break the request.
+    """Langfuse mask callback. Recursively scrubs PHI patterns from input
+    + output payloads before they ship to Langfuse Cloud. Two pattern
+    families:
+
+    1. **Date bucketing** (year-month): `2026-03-15` → `2026-03` etc.
+       Removes day-precision PHI per HIPAA Safe Harbor §3 while
+       preserving enough signal in traces to debug agent behavior.
+
+    2. **High-confidence PHI patterns** (per `_phi_scrubber`):
+       SSN, US phone, email (non-allowlist), MRN-prefixed identifiers,
+       patient_id-shaped strings normalized to `pid:<int>`. Closes the
+       observability half of AUDIT.md C-6.
+
+    Must be defensive — return data unchanged on any error so
+    observability doesn't break the request.
 
     Handles Pydantic models (the typical /chat input + AgentResponse output)
     by dumping to dict first, then recursing. Without this, the isinstance
     checks would miss Pydantic models and return them unmasked."""
     try:
         if isinstance(data, str):
-            return _bucket_dates_in_string(data)
+            # Apply date bucketing FIRST so SSN-shaped date masks (rare
+            # but possible) don't double-collide. Then PHI scrubbing.
+            bucketed = _bucket_dates_in_string(data)
+            return mask_observability_patterns(bucketed)
         if isinstance(data, dict):
             return {k: _mask_phi(v) for k, v in data.items()}
         if isinstance(data, (list, tuple)):
@@ -928,6 +943,44 @@ async def run_chat(
                 request_id=request_id,
                 trace_id=trace_id,
             ))
+
+    # 6a. Outbound PHI gate — REFUSE if cross-patient identifiers (other
+    # patient_ids, SSN, phone, email, MRN) appear in the response prose
+    # or any claim text. Closes AUDIT.md C-6 for the high-confidence
+    # pattern classes; cross-patient name detection remains deferred
+    # (see DECISIONS.md §4a "Why name detection is deferred").
+    _phi_scan_targets = [prose] + [c.text for c in verdict.claims_passed]
+    _phi_violations: list[str] = []
+    for _t in _phi_scan_targets:
+        _phi_violations.extend(find_outbound_violations(_t, request.patient_id))
+    if _phi_violations:
+        get_client().update_current_span(
+            metadata={
+                "verifier_verdict": "refused",
+                "refusal_reason": "outbound_phi_leak",
+                # Cap to 10 to avoid metadata bloat; redacted form
+                # already in the violation strings.
+                "phi_violations": _phi_violations[:10],
+            }
+        )
+        trace_id = get_client().get_current_trace_id()
+        _flush_langfuse()
+        audit.outcome = "refused"
+        audit.refusal_reason = "outbound_phi_leak"
+        audit.verifier_verdict = verdict.verdict.value
+        audit.claims_passed = len(verdict.claims_passed)
+        audit.claims_failed = len(verdict.claims_failed)
+        return _close_audit(audit, started_at, RefusalResponse(
+            reason=(
+                "The Co-Pilot detected potential cross-patient information "
+                "in the response and declined to send it. Please retry; "
+                "if this persists, the patient's chart should be reviewed "
+                "manually."
+            ),
+            searched=tool_summaries,
+            request_id=request_id,
+            trace_id=trace_id,
+        ))
 
     # 7. Return verified response
     trace_id = get_client().get_current_trace_id()
