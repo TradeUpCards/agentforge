@@ -277,6 +277,11 @@ class CaseResult:
     failures: list[str] = field(default_factory=list)
     skipped: bool = False
     skip_reason: str = ""
+    latency_ms: int = 0
+    """Wall time (ms) for this case's HTTP round-trip — measured at
+    `_run_case_once`. 0 for skipped cases. Surfaced in the eval report
+    so per-case latency regressions are visible without leaving the
+    runner output."""
 
     @property
     def passed(self) -> bool:
@@ -389,12 +394,16 @@ def _run_case_once(client: TestClient, case: EvalCase, secret: str) -> CaseResul
         "hmac": sig,
         "messages": case.messages,
     }
+    t0 = time.perf_counter()
     r = client.post("/chat", json=body)
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
     try:
         payload = r.json()
     except json.JSONDecodeError:
         payload = {"status": "error", "raw_body": r.text}
-    return _evaluate(case, r.status_code, payload)
+    result = _evaluate(case, r.status_code, payload)
+    result.latency_ms = elapsed_ms
+    return result
 
 
 def run_case(
@@ -595,6 +604,38 @@ def write_report(results: list[CaseResult], path: Path | None = None) -> Path:
         lines.append("|---|---:|")
         for fm in sorted(failure_modes):
             lines.append(f"| `{fm}` | {failure_modes[fm]} |")
+        lines.append("")
+
+    # Latency — surfaces per-case wall-time so regressions are visible
+    # without leaving the runner output. Skipped cases are excluded
+    # because their latency is 0 (request never fired).
+    timed = [r for r in results if not r.skipped]
+    if timed:
+        lat_total = sum(r.latency_ms for r in timed)
+        lat_avg = lat_total // len(timed)
+        lat_max = max(r.latency_ms for r in timed)
+        lat_min = min(r.latency_ms for r in timed)
+        # Sorted slowest-first so the worst offenders are at the top.
+        slowest = sorted(timed, key=lambda r: r.latency_ms, reverse=True)[:10]
+        lines.append("## Latency")
+        lines.append("")
+        lines.append(f"**Cases timed:** {len(timed)}  ")
+        lines.append(f"**Total wall time:** {lat_total} ms  ")
+        lines.append(
+            f"**Per-case:** avg {lat_avg} ms · min {lat_min} ms · max {lat_max} ms"
+        )
+        lines.append("")
+        lines.append(f"### Slowest {len(slowest)} cases")
+        lines.append("")
+        lines.append("| Case | Latency (ms) | Tier | Status |")
+        lines.append("|---|---:|---|---|")
+        for r in slowest:
+            status = "skipped" if r.skipped else (
+                "pass" if r.passed or r.case.expected_to_fail else "fail"
+            )
+            lines.append(
+                f"| `{r.case.name}` | {r.latency_ms} | `{r.case.tier}` | {status} |"
+            )
         lines.append("")
 
     # Per-case detail, grouped by category so the report reads as
