@@ -50,7 +50,7 @@ The week-1 brief lists 8 required deliverables. Each maps to a file in this repo
 | 3 | **User Doc** | [`USERS.md`](./USERS.md) | Target user (primary care physician), three concrete use cases UC1/UC2/UC3, and *why an agent* is the right shape for each. |
 | 4 | **Agent Architecture Doc** | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | The integration plan + verification strategy + tradeoffs. Begins with a 1-page summary; subsequent sections cover model selection, tool design, verifier placement, observability, deployment. |
 | 5 | **Demo Video (3–5 min)** | *See "Try it" above* | Final-submission re-record links here on commit. |
-| 6 | **Eval Dataset** | [`EVAL_SUITE.md`](./EVAL_SUITE.md) + [`agent/tests/eval/cases/`](./agent/tests/eval/cases/) + [`agent/tests/eval/results/`](./agent/tests/eval/results/) | 26 cases across 5 categories (happy_path, auth_boundary, edge_case, ambiguous, prompt_injection); per-tier markdown reports. |
+| 6 | **Eval Dataset** | [`EVAL_SUITE.md`](./EVAL_SUITE.md) + [`agent/tests/eval/cases/`](./agent/tests/eval/cases/) + [`agent/tests/eval/results/`](./agent/tests/eval/results/) | 26 cases across 6 categories (happy_path, auth_boundary, edge_case, ambiguous, prompt_injection, leakage_attempt); per-tier markdown reports + 12 synthetic patient fixtures. |
 | 7 | **AI Cost Analysis** | [`COST_ANALYSIS.md`](./COST_ANALYSIS.md) | Actual dev burn + per-PCP/mo projections at 100 / 1K / 10K / 100K with the architectural changes named at each tier. |
 | 8 | **Deployed Application** | https://142-93-242-40.nip.io | Single DigitalOcean droplet running the full stack (OpenEMR + agent service + MariaDB + Caddy). |
 | 9 | **Social Post** *(final only)* | *Posted on X; link added on final commit.* | |
@@ -112,17 +112,23 @@ If you're reviewing this repo, the work to look at lives in `agent/`, `interface
 - UC1 / UC2 / UC3 end-to-end against real Synthea-imported MariaDB
 - Verifier with date normalization (ISO/MM-DD-YYYY/MM/DD/YYYY) + value-date tuple matching
 - Explicit Anthropic prompt caching (verified live: 100% cache READ on identical follow-up)
-- Langfuse observability — traces, sessions, users, PHI date-bucketing mask
-- HMAC + CSRF + ACL on every backend endpoint; auth gate on JS/CSS injection so the login page doesn't leak module existence
-- 26 eval cases / 5 categories / two-mode runner / pre-commit smoke tier
+- Langfuse observability — traces + sessions + users + per-LLM-call latency + PHI date-bucketing mask + outbound PHI scrubber (cross-patient ID, SSN, phone, email, MRN)
+- Auth depth: HMAC + CSRF + ACL on every backend endpoint; JS/CSS auth gate so login page doesn't leak module existence; **HMAC replay protection** via signed timestamp; **per-user rate limiting + hourly token budget**
+- HIPAA `agent_log` audit table — every PHI read recorded (closes AUDIT.md C-1)
+- 26 eval cases / 6 categories / two-mode runner / pre-commit smoke tier / 12 synthetic edge-case patient fixtures
+- CI/CD: GitHub Actions PR-gate (`agent-eval`) + GitLab CI mirror (manual-trigger pending Runner provisioning)
+- Operational docs: [`SLO.md`](./SLO.md) (5 SLOs with thresholds) + [`RUNBOOK.md`](./RUNBOOK.md) (backup/restore procedures with named RTO targets)
 
-**Deferred (week-2+ with documented rationale in DECISIONS.md):**
+**Deferred (week-2+ with documented rationale in DECISIONS.md / AUDIT.md):**
 - Same-patient drawer-open pre-warm cache (cross-patient pre-fetch explicitly *rejected* — see `.gauntlet/week2/candidates.md`)
 - Verifier temporal-coherence check (delta-narrative direction validation)
-- Full HIPAA Safe Harbor PHI scrubbing in observability — first cut shipped (year-month date bucketing); names/DOBs/MRNs/free-text scrubbing remain (DECISIONS.md §4a)
+- Outbound PHI scrubber **name detection** — Tier 2 shipped (cross-patient IDs + SSN + phone + email + MRN) but cross-patient name detection still deferred (see DECISIONS.md §4a "Why name detection is deferred")
+- Full HIPAA Safe Harbor 18-identifier sweep on inbound retrieved-records context (DECISIONS.md §4a)
 - LLM-as-judge eval layer
 - Replay harness against captured production traces
-- Rate limiting
+- Backup automation cron + first restore drill (RUNBOOK.md §6 — procedure documented, automation deferred)
+- Alert routing wiring (SLO.md §4 — thresholds documented, page/ticket routing deferred)
+- NEEDS_REVIEW verifier verdict tier (agent-review surfaced)
 
 ---
 
