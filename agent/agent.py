@@ -520,13 +520,21 @@ def _summarize_tools(tool_summaries: list[ToolCallSummary]) -> list[dict[str, An
     ]
 
 
-def _summarize_llm_call(model: str, response: Any) -> dict[str, Any]:
-    """Extract token + cache telemetry from an Anthropic SDK response.
-    Defensive — usage attributes vary slightly across SDK versions and
-    fixture-mode responses. Missing fields default to 0."""
+def _summarize_llm_call(
+    model: str, response: Any, latency_ms: int,
+) -> dict[str, Any]:
+    """Extract token + cache + latency telemetry from an Anthropic SDK response.
+
+    Defensive on the usage fields — they vary slightly across SDK versions
+    and fixture-mode responses (canned fixture reports 0 tokens). Missing
+    fields default to 0. `latency_ms` is the wall time of the SDK call,
+    measured at the call site since the SDK doesn't expose it on the
+    response object. This is what makes `agent_log.llm_calls` queryable
+    for LLM-call latency without depending on Langfuse trace retention."""
     usage = getattr(response, "usage", None)
     return {
         "model": model,
+        "latency_ms": latency_ms,
         "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
         "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
         "cache_read_input_tokens": int(
@@ -803,6 +811,7 @@ async def run_chat(
     # 5+ encounters with rich SOAP notes; the structured-claim JSON
     # output must include every cited fact, so 2048 was getting truncated
     # mid-JSON and breaking the parser. 4096 leaves comfortable headroom.
+    llm_t0 = time.perf_counter()
     response = await llm.create(
         model=settings.model_workhorse,
         system=system_blocks,
@@ -810,8 +819,11 @@ async def run_chat(
         max_tokens=4096,
         temperature=0.0,
     )
+    llm_elapsed_ms = int((time.perf_counter() - llm_t0) * 1000)
     audit.tools_called = _summarize_tools(tool_summaries)
-    audit.llm_calls = [_summarize_llm_call(settings.model_workhorse, response)]
+    audit.llm_calls = [
+        _summarize_llm_call(settings.model_workhorse, response, llm_elapsed_ms)
+    ]
 
     # Record actual tokens spent against the per-user hourly budget.
     # Done unconditionally — even if the response is later refused by
