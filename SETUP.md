@@ -156,13 +156,21 @@ The agent's `agent/.env` should reference this user (see `agent/.env.example`).
 
 ### Step 5 — Configure agent secrets
 
-The agent needs three categories of credentials, all wired through `agent/.env` (gitignored — copy from `agent/.env.example`):
+The agent needs four categories of credentials, all wired through `agent/.env` (gitignored — copy from `agent/.env.example`):
 
 | Category | Required? | Notes |
 |---|---|---|
 | **LLM provider** (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`) | Optional for first boot | Without a key, the agent runs in **fixture mode** — canned LLM responses, full loop still exercised. With a real key it flips to live. Direct Anthropic uses `https://api.anthropic.com`; OpenRouter uses `https://openrouter.ai/api` (no trailing `/v1` — the SDK appends it). On OpenRouter, models are `anthropic/<model>` prefixed. |
 | **Observability** (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`) | Optional | Without keys, traces are simply not emitted. With keys, every `/chat` request appears in Langfuse with per-step latency, token usage, verifier verdict, and stripped-claim detail. Get keys from https://cloud.langfuse.com → project settings. Free tier is sufficient for development (50k observations/mo). |
-| **OpenEMR ↔ agent integrity** (`OPENEMR_HMAC_SECRET`) | **Required** | Pre-shared secret used by the OpenEMR PHP module to sign requests and the agent to verify them. Generate with `openssl rand -hex 32`. The **same** value must also be set in `docker/development-easy/docker-compose.override.yml` for the openemr container — see `agent/README.md` "Local OpenEMR integration". |
+| **OpenEMR ↔ agent integrity** (`OPENEMR_HMAC_SECRET`) | **Required** | Pre-shared secret used by the OpenEMR PHP module to sign requests and the agent to verify them. Generate with `openssl rand -hex 32`. The **same** value must also be set in `docker/development-easy/docker-compose.override.yml` for the openemr container — see `agent/README.md` "Local OpenEMR integration". HMAC payload includes a unix timestamp for replay protection — agent rejects requests >30s off its clock. |
+| **Audit-log writer** (`AGENT_DB_AUDIT_USER`, `AGENT_DB_AUDIT_PASS`) | Optional in dev (no-op gracefully if unset) | Dedicated MariaDB user with `INSERT`-only privileges on the `agent_log` table (the HIPAA §164.312(b) audit trail per [`AUDIT.md C-1`](./AUDIT.md)). Defaults to `agent_audit_rw` per `.deploy/bootstrap.sh`. **In production, REQUIRED** — `agent/_audit_log.py` no-ops when these are empty, which is fine for local dev iteration but unacceptable for any deployment that touches real PHI. |
+
+**Optional rate-limit tunables** (have sensible defaults, override only if needed):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGENT_RATE_LIMIT_RPM` | `60` | Per-user requests-per-minute limit. Refuses with `refusal_reason: "rate_limit"` past threshold. |
+| `AGENT_TOKEN_BUDGET_PER_HOUR` | `200000` | Per-user hourly token budget across all LLM calls. Refuses with `refusal_reason: "token_budget"` past threshold. |
 
 The `agent_ro` DB password from Step 4 also goes in `agent/.env` as `AGENT_DB_PASS`. Full variable list and trade-offs in [`agent/.env.example`](./agent/.env.example) and [`agent/README.md`](./agent/README.md).
 

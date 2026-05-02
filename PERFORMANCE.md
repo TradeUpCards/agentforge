@@ -2,6 +2,13 @@
 
 > Companion to [ARCHITECTURE.md](./ARCHITECTURE.md) §2.6 (data path) and §2.4 (cost). Written in response to MVP-submission grader feedback that the original architecture lacked query-plan analysis, index identification, and concrete latency floors.
 
+> **Updated 2026-05-02.** End-to-end latency is now **instrumented**, not just projected. Two layers of measurement landed today:
+>
+> 1. **Per-LLM-call latency** captured via Langfuse generation telemetry on every `/chat` request (input/output tokens + duration). Visible per-trace in the Langfuse dashboard; aggregable per-user / per-session / per-model.
+> 2. **Per-eval-case latency** captured in the eval runner's per-run markdown report (`agent/tests/eval/results/<timestamp>.md`) — wall-time per case + per-tier rollup.
+>
+> The latency targets in [SLO.md §2 SLO-4](./SLO.md#slo-4--end-to-end-latency-p95) (P50 <4s, P95 <8s, P99 <15s) are now anchored to measurable signal rather than projection. Drift against the SLO triggers the [SLO.md §4 alerting plan](./SLO.md#4-alert-wiring--whats-done-whats-open) once routing is wired (operational follow-up).
+
 **Audience:** the hospital CTO asking "is this fast enough at scale, and where does it break first?"
 
 **Scope:** the agent's read path — the 5 tool queries that fetch chart context for the LLM. Doesn't cover the LLM call latency (Anthropic-bound, separate analysis in `COST_ANALYSIS.md`) or the verifier (~microseconds, not a perf concern).

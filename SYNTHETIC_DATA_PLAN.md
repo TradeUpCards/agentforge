@@ -2,7 +2,7 @@
 
 > **Related docs:** [`EVAL_SUITE.md`](./EVAL_SUITE.md) (the eval suite this expansion lands in) · [`agent/tests/eval/cases/`](./agent/tests/eval/cases/) (the YAML cases produced) · [`agent/fixtures/patients/`](./agent/fixtures/patients/) (the synthetic patient JSON fixtures) · [`ARCHITECTURE.md`](./ARCHITECTURE.md) §3.6 (verifier coverage these cases exercise)
 
-**Status:** approved 2026-05-02. Implementation in progress.
+**Status:** ✅ implemented + merged 2026-05-02 (commit `8e23f8422` + follow-ups). Eval suite went 11 → **26 cases across 6 categories** (added `leakage_attempt`); 12 synthetic patient fixtures landed in sentinel range `999100-999114`; tier system (smoke/full/nightly) shipped with the eval-suite runner. See [`EVAL_SUITE.md`](./EVAL_SUITE.md) and [`agent/tests/eval/COVERAGE.md`](./agent/tests/eval/COVERAGE.md) for the post-implementation surface. The plan body below is preserved as the design intent + rationale; deltas between plan-as-written and implemented-as-shipped are minor (case count landed at 26, not the upper-bound ~45 — adequate for week 1 coverage given 26 unique failure modes).
 **Authoring tool:** `synthetic-data-plan` skill (Adam Foosaner skill bundle, distilled from GauntletAI cohort materials).
 **Scope:** expansion of the agent eval suite at `agent/tests/eval/cases/` from 11 → ~45 cases, with richer scenario tagging, more adversarial coverage, and 4-5 new synthetic patient fixtures purpose-built for specific failure modes.
 **Companion artifact:** mirrored at `.gauntlet/week1/reviews/2026-05-02-synthetic-data-plan.md` for audit history.
