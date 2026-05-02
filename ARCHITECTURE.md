@@ -27,6 +27,42 @@ The Clinical Co-Pilot is a Python AI agent service that integrates with OpenEMR 
 
 ---
 
+## Revision since MVP submission
+
+> *Treats this document like an RFC: the body below is the **case-study spec as submitted Tue 2026-04-28**, preserved as the "what we presented." Implementation has evolved since the build began Wed afternoon. This section is the change log; full rationale lives in [DECISIONS.md](./DECISIONS.md) appendix entries. Sections that drifted have inline `> **Updated YYYY-MM-DD**` callouts pointing here.*
+
+**Companion docs added since MVP:**
+
+- [`PERFORMANCE.md`](./PERFORMANCE.md) — query-plan analysis, indexes, latency floors, scale projections (added 2026-05-01 in response to grader feedback).
+- [`DECISIONS.md`](./DECISIONS.md) — CTO-defense ledger; the source of truth for every architectural decision and its rationale.
+- [`.gauntlet/week1/explainers/`](./.gauntlet/week1/explainers/) — study-guide explainers per layer (user, agent, verifier, observability, eval, cost, security). Personal notes; not part of deliverables.
+
+**Deltas, in order of how they show up in this document:**
+
+| Section | What changed | Why |
+|---|---|---|
+| §2.6 (tool design) | **5 baseline tools, not 9.** No `get_patient_demographics`, `get_medication_history`, `get_vitals`, or `get_appointments` — those weren't load-bearing for UC1/2/3 and adding them inflated the prompt. Composite tools collapsed to a single in-process parallel `composite_tool_fetch`. **Read path is direct DB only for week 1**, not "FHIR primary, DB fallback" — FHIR OAuth deferred to week 2. ([DECISIONS.md appendix 2026-04-29](./DECISIONS.md)) |
+| §3.4 (match strictness) | **Added date normalization + (value, date) tuple matching.** Original "exact-string match" prose described an earlier verifier; current implementation canonicalizes ISO / `MM/DD/YYYY` / `MM-DD-YYYY` to ISO before comparison and requires `(value, date)` pairs to co-locate in a single cited record's fields. ([DECISIONS.md §2 + appendix 2026-04-30 afternoon](./DECISIONS.md)) |
+| §3.7 (absence claims) | **Implementation gap closed.** The original §3.7 described the right design ("absence claim is verifiable when the corresponding tool returned empty") but the verifier didn't honor it — empty-records absence claims were getting stripped. Fixed via `verifier.py:_verify_one_claim` ABSENCE-typed exemption when the retrieved-records index is empty. ([DECISIONS.md appendix 2026-04-30](./DECISIONS.md)) |
+| §3.9 (verifier limits) | **Originally one bullet; now three named limits.** The §2 list in DECISIONS.md enumerates them: omissions (open), temporal coherence (open — week-2 work), token-level-vs-semantic pairing (closed). Original architecture mentioned only omissions. ([DECISIONS.md §2](./DECISIONS.md)) |
+| §4 (HIPAA / audit log) | **§4a sub-section added** — PHI redaction implementation plan with the 18 HIPAA Safe Harbor identifiers tagged in/out of scope, per-category redaction strategy, code seam, and test plan. Direct response to MVP grader feedback that the original "redact at log-write" line was too thin. ([DECISIONS.md §4a](./DECISIONS.md#4a-phi-redaction-implementation-plan)) |
+| §5.2 (eval) | **11 cases across 5 categories**, not 8 categories. Categories: `happy_path`, `auth_boundary`, `edge_case`, `ambiguous`, `prompt_injection`. Two-mode eval (fixture for CI determinism + live LLM for realism). LLM-as-judge described in original §5.2 not built — explicit non-goal for week 1. Pre-commit hook runs the Golden Set on every commit. ([explainers/eval-strategy.md](./.gauntlet/week1/explainers/eval-strategy.md)) |
+| §8.1 (deployment) | **Deploy stack evolved during the droplet bring-up.** Final state: `openemr/openemr:flex` image with the entire AgentForge repo bind-mounted as `/var/www/localhost/htdocs/openemr`; agent service built from `agent/Dockerfile`; agent-only on the internal Docker network (no public port mapping); HMAC + session-derived pid as the trust boundary. The `couchdbvolume` mount was a bring-up gotcha — the flex image's startup rsyncs `/couchdb/data` and crash-loops if missing. ([.deploy/README.md](./.deploy/README.md), [`bootstrap.sh`](./.deploy/bootstrap.sh)) |
+| §8.2 (CI/CD) | **Pre-commit hook in place; full CI not built.** `scripts/git-hooks/pre-commit` runs verifier unit tests + eval Golden Set in fixture mode (~6s, no LLM cost) on every commit. GitLab CI pipeline is week-2+ work. ([SETUP.md "Pre-commit hook"](./SETUP.md)) |
+| §10 (roadmap) | Week-2 candidates inventoried in [`.gauntlet/week2/candidates.md`](./.gauntlet/week2/candidates.md) — broader and more concrete than the original §10 list, with provenance + size estimates per candidate. Cross-patient pre-fetch explicitly *rejected*; same-patient drawer-open pre-warm queued as week-2 work. |
+| (new — performance) | **Performance work added.** [`PERFORMANCE.md`](./PERFORMANCE.md) covers EXPLAIN analysis on the 5 tool queries, identified one load-bearing inefficiency (`get_recent_encounters` was full-scanning `forms` due to a missing `pid` join clause; fix shipped 2026-05-01 — 42,224-row scan → 4-row indexed lookup), and projects per-query p95 at 1K/10K/100K patient scale. ([PERFORMANCE.md](./PERFORMANCE.md)) |
+
+**What did NOT change:**
+
+- The five integration commitments above remain the architectural backbone.
+- Verifier-as-separate-pass design (§3.1) — decision validated, not revised.
+- Authorization model (§4.1) — five layers as specified.
+- Cost economics (§2.5) — multi-model tiering + prompt caching shipped as designed.
+
+**For the CTO walking up to the deployed system today:** the original architecture story holds. The deltas above are *implementation-level refinements* against the spec, not rebuilds.
+
+---
+
 ## 1. System Overview
 
 ```
@@ -137,6 +173,8 @@ Cost is an architectural input, not a post-hoc concern. Several decisions in thi
 
 ### 2.6 Tool design (hybrid)
 
+> **Updated 2026-05-01.** Implementation collapsed to **5 baseline tools, direct-DB only for week 1** (not the 9 listed below, and not FHIR-primary). See the [Revision since MVP](#revision-since-mvp-submission) section above and DECISIONS.md appendix entry "2026-04-29 — Direct DB access for week 1; FHIR auth deferred to week 2" for the why.
+
 Two layers of tools:
 
 **Data tools (LLM composes for UC3 reasoning):**
@@ -218,7 +256,9 @@ If every sentence required a citation the verifier would strip 80% of any answer
 
 ### 3.4 Match strictness
 
-- **Strict on numerical values and dates.** "A1c 7.2" must match a record with value 7.2; "last month" must match a record with the right date range. No fuzzy numerical matching.
+> **Updated 2026-04-30.** Originally documented as "exact-string match." Verifier now does **date normalization** (ISO / `MM/DD/YYYY` / `MM-DD-YYYY` all canonicalize to `YYYY-MM-DD` before comparison) and **`(value, date)` tuple matching** (when claim text contains a value and a date within ~60 chars in the same sentence, both must co-locate in a single cited record's fields — splicing value-from-record-A with date-from-record-B fails). Closed 2 of the 3 named verifier limits; temporal-coherence remains week-2. See [DECISIONS.md §2](./DECISIONS.md) and the appendix entry "2026-04-30 (afternoon) — Verifier closes the token-level / date-normalization gap."
+
+- **Strict on numerical values and dates.** "A1c 7.2" must match a record with value 7.2; dates are normalized across formats before comparison; (value, date) pairs must co-locate in the same record.
 - **Lenient on qualifiers** if consistent with the data. "Elevated A1c" passes if the value is above range; rejected if not.
 - Numerical/date hallucinations are the dangerous class (wrong dose, wrong date of last test). Qualifier looseness is a phrasing preference, not a safety risk.
 
@@ -285,13 +325,19 @@ Claims about absence ("no recorded LDL") are verifiable if the corresponding too
 
 ### 3.9 Known verifier limitations (must acknowledge)
 
-- The verifier does not catch **omissions**. If the agent fails to mention a relevant fact, no rule fires. Eval suite includes "did you surface the active diabetes diagnosis" cases as a partial mitigation.
+> **Updated 2026-04-30.** [DECISIONS.md §2](./DECISIONS.md) is the canonical, current list — three named limits with status. Two are closed in week 1; one remains open as week-2 work. Original bullets below preserved for the case-study record; current state is the DECISIONS.md table.
+
+- **Omissions** (open) — The verifier does not catch them. If the agent fails to mention a relevant fact, no rule fires. Eval suite "did you surface the active diabetes diagnosis"-style cases are partial mitigation; true omission detection deferred.
+- **Temporal coherence** (open — week-2 work) — Verifier passes individual claims but doesn't validate delta-narrative direction. Live testing on a Synthea patient produced *"creatinine improved 2.65 mg/dL (08/19) → 0.92 mg/dL (08/16)"* — both values + dates verified individually, but the arrow runs backwards in time. Week-2 fix: teach the verifier to recognize delta-language ("improved", "→", "rose to") and validate date direction.
+- **Token-level vs semantic pairing** (closed 2026-04-30) — see §3.4 update above.
 - The verifier trusts the data layer. If OpenEMR has a wrong abnormal flag, we surface it. Garbage-in, garbage-out at the data boundary.
 - Free-text-sourced claims (`pnotes` body, encounter narrative) are weakest. Policy: prefer structured fields when both exist; mark free-text-sourced claims as Tier 3 in citation strength.
 
 ---
 
 ## 4. Authorization and PHI Access Logging (Audit-Driven)
+
+> **Updated 2026-05-01.** PHI redaction implementation plan now lives in [DECISIONS.md §4a](./DECISIONS.md#4a-phi-redaction-implementation-plan) — 18 HIPAA Safe Harbor identifiers tagged in/out of scope, per-category redaction strategy (substitute / hash / strip / preserve clinical event dates with documented HIPAA tension), code seam at `agent/agent.py`'s `update_current_span(input=...)` calls, and a two-layer test plan. Implementation deferred to week-3 hardening alongside the BAA-region Langfuse migration.
 
 This entire section exists because of `AUDIT.md` findings S-1, S-2, and C-1.
 
@@ -358,6 +404,8 @@ Free tier (50K observations/mo; we'll use ~5–10K). Wired in via the Anthropic 
 - **Prompt-cache hit rate** — confirms caching is delivering the savings the cost model assumes
 
 ### 5.2 Evaluation — pytest + LLM-as-judge
+
+> **Updated 2026-05-01.** Implementation is **11 cases across 5 categories** (`happy_path`, `auth_boundary`, `edge_case`, `ambiguous`, `prompt_injection`) — not the 8 categories listed below. Two-mode eval: fixture mode for CI determinism (no LLM cost), live mode against Synthea-imported patients for prompt-realism verification. **LLM-as-judge not built** — explicit non-goal for week 1 (deterministic asserts cover the failure modes the brief asks about; LLM-as-judge is week-2 stretch). Pre-commit hook runs the Golden Set on every commit. See [`.gauntlet/week1/explainers/eval-strategy.md`](./.gauntlet/week1/explainers/eval-strategy.md) for the full current picture, including the gaps (Replay Harness, scale).
 
 Eval runs hit the deployed agent's API endpoints, not the agent code directly — same path users take. Layered correctness:
 
