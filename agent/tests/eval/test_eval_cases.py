@@ -3,9 +3,17 @@
 Discovers via pytest's default file-name convention. The actual case loading,
 HMAC, runner, and markdown report writer live in `runner.py` (also usable
 as a CLI: `python -m agent.tests.eval.runner`).
+
+Tier filtering: set the `EVAL_TIER` env var to limit which cases run.
+For example, `EVAL_TIER=smoke pytest agent/tests/eval/` runs only
+`tier: smoke` cases — the pre-commit hook uses this to keep commits
+fast (~6 cases / ~10s) while CI runs the full fixture-mode suite.
+Unset (default) means "run every case the other skip rules allow".
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +25,12 @@ from agent.tests.eval.runner import EvalCase, run_case
 
 @pytest.mark.parametrize("case", EvalCase.load_all(), ids=lambda c: c.name)
 def test_eval_case(case: EvalCase) -> None:
+    tier_filter = os.environ.get("EVAL_TIER", "").strip().lower()
+    if tier_filter and case.tier != tier_filter:
+        pytest.skip(
+            f"Case {case.name!r} has tier={case.tier!r}; "
+            f"EVAL_TIER={tier_filter!r} requested."
+        )
     settings = get_settings()
     if case.live_llm_required and settings.use_fixture_llm:
         pytest.skip(

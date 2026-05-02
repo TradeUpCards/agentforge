@@ -1,0 +1,40 @@
+name: maria_drug_class_completeness
+category: happy_path
+description: |
+  Pre-visit brief must surface BOTH active medication classes Maria is
+  on: the diabetes med (metformin) AND the antihypertensive (lisinopril).
+  Distinct from case 01 (which asserts only metformin + A1c) — this
+  case guards against the "primary diagnosis dominates the brief"
+  failure mode where the agent fixates on diabetes and silently drops
+  the hypertension arm of the chart.
+
+  The hypertension diagnosis itself must also surface; without that,
+  the lisinopril claim is contextless.
+
+  Asserts a problem the verifier alone cannot prevent — the verifier
+  ensures any claim the LLM makes is grounded, but does not enforce
+  *completeness* across diagnosis classes. That is what this eval
+  case is for.
+
+patient_id: 1
+user_id: 1
+fixture_data_required: true  # Asserts lisinopril + hypertension — Maria fixture only.
+difficulty: intermediate
+tool_mix:
+  - get_problem_list
+  - get_active_medications
+failure_mode: drug_class_completeness
+tier: smoke
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    - "lisinopril"
+    - "hypertension"
+  expect_tools_called:
+    - get_problem_list
+    - get_active_medications

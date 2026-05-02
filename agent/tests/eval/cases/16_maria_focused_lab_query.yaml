@@ -1,0 +1,43 @@
+name: maria_focused_lab_query
+category: happy_path
+description: |
+  Focused, narrow query ("what was the patient's most recent A1c?")
+  rather than a broad UC1 brief. The agent should surface the value
+  AND the date of the most-recent A1c result, with citation to the
+  matching procedure_result record.
+
+  Distinct from cases 01-04 (broader briefs) and case 11 (focused
+  medication query against Synthea). The (value, date) pair is what
+  the verifier's value/date pair logic at `agent/verifier.py:138-184`
+  exists to protect — asserting both keeps that pair logic exercised
+  in regression.
+
+  Live-LLM-only against Maria fixture data: the canned fixture LLM
+  response includes the A1c value in prose ("current A1c 7.8") but
+  not the matching date in prose (the date lives in the claims array
+  only). A live LLM responding to a *focused* lab query is expected
+  to include both value and date in its prose, which is exactly the
+  failure mode this case exists to regress on. Pytest skips the case
+  when USE_FIXTURE_LLM=true.
+
+patient_id: 1
+user_id: 1
+fixture_data_required: true   # Calibrated against Maria fixture's A1c.
+live_llm_required: true       # Canned prose lacks the date; needs real LLM.
+difficulty: basic
+tool_mix:
+  - get_recent_labs
+failure_mode: focused_lab_query_grounding
+tier: nightly
+
+messages:
+  - role: user
+    content: "What was the patient's most recent A1c?"
+
+expected:
+  status: ok
+  must_mention:
+    - "7.8"
+    - "2026-03-15"
+  expect_tools_called:
+    - get_recent_labs

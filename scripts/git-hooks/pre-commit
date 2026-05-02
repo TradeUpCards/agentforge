@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
 #
-# Pre-commit hook — runs the agent's unit tests + eval Golden Set before
-# every commit lands. Cheap-and-fast (fixture mode, no LLM cost, ~5-10s)
-# so it's tolerable on every commit. Live-LLM and live-DB cases are
-# intentionally skipped in this hook (they cost tokens / require a running
-# DB stack); run them manually with the CLI runner before tagging a
-# release.
+# Pre-commit hook — runs the agent's unit tests + smoke-tier eval cases
+# before every commit lands. Cheap-and-fast (fixture mode, smoke tier
+# only, no LLM cost, ~5-10s) so it's tolerable on every commit. Live-LLM,
+# live-DB, and full/nightly tiers are intentionally skipped here (they
+# cost tokens or require a running DB stack); run the wider suites
+# manually before tagging a release.
 #
 # Install once per clone:
 #     git config core.hooksPath scripts/git-hooks
 #
 # Skip in an emergency:
 #     git commit --no-verify   (use sparingly — defeats the safety net)
+#
+# Run the full fixture-mode suite (smoke + full tiers, ~9 cases):
+#     python -m pytest agent/tests/eval/
+#
+# Run a specific tier via the CLI runner:
+#     python -m agent.tests.eval.runner --tier=smoke
+#     python -m agent.tests.eval.runner --tier=full
+#     python -m agent.tests.eval.runner --tier=nightly   # requires live LLM
 
 set -e
 
@@ -29,7 +37,7 @@ else
     exit 0
 fi
 
-echo "[pre-commit] Running verifier unit tests + eval Golden Set..."
-"$PY" -m pytest agent/tests/unit/ agent/tests/eval/ -q --tb=short
+echo "[pre-commit] Running verifier unit tests + smoke-tier eval cases..."
+EVAL_TIER=smoke "$PY" -m pytest agent/tests/unit/ agent/tests/eval/ -q --tb=short
 
 echo "[pre-commit] All checks passed."

@@ -1,0 +1,36 @@
+name: maria_uc1_lab_trend
+category: happy_path
+description: |
+  Maria has two A1c values on file: 6.8 (Dec 2025) and 7.8 (Mar 2026).
+  The brief should surface BOTH and frame the trajectory, not only the
+  most recent value. Distinct from case 04 (which asserts only that the
+  current value 7.8 was cited) — this case asserts the agent
+  communicates trend, which is the load-bearing piece for any
+  delta-since-last-visit framing a clinician would actually use.
+
+  A clinician seeing 7.8 alone treats the chart very differently than
+  one seeing "7.8, up from 6.8 three months ago". That delta is what
+  the rule corpus's ADA-1.0-point-threshold rule keys on (per
+  RULE_CORPUS.md), so this case also serves as fixture-mode regression
+  coverage for the lab-trend signal the rule consumer depends on.
+
+patient_id: 1
+user_id: 1
+fixture_data_required: true  # Asserts both A1c values — Maria fixture only.
+difficulty: intermediate
+tool_mix:
+  - get_recent_labs
+failure_mode: lab_trend_completeness
+tier: smoke
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    - "7.8"
+    - "6.8"
+  expect_tools_called:
+    - get_recent_labs

@@ -1,0 +1,79 @@
+{
+  "patient_id": 999104,
+  "synthetic": true,
+  "scenario": "pediatric_t1dm",
+  "demographics": {
+    "age": 9,
+    "sex": "M",
+    "name": "Test Patient 999104"
+  },
+  "problems": [
+    {
+      "table": "lists",
+      "record_id": "9104001",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Type 1 diabetes mellitus",
+        "diagnosis": "ICD-10:E10.9",
+        "date_added": "2024-08-12",
+        "type": "medical_problem"
+      }
+    }
+  ],
+  "active_medications": [
+    {
+      "table": "prescriptions",
+      "record_id": "9104101",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Insulin glargine",
+        "dosage": "8U",
+        "frequency": "QHS",
+        "start_date": "2024-08-15",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9104102",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Insulin lispro",
+        "dosage": "1U per 15g carb",
+        "frequency": "with meals",
+        "start_date": "2024-08-15",
+        "active": true
+      }
+    }
+  ],
+  "recent_labs": [
+    {
+      "table": "procedure_result",
+      "record_id": "9104201",
+      "citation_strength": "code_backed",
+      "fields": {
+        "loinc": "4548-4",
+        "name": "HbA1c",
+        "value": "7.5",
+        "units": "%",
+        "reference_range": "<7.5 (pediatric T1DM target)",
+        "abnormal_flag": null,
+        "date": "2026-04-10"
+      }
+    }
+  ],
+  "allergies": [],
+  "recent_encounters": [
+    {
+      "table": "form_encounter",
+      "record_id": "9104301",
+      "citation_strength": "free_text",
+      "fields": {
+        "date": "2026-04-10",
+        "reason": "Pediatric endocrinology follow-up",
+        "assessment_plan": "9-year-old M with T1DM on basal-bolus insulin regimen. A1c at pediatric target. Growth tracking on 50th percentile. School 504 plan in place; teacher trained on glucagon. Mother managing carb counting at home; child beginning to self-administer mealtime insulin under supervision. Will continue current regimen and reassess in 3 months."
+      }
+    }
+  ],
+  "notes": "Pediatric T1DM fixture: 9-year-old male with type 1 diabetes on basal-bolus insulin. The HbA1c reference range explicitly reflects the pediatric T1DM target (<7.5%) which differs from adult T2DM targets. School 504 plan, parent-mediated care, and growth tracking are pediatric-specific concerns that an adult-shaped brief would miss. Tests whether the agent acknowledges pediatric context. All identifiers deterministic-but-fake; no real PHI."
+}

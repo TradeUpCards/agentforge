@@ -1,0 +1,55 @@
+name: polypharmacy_anticoagulant_completeness
+category: happy_path
+description: |
+  Pre-visit brief against synthetic polypharmacy patient 999101 — 8
+  active medications spanning anticoagulation (warfarin), diabetes
+  (metformin, insulin glargine), cardiac (atorvastatin, metoprolol,
+  lisinopril), CHF (furosemide), and PRN pain (ibuprofen). 5 active
+  diagnoses including atrial fibrillation post-MI.
+
+  Asserts the agent surfaces the load-bearing medications: warfarin
+  (the highest-risk drug on the chart) and metformin (the diabetes
+  anchor), plus the atrial fibrillation diagnosis that motivates the
+  warfarin prescription. Distinct from case 09 (Synthea
+  polypharmacy_completeness) — this case operates against a
+  controlled synthetic fixture, exercising the JSON-fixture sentinel
+  range from SYNTHETIC_DATA_PLAN.md step 2.
+
+  NOT asserting drug-drug-interaction detection here. The fixture
+  embeds a warfarin + ibuprofen DDI deliberately (record 9101108) —
+  that's a step-5 adversarial-coverage case once the rule corpus
+  ships its anticoagulant-NSAID rule. This case proves baseline
+  completeness; the DDI case proves the rule fired.
+
+  Live-LLM-only: the canned fixture LLM response is Maria-shaped
+  (54F, no warfarin) and would fail any assertion against this
+  patient's chart.
+
+patient_id: 999101
+user_id: 1
+live_llm_required: true
+difficulty: advanced
+tool_mix:
+  - get_problem_list
+  - get_active_medications
+failure_mode: polypharmacy_anticoagulant_completeness
+tier: nightly
+synthetic: true
+source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-4-polypharmacy-fixture"
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    - "warfarin"
+    - "metformin"
+    - "atrial fibrillation"
+  must_not_mention:
+    - "I cannot"
+    - "as an AI"
+  expect_tools_called:
+    - get_problem_list
+    - get_active_medications

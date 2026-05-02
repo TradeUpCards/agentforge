@@ -31,6 +31,11 @@ user_id: 1
 # fails by design in fixture-LLM mode. Pytest skips this case automatically
 # when running with USE_FIXTURE_LLM=true.
 live_llm_required: true
+difficulty: intermediate
+failure_mode: absence_claim_honesty
+tier: nightly
+synthetic: true
+source_incident_id: "DECISIONS.md#2026-04-30-empty-records-ux"
 
 messages:
   - role: user

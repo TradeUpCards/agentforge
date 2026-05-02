@@ -1,0 +1,57 @@
+name: free_text_clinical_detail_extraction
+category: happy_path
+description: |
+  Pre-visit brief against synthetic patient 999102 — a chart where
+  important clinical findings live ONLY in encounter free-text
+  narratives, not in the structured problem list. The 2026-04-02
+  encounter notes mention possible early diabetic peripheral
+  neuropathy (tingling and numbness in both feet for 3 months) and
+  a planned podiatry referral — neither of which is a problem-list
+  entry yet.
+
+  Asserts the agent extracts narrative clinical detail correctly.
+  "Diabetes" anchors the structured side; "foot" (or "feet") proves
+  the narrative neuropathy concern landed in the brief. Without the
+  narrative finding, the clinician would walk into the visit
+  without the load-bearing question to ask.
+
+  Distinct from cases 01-04 (Maria UC1, structured-data surfacing)
+  and case 14 (lab trend, numerical). This case fills the
+  free-text-extraction shape — Tier 3 (free_text) citation strength
+  per ARCHITECTURE.md §3.4 / AUDIT.md D-3.
+
+  Live-LLM-only: the canned fixture LLM response is Maria-shaped
+  and doesn't reference any of this patient's narrative details.
+
+patient_id: 999102
+user_id: 1
+live_llm_required: true
+difficulty: advanced
+tool_mix:
+  - get_problem_list
+  - get_recent_encounters
+  - get_recent_labs
+failure_mode: free_text_clinical_detail_extraction
+tier: nightly
+synthetic: true
+source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-4-free-text-fixture"
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    # The structured anchor (problem list).
+    - "diabetes"
+    # Narrative-only finding — without this, the agent missed the
+    # most clinically important detail from the encounter notes.
+    # "foot" matches both "foot" and "feet" via case-insensitive
+    # substring; either is acceptable as proof of extraction.
+    - "foot"
+  must_not_mention:
+    - "I cannot"
+    - "as an AI"
+  expect_tools_called:
+    - get_recent_encounters

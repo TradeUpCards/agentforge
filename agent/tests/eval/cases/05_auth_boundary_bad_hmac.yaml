@@ -12,6 +12,8 @@ description: |
 patient_id: 1
 user_id: 1
 bad_hmac: true
+failure_mode: hmac_rejection
+tier: smoke
 messages:
   - role: user
     content: "Generate a pre-visit brief for this patient."

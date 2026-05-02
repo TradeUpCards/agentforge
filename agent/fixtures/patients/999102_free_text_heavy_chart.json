@@ -1,0 +1,100 @@
+{
+  "patient_id": 999102,
+  "synthetic": true,
+  "scenario": "free_text_heavy_chart",
+  "demographics": {
+    "age": 64,
+    "sex": "F",
+    "name": "Test Patient 999102"
+  },
+  "problems": [
+    {
+      "table": "lists",
+      "record_id": "9102001",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Type 2 diabetes mellitus",
+        "diagnosis": "ICD-10:E11.9",
+        "date_added": "2021-09-10",
+        "type": "medical_problem"
+      }
+    },
+    {
+      "table": "lists",
+      "record_id": "9102002",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Essential hypertension",
+        "diagnosis": "ICD-10:I10",
+        "date_added": "2019-05-22",
+        "type": "medical_problem"
+      }
+    }
+  ],
+  "active_medications": [
+    {
+      "table": "prescriptions",
+      "record_id": "9102101",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Metformin",
+        "dosage": "500mg",
+        "frequency": "BID",
+        "start_date": "2021-09-15",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9102102",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Amlodipine",
+        "dosage": "5mg",
+        "frequency": "QD",
+        "start_date": "2019-06-01",
+        "active": true
+      }
+    }
+  ],
+  "recent_labs": [
+    {
+      "table": "procedure_result",
+      "record_id": "9102201",
+      "citation_strength": "code_backed",
+      "fields": {
+        "loinc": "4548-4",
+        "name": "HbA1c",
+        "value": "6.9",
+        "units": "%",
+        "reference_range": "<5.7",
+        "abnormal_flag": "H",
+        "date": "2026-04-02"
+      }
+    }
+  ],
+  "allergies": [],
+  "recent_encounters": [
+    {
+      "table": "form_encounter",
+      "record_id": "9102301",
+      "citation_strength": "free_text",
+      "fields": {
+        "date": "2026-04-02",
+        "reason": "Diabetes follow-up",
+        "assessment_plan": "Patient reports occasional hypoglycemia in the early afternoon, particularly on days when she skips lunch. A1c improved to 6.9. Patient is also reporting tingling and numbness in both feet for the past 3 months — concerning for early diabetic peripheral neuropathy. Counseled re: meal regularity and blood-sugar monitoring with new continuous glucose monitor. Will refer to podiatry for foot exam and consider gabapentin if neuropathic symptoms persist. Patient also mentioned increased thirst at night."
+      }
+    },
+    {
+      "table": "form_encounter",
+      "record_id": "9102302",
+      "citation_strength": "free_text",
+      "fields": {
+        "date": "2025-12-08",
+        "reason": "Annual physical",
+        "assessment_plan": "Stable on current regimen. A1c 7.1. BP well-controlled on amlodipine. Discussed weight loss strategies — patient interested in trying intermittent fasting. Reminded re: importance of foot inspection given diabetes."
+      }
+    }
+  ],
+  "notes": "Free-text-heavy fixture: clinically important details (hypoglycemia episodes, possible peripheral neuropathy, increased nocturnal thirst, planned podiatry referral) live ONLY in encounter narratives, not in structured problem-list or medication entries. Tests whether the agent extracts narrative clinical detail with appropriate free_text citation strength. All identifiers deterministic-but-fake; no real PHI."
+}

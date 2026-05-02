@@ -1,0 +1,49 @@
+name: synthea_focused_diabetes_status
+category: happy_path
+description: |
+  Analytical question ("is this patient's diabetes well-controlled?")
+  against Synthea Guadalupe (patient_id 92). Requires the agent to
+  integrate problem-list (active T2DM) + active medications
+  (metformin) + recent labs (A1c history) into a synthesized answer
+  rather than a list-shaped brief.
+
+  Distinct from cases 09-11 (UC1 brief and focused medication query).
+  This case fills the analytical-synthesis shape against real-shape
+  Synthea data — exercising the LLM's ability to *weigh* multiple
+  data points rather than restate them. That's the qualitative skill
+  the cohort brief calls out as the difference between "summarizer"
+  and "co-pilot".
+
+  Live-LLM-only: the canned fixture LLM response is UC1-shaped
+  (about Maria), not analytical (about Synthea-92), so the case
+  fails by design in fixture-LLM mode. Pytest skips it automatically
+  when USE_FIXTURE_LLM=true.
+
+patient_id: 92
+user_id: 1
+live_llm_required: true
+live_db_required: true
+difficulty: advanced
+tool_mix:
+  - get_problem_list
+  - get_active_medications
+  - get_recent_labs
+failure_mode: analytical_synthesis_polypharmacy
+tier: nightly
+
+messages:
+  - role: user
+    content: "Is this patient's diabetes well-controlled?"
+
+expected:
+  status: ok
+  must_mention:
+    # The most prominent diabetes med on Guadalupe's chart. If the
+    # agent answered the question without naming the patient's actual
+    # diabetes therapy, the answer is generic, not patient-specific.
+    - "metformin"
+  must_not_mention:
+    - "I cannot"
+    - "as an AI"
+  expect_tools_called:
+    - get_active_medications

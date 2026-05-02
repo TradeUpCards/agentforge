@@ -1,0 +1,260 @@
+{
+  "patient_id": 999101,
+  "synthetic": true,
+  "scenario": "polypharmacy_with_hidden_ddi",
+  "demographics": {
+    "age": 72,
+    "sex": "M",
+    "name": "Test Patient 999101"
+  },
+  "problems": [
+    {
+      "table": "lists",
+      "record_id": "9101001",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Atrial fibrillation",
+        "diagnosis": "ICD-10:I48.91",
+        "date_added": "2023-06-04",
+        "type": "medical_problem"
+      }
+    },
+    {
+      "table": "lists",
+      "record_id": "9101002",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Type 2 diabetes mellitus",
+        "diagnosis": "ICD-10:E11.9",
+        "date_added": "2020-04-12",
+        "type": "medical_problem"
+      }
+    },
+    {
+      "table": "lists",
+      "record_id": "9101003",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Coronary artery disease, post-MI",
+        "diagnosis": "ICD-10:I25.2",
+        "date_added": "2022-11-18",
+        "type": "medical_problem"
+      }
+    },
+    {
+      "table": "lists",
+      "record_id": "9101004",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Essential hypertension",
+        "diagnosis": "ICD-10:I10",
+        "date_added": "2018-02-22",
+        "type": "medical_problem"
+      }
+    },
+    {
+      "table": "lists",
+      "record_id": "9101005",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Hyperlipidemia",
+        "diagnosis": "ICD-10:E78.5",
+        "date_added": "2018-02-22",
+        "type": "medical_problem"
+      }
+    }
+  ],
+  "active_medications": [
+    {
+      "table": "prescriptions",
+      "record_id": "9101101",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Warfarin",
+        "dosage": "5mg",
+        "frequency": "QD",
+        "start_date": "2023-06-10",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9101102",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Lisinopril",
+        "dosage": "20mg",
+        "frequency": "QD",
+        "start_date": "2018-03-04",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9101103",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Atorvastatin",
+        "dosage": "40mg",
+        "frequency": "QHS",
+        "start_date": "2022-11-25",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9101104",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Metformin",
+        "dosage": "1000mg",
+        "frequency": "BID",
+        "start_date": "2020-04-20",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9101105",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Insulin glargine",
+        "dosage": "20U",
+        "frequency": "QHS",
+        "start_date": "2024-01-15",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9101106",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Metoprolol succinate",
+        "dosage": "50mg",
+        "frequency": "QD",
+        "start_date": "2022-11-25",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9101107",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Furosemide",
+        "dosage": "20mg",
+        "frequency": "QD",
+        "start_date": "2023-08-15",
+        "active": true
+      }
+    },
+    {
+      "table": "prescriptions",
+      "record_id": "9101108",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Ibuprofen",
+        "dosage": "400mg",
+        "frequency": "PRN",
+        "start_date": "2026-04-01",
+        "active": true
+      }
+    }
+  ],
+  "recent_labs": [
+    {
+      "table": "procedure_result",
+      "record_id": "9101201",
+      "citation_strength": "code_backed",
+      "fields": {
+        "loinc": "6301-6",
+        "name": "INR",
+        "value": "2.5",
+        "units": "ratio",
+        "reference_range": "2.0-3.0",
+        "abnormal_flag": null,
+        "date": "2026-04-15"
+      }
+    },
+    {
+      "table": "procedure_result",
+      "record_id": "9101202",
+      "citation_strength": "code_backed",
+      "fields": {
+        "loinc": "4548-4",
+        "name": "HbA1c",
+        "value": "7.2",
+        "units": "%",
+        "reference_range": "<5.7",
+        "abnormal_flag": "H",
+        "date": "2026-03-20"
+      }
+    },
+    {
+      "table": "procedure_result",
+      "record_id": "9101203",
+      "citation_strength": "code_backed",
+      "fields": {
+        "loinc": "13457-7",
+        "name": "LDL",
+        "value": "95",
+        "units": "mg/dL",
+        "reference_range": "<100",
+        "abnormal_flag": null,
+        "date": "2026-03-20"
+      }
+    },
+    {
+      "table": "procedure_result",
+      "record_id": "9101204",
+      "citation_strength": "code_backed",
+      "fields": {
+        "loinc": "2160-0",
+        "name": "Creatinine",
+        "value": "1.1",
+        "units": "mg/dL",
+        "reference_range": "0.7-1.3",
+        "abnormal_flag": null,
+        "date": "2026-04-15"
+      }
+    }
+  ],
+  "allergies": [
+    {
+      "table": "lists",
+      "record_id": "9101301",
+      "citation_strength": "structured",
+      "fields": {
+        "title": "Sulfa drugs",
+        "type": "allergy",
+        "severity": "moderate",
+        "reaction": "rash",
+        "date_added": "2015-08-10"
+      }
+    }
+  ],
+  "recent_encounters": [
+    {
+      "table": "form_encounter",
+      "record_id": "9101401",
+      "citation_strength": "structured",
+      "fields": {
+        "date": "2026-04-15",
+        "reason": "Warfarin INR check",
+        "assessment_plan": "INR in therapeutic range. Continue warfarin 5mg daily. Cautioned re: NSAIDs and bleeding risk."
+      }
+    },
+    {
+      "table": "form_encounter",
+      "record_id": "9101402",
+      "citation_strength": "structured",
+      "fields": {
+        "date": "2026-02-10",
+        "reason": "Cardiology follow-up",
+        "assessment_plan": "Stable post-MI on guideline-directed therapy. Continue atorvastatin, metoprolol, lisinopril. AFib rate-controlled."
+      }
+    }
+  ],
+  "notes": "Polypharmacy fixture with embedded DDI. Warfarin (record 9101101) + ibuprofen (record 9101108) is a classic bleeding-risk drug-drug interaction. The 2026-04-15 encounter (record 9101401) explicitly cautioned the patient about NSAIDs but ibuprofen is now on the active med list — the contradiction is intentional and exercises the rule corpus's anticoagulant-NSAID rule once that ships (currently deferred per RULE_CORPUS.md). All identifiers are deterministic-but-fake; no real PHI."
+}

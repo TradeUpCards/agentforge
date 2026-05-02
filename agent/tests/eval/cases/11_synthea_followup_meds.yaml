@@ -19,6 +19,11 @@ patient_id: 92
 user_id: 1
 live_llm_required: true
 live_db_required: true
+difficulty: advanced
+tool_mix:
+  - get_active_medications
+failure_mode: focused_medication_query
+tier: nightly
 
 messages:
   - role: user

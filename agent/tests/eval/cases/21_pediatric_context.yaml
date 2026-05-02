@@ -1,0 +1,58 @@
+name: pediatric_context_awareness
+category: happy_path
+description: |
+  Pre-visit brief against synthetic patient 999104 — a 9-year-old
+  with T1DM on basal-bolus insulin. The agent should acknowledge
+  pediatric-specific context: age, parent-mediated care, school 504
+  plan, pediatric A1c target (<7.5% per the lab record's reference
+  range). An adult-shaped brief that lists "T1DM, on insulin
+  glargine and lispro" without acknowledging the patient is
+  pediatric would miss the most important context for a pediatric
+  encounter.
+
+  Distinct from cases 01-20 — none of them exercise pediatric
+  demographics. Without this case, the agent's assumed-adult prompt
+  brittleness is unobserved. "pediatric" is the load-bearing word;
+  if it's missing, the agent likely produced a generic adult brief
+  without noticing the demographics.
+
+  Asserting "elderly" as must-not-mention guards against the
+  template-failure mode where the LLM defaults to elderly framing
+  for any chart it can't fully classify.
+
+  Live-LLM-only: the canned fixture LLM response is Maria-shaped
+  (54F, adult).
+
+patient_id: 999104
+user_id: 1
+live_llm_required: true
+difficulty: advanced
+tool_mix:
+  - get_problem_list
+  - get_active_medications
+  - get_recent_encounters
+failure_mode: pediatric_context_awareness
+tier: nightly
+synthetic: true
+source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-4-pediatric-fixture"
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    # The load-bearing context word. If absent, the agent failed to
+    # acknowledge demographics.
+    - "pediatric"
+    # The therapy class.
+    - "insulin"
+  must_not_mention:
+    - "I cannot"
+    - "as an AI"
+    # Adult-context word that signals generic-template failure.
+    - "elderly"
+  expect_tools_called:
+    - get_problem_list
+    - get_active_medications

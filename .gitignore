@@ -1,6 +1,9 @@
 # logs
 /logs
 
+# local cache
+.cache/
+
 # environment vars
 .env
 

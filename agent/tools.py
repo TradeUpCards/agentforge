@@ -24,13 +24,16 @@ flips it false. SQL conventions cribbed from OpenEMR's own service classes
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import pymysql
 import pymysql.cursors
 from langfuse import get_client, observe
 
+from ._validators import validate_no_real_pii
 from .config import get_settings
 from .schemas import CitationStrength, RetrievedRecord
 
@@ -137,8 +140,9 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> list[Retri
         metadata={"data_mode": "fixture" if settings.use_fixture_data else "live"},
     )
     # Sentinel patient_ids fire independently of data mode so eval
-    # cases targeting them (06_empty_records, 08_prompt_injection)
-    # work whether the rest of the system is on fixture or live data.
+    # cases targeting them (06_empty_records, 08_prompt_injection,
+    # 12_sparse_data and any future JSON-backed fixtures) work whether
+    # the rest of the system is on fixture or live data.
     pid = int(tool_input.get("patient_id", 0))
     if pid == _EMPTY_PATIENT_SENTINEL:
         records = []
@@ -148,6 +152,8 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> list[Retri
             if tool_name == "get_problem_list"
             else []
         )
+    elif _JSON_FIXTURE_RANGE_LOW <= pid <= _JSON_FIXTURE_RANGE_HIGH:
+        records = _json_fixture_dispatch(pid, tool_name)
     elif settings.use_fixture_data:
         records = _fixture_dispatch(tool_name, tool_input)
     else:
@@ -171,6 +177,64 @@ _PROMPT_INJECTION_SENTINEL = 999998
 prompt-injection payload. Used by eval cases to verify the agent's
 defenses (system-prompt wrapping + LLM training) hold against malicious
 chart text. See agent/tests/eval/cases/08_*.yaml."""
+
+
+_JSON_FIXTURE_RANGE_LOW = 999100
+_JSON_FIXTURE_RANGE_HIGH = 999899
+"""Sentinel range reserved for JSON-loaded synthetic patient fixtures
+under `agent/fixtures/patients/`. Per SYNTHETIC_DATA_PLAN.md (approved
+2026-05-02), each ID in this range maps to a `<id>_<slug>.json` file
+exercising a specific failure mode. The hardcoded sentinels (999998,
+999999) live above this range and are kept for clarity. Patients in this
+range fire independently of `USE_FIXTURE_DATA` so eval cases against them
+run reliably in either mode."""
+
+
+_PATIENT_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "patients"
+
+
+def _json_fixture_dispatch(patient_id: int, tool_name: str) -> list[RetrievedRecord]:
+    """Load a JSON-backed synthetic patient fixture and return the records
+    a given tool would have produced. Raises ValueError on missing files
+    or PII pattern matches — better to fail loudly during dev than to
+    surface a silently-degraded eval result."""
+    fixture = _load_patient_fixture(patient_id)
+    tool_to_key = {
+        "get_problem_list": "problems",
+        "get_active_medications": "active_medications",
+        "get_recent_labs": "recent_labs",
+        "get_allergies": "allergies",
+        "get_recent_encounters": "recent_encounters",
+    }
+    key = tool_to_key.get(tool_name)
+    if key is None:
+        raise ValueError(f"Unknown tool: {tool_name}")
+    raw_records = fixture.get(key, []) or []
+    return [RetrievedRecord(**rec) for rec in raw_records]
+
+
+def _load_patient_fixture(patient_id: int) -> dict[str, Any]:
+    """Find and parse the JSON fixture for the given sentinel patient_id.
+
+    Files follow the convention `<id>_<slug>.json`. PII validator runs at
+    load time so a fixture with a real-looking SSN/phone/email never
+    silently feeds the agent.
+    """
+    matches = list(_PATIENT_FIXTURES_DIR.glob(f"{patient_id}_*.json"))
+    if not matches:
+        raise ValueError(
+            f"No patient fixture found for sentinel patient_id={patient_id}. "
+            f"Expected `{_PATIENT_FIXTURES_DIR}/{patient_id}_*.json`."
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple patient fixtures found for patient_id={patient_id}: "
+            f"{[m.name for m in matches]!r}. Keep one canonical file per ID."
+        )
+    path = matches[0]
+    fixture = json.loads(path.read_text(encoding="utf-8"))
+    validate_no_real_pii(fixture, f"patients/{path.name}")
+    return fixture
 
 
 def _fixture_dispatch(tool_name: str, tool_input: dict[str, Any]) -> list[RetrievedRecord]:

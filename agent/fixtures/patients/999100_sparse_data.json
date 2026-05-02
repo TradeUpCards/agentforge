@@ -1,0 +1,28 @@
+{
+  "patient_id": 999100,
+  "synthetic": true,
+  "scenario": "sparse_data_minimal_records",
+  "demographics": {
+    "age": 56,
+    "sex": "M",
+    "name": "Test Patient 999100"
+  },
+  "problems": [
+    {
+      "table": "lists",
+      "record_id": "9100",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Essential hypertension",
+        "diagnosis": "ICD-10:I10",
+        "date_added": "2024-09-12",
+        "type": "medical_problem"
+      }
+    }
+  ],
+  "active_medications": [],
+  "recent_labs": [],
+  "allergies": [],
+  "recent_encounters": [],
+  "notes": "Sparse-data sentinel for SYNTHETIC_DATA_PLAN.md step 2. Tests honest absence claims when a patient has one chronic problem on file and nothing else — no meds, no labs, no allergies, no encounters. Forces the agent and verifier to surface a single problem with citation and emit absence claims for the rest, instead of fabricating typical pre-visit-brief content. Used by agent/tests/eval/cases/12_sparse_data_absence_claim.yaml. All identifiers are deterministic-but-fake; no real PHI."
+}

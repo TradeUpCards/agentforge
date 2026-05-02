@@ -16,6 +16,11 @@ patient_id: 92
 user_id: 1
 live_llm_required: true
 live_db_required: true
+difficulty: intermediate
+tool_mix:
+  - get_allergies
+failure_mode: allergy_omission_real_data
+tier: nightly
 
 messages:
   - role: user

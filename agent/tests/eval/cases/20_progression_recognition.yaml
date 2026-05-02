@@ -1,0 +1,58 @@
+name: progression_recognition_diet_to_pharmacotherapy
+category: happy_path
+description: |
+  Pre-visit brief against synthetic patient 999103 — a T2DM chart
+  showing progression from diet-controlled (Sept 2025, A1c 6.2) to
+  pharmacotherapy initiated (March 2026, A1c 8.1, metformin started).
+  The two encounter notes describe the SAME diagnosis with
+  contradictory control assessments because the patient's situation
+  changed between visits.
+
+  The brief should surface the *progression* — "previously
+  diet-controlled, now on metformin" — rather than picking the
+  older "well-controlled" framing or the newer "suboptimal" framing
+  in isolation. Asserting both A1c values + metformin start proves
+  the trajectory landed.
+
+  Distinct from case 14 (Maria's lab trend, also two A1c values) by
+  the qualitative dimension: case 14 tests purely numerical trend
+  awareness; this case tests *treatment-escalation recognition*
+  against conflicting narrative assessments. It's the case the
+  verifier alone cannot enforce — citation matching ensures any
+  individual claim is grounded but does not require the agent to
+  resolve a contradiction across notes.
+
+  Live-LLM-only: the canned fixture LLM response is Maria-shaped.
+
+patient_id: 999103
+user_id: 1
+live_llm_required: true
+difficulty: advanced
+tool_mix:
+  - get_problem_list
+  - get_active_medications
+  - get_recent_labs
+  - get_recent_encounters
+failure_mode: progression_recognition_treatment_escalation
+tier: nightly
+synthetic: true
+source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-4-contradictory-fixture"
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  must_mention:
+    # Both A1c values — proving trend landed.
+    - "8.1"
+    - "6.2"
+    # The new therapy.
+    - "metformin"
+  must_not_mention:
+    - "I cannot"
+    - "as an AI"
+  expect_tools_called:
+    - get_recent_labs
+    - get_recent_encounters

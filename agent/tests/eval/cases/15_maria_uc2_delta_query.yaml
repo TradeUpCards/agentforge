@@ -1,0 +1,36 @@
+name: maria_uc2_delta_query
+category: happy_path
+description: |
+  UC2-shaped query ("what's changed for this patient since their last
+  visit?") against Maria. Distinct from cases 01-04 (UC1: canned
+  starter prompt). UC2 is the delta-detection use case — different
+  prompt shape, same agent loop. This case is the only Maria-fixture
+  coverage of UC2 currently; without it, UC2 against fixture data is
+  exercised nowhere.
+
+  The agent should anchor on the most recent encounter (2026-01-22
+  diabetes follow-up) and surface the change most relevant to that
+  anchor (the new A1c). "Last visit" + "A1c" together prove the
+  temporal anchoring landed.
+
+patient_id: 1
+user_id: 1
+fixture_data_required: true
+difficulty: intermediate
+tool_mix:
+  - get_recent_encounters
+  - get_recent_labs
+failure_mode: uc2_delta_grounding
+tier: full
+
+messages:
+  - role: user
+    content: "What's changed for this patient since their last visit?"
+
+expected:
+  status: ok
+  must_mention:
+    - "last visit"
+    - "A1c"
+  expect_tools_called:
+    - get_recent_encounters

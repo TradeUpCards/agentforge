@@ -31,6 +31,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -38,8 +39,13 @@ from typing import Any
 import yaml
 from fastapi.testclient import TestClient
 
+from agent._validators import validate_no_real_pii
 from agent.config import get_settings
 from agent.main import app
+
+# Re-export under the legacy private name so any in-process callers that
+# imported it as `runner._validate_no_real_pii` still resolve.
+_validate_no_real_pii = validate_no_real_pii
 
 
 _CASES_DIR = Path(__file__).parent / "cases"
@@ -82,6 +88,30 @@ class EvalCase:
     specific record content (e.g., asserts must_mention 'metformin').
     Skipped when USE_FIXTURE_DATA is false because patient_id=1 in the
     live DB likely has different data."""
+    difficulty: str = "basic"
+    """One of: smoke, basic, intermediate, advanced. Drives reporting and
+    sub-suite selection. Default 'basic' preserves existing case semantics
+    for the 11 backfilled cases."""
+    tool_mix: list[str] = field(default_factory=list)
+    """Declarative list of tools this case is expected to exercise. Used by
+    the coverage report to flag tool-coverage holes. Cross-checked against
+    expect_tools_called when both are non-empty."""
+    failure_mode: str = ""
+    """Open-vocabulary granular failure-mode tag, finer-grained than
+    category. The runner reports unique values to surface typos. Empty
+    string means 'unspecified'; new cases should set it."""
+    source_incident_id: str | None = None
+    """Free-text reference to a source ticket / trace / decision-doc that
+    motivated this case (the trace-to-fixture provenance link the
+    observability review flagged as missing). Optional."""
+    tier: str = "full"
+    """One of: smoke, full, nightly. Drives runner subsetting. Smoke is a
+    fast pre-commit subset; full is the CI default; nightly includes
+    live-LLM/live-DB cases."""
+    synthetic: bool = False
+    """True when the case references a synthetic patient fixture (sentinel
+    range 999000-999999). Used by the no-real-PHI validator to know which
+    fixtures to scan."""
 
     @classmethod
     def load_all(cls) -> list[EvalCase]:
@@ -90,6 +120,7 @@ class EvalCase:
         cases: list[EvalCase] = []
         for path in sorted(_CASES_DIR.glob("*.yaml")):
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            _validate_case_schema(path, data)
             cases.append(
                 cls(
                     name=data["name"],
@@ -104,9 +135,114 @@ class EvalCase:
                     live_llm_required=bool(data.get("live_llm_required", False)),
                     live_db_required=bool(data.get("live_db_required", False)),
                     fixture_data_required=bool(data.get("fixture_data_required", False)),
+                    difficulty=str(data.get("difficulty", "basic")),
+                    tool_mix=list(data.get("tool_mix", []) or []),
+                    failure_mode=str(data.get("failure_mode", "")),
+                    source_incident_id=data.get("source_incident_id"),
+                    tier=str(data.get("tier", "full")),
+                    synthetic=bool(data.get("synthetic", False)),
                 )
             )
         return cases
+
+
+# ---------------------------------------------------------------------------
+# Validators
+# ---------------------------------------------------------------------------
+#
+# Schema and PII checks per SYNTHETIC_DATA_PLAN.md (approved 2026-05-02).
+# _validate_case_schema runs at every load_all() — strict checking catches
+# typos in field names, illegal enum values, and DSL inconsistencies before
+# they silently degrade coverage.
+#
+# _validate_no_real_pii is for synthetic patient fixtures (the JSON files
+# that will land under agent/fixtures/patients/ in plan step 2). It's a
+# conservative regex/blocklist pass; hand-review remains the primary
+# control for accidental real-name collisions.
+
+_KNOWN_CASE_KEYS: set[str] = {
+    # required
+    "name",
+    "messages",
+    # core optional
+    "description",
+    "patient_id",
+    "user_id",
+    "expected",
+    # boundary flags
+    "bad_hmac",
+    "expected_to_fail",
+    "live_llm_required",
+    "live_db_required",
+    "fixture_data_required",
+    # taxonomy (existing + extended)
+    "category",
+    "difficulty",
+    "tool_mix",
+    "failure_mode",
+    "source_incident_id",
+    "tier",
+    "synthetic",
+}
+
+_KNOWN_DIFFICULTIES: set[str] = {"smoke", "basic", "intermediate", "advanced"}
+_KNOWN_TIERS: set[str] = {"smoke", "full", "nightly"}
+
+_DSL_CHECKS: set[str] = {
+    "min_claims",
+    "max_claims",
+    "min_citations",
+    "must_mention",
+    "must_not_mention",
+    "expect_refusal_reason_contains",
+    "expect_tools_called",
+}
+
+
+def _validate_case_schema(path: Path, data: dict[str, Any]) -> None:
+    """Strict schema check at case-load time.
+
+    Enforces SYNTHETIC_DATA_PLAN.md validation rules 1, 2, and 5:
+    - unknown top-level keys are rejected (catches typos)
+    - difficulty and tier must be in their closed enums
+    - tool_mix must be a superset of expect_tools_called when both non-empty
+    - expected{} must include at least one deterministic check beyond status
+    """
+    extra = set(data.keys()) - _KNOWN_CASE_KEYS
+    if extra:
+        raise ValueError(
+            f"{path.name}: unknown top-level keys {sorted(extra)!r}. "
+            f"Known keys: {sorted(_KNOWN_CASE_KEYS)!r}"
+        )
+
+    diff = data.get("difficulty", "basic")
+    if diff not in _KNOWN_DIFFICULTIES:
+        raise ValueError(
+            f"{path.name}: difficulty {diff!r} not in {sorted(_KNOWN_DIFFICULTIES)!r}"
+        )
+
+    tier = data.get("tier", "full")
+    if tier not in _KNOWN_TIERS:
+        raise ValueError(
+            f"{path.name}: tier {tier!r} not in {sorted(_KNOWN_TIERS)!r}"
+        )
+
+    expected = data.get("expected", {}) or {}
+    has_deterministic = any(k in expected for k in _DSL_CHECKS)
+    if not has_deterministic:
+        raise ValueError(
+            f"{path.name}: expected{{}} must include at least one of "
+            f"{sorted(_DSL_CHECKS)!r}; status alone is not sufficient."
+        )
+
+    declared_mix = set(data.get("tool_mix", []) or [])
+    asserted_tools = set(expected.get("expect_tools_called", []) or [])
+    if declared_mix and asserted_tools and not asserted_tools <= declared_mix:
+        missing = asserted_tools - declared_mix
+        raise ValueError(
+            f"{path.name}: expect_tools_called {sorted(missing)!r} not "
+            f"declared in tool_mix {sorted(declared_mix)!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +350,29 @@ def _evaluate(case: EvalCase, status_code: int, response: dict[str, Any]) -> Cas
 # ---------------------------------------------------------------------------
 
 
-def run_case(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
+def _looks_transient(result: CaseResult) -> bool:
+    """Detect the LLM-side-blip signature: status=refused with zero
+    successful tool calls.
+
+    The agent's correct response to an LLM call failure (timeout, rate
+    limit, transient network) is to refuse cleanly without firing
+    tools. That is genuinely the right behavior — but for nightly eval
+    purposes the same shape looks identical to a hard architectural
+    failure. We only treat this signature as flaky when the case's tier
+    actually involves a live LLM (nightly); fixture-mode runs that
+    refuse with no tool calls are real failures.
+
+    Surfaced by case 09 (synthea_polypharmacy_brief) on 2026-05-02 — see
+    SYNTHETIC_DATA_PLAN.md close-out and `.gauntlet/week1/reviews/`.
+    """
+    resp = result.response
+    if resp.get("status") != "refused":
+        return False
+    tools = resp.get("tools_called") or []
+    return not any(t.get("success") for t in tools)
+
+
+def _run_case_once(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
     sig = "deadbeef" * 8 if case.bad_hmac else _sign(case, secret)
     body = {
         "user_id": case.user_id,
@@ -230,19 +388,46 @@ def run_case(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
     return _evaluate(case, r.status_code, payload)
 
 
-def run_all() -> list[CaseResult]:
+def run_case(
+    client: TestClient,
+    case: EvalCase,
+    secret: str,
+    max_retries: int = 0,
+) -> CaseResult:
+    """Run a single eval case, optionally retrying on the transient-LLM
+    signature. `max_retries` is the number of *additional* attempts after
+    the first run — `max_retries=1` means up to two total runs."""
+    result = _run_case_once(client, case, secret)
+    for attempt in range(max_retries):
+        if not _looks_transient(result):
+            return result
+        time.sleep(2)
+        result = _run_case_once(client, case, secret)
+    return result
+
+
+def run_all(tier: str | None = None) -> list[CaseResult]:
+    """Run the eval suite, optionally filtered by tier.
+
+    `tier` of None runs every case. A tier value (`smoke`, `full`, or
+    `nightly`) filters to cases whose `tier` field matches — useful for
+    pre-commit (smoke), CI (smoke+full via two passes), and nightly
+    (full + nightly via two passes) workflows.
+    """
     settings = get_settings()
     client = TestClient(app)
     cases = EvalCase.load_all()
     results: list[CaseResult] = []
     for case in cases:
+        skip_reason: str | None = None
+        if tier is not None and case.tier != tier:
+            skip_reason = f"tier={case.tier!r} does not match --tier {tier!r}"
         # Skip cases that require a live LLM in fixture-LLM mode, or
         # require live DB data in fixture-data mode. Mirrors the pytest
         # conftest skip logic — without this, Synthea-targeted cases
         # would fail in CI because patient_id 92 returns the Maria
         # fixture (or empty), not Guadalupe's actual chart.
-        skip_reason: str | None = None
-        if case.live_llm_required and settings.use_fixture_llm:
+        elif case.live_llm_required and settings.use_fixture_llm:
             skip_reason = "requires live LLM (USE_FIXTURE_LLM=true)"
         elif case.live_db_required and settings.use_fixture_data:
             skip_reason = "requires live DB data (USE_FIXTURE_DATA=true)"
@@ -257,7 +442,12 @@ def run_all() -> list[CaseResult]:
                 skip_reason=skip_reason,
             ))
             continue
-        results.append(run_case(client, case, settings.openemr_hmac_secret))
+        # Nightly cases hit a live LLM and can flake with the
+        # transient signature (see _looks_transient). One retry on
+        # that specific shape; smoke and full are deterministic
+        # fixture-mode and get no retries.
+        retries = 1 if case.tier == "nightly" else 0
+        results.append(run_case(client, case, settings.openemr_hmac_secret, max_retries=retries))
     return results
 
 
@@ -328,6 +518,76 @@ def write_report(results: list[CaseResult], path: Path | None = None) -> Path:
             )
         lines.append("")
 
+    # Per-tier slice — drives the smoke/full/nightly subsetting that
+    # SYNTHETIC_DATA_PLAN.md step 6 will use for the pre-commit hook.
+    by_tier: dict[str, list[CaseResult]] = {}
+    for r in results:
+        by_tier.setdefault(r.case.tier, []).append(r)
+    if by_tier:
+        lines.append("## Pass rate by tier")
+        lines.append("")
+        lines.append("| Tier | Cases | Passed | Real failures | Skipped |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for tier in ("smoke", "full", "nightly"):
+            if tier not in by_tier:
+                continue
+            tier_results = by_tier[tier]
+            tier_skipped = sum(1 for r in tier_results if r.skipped)
+            tier_passed = sum(
+                1 for r in tier_results
+                if not r.skipped and (r.passed or r.case.expected_to_fail)
+            )
+            tier_failed = sum(
+                1 for r in tier_results
+                if not r.skipped and not r.passed and not r.case.expected_to_fail
+            )
+            lines.append(
+                f"| `{tier}` | {len(tier_results)} | {tier_passed} | {tier_failed} | {tier_skipped} |"
+            )
+        lines.append("")
+
+    # Per-difficulty slice — sanity-checks that the suite isn't just smoke
+    # cases passing while the hard ones fail.
+    by_difficulty: dict[str, list[CaseResult]] = {}
+    for r in results:
+        by_difficulty.setdefault(r.case.difficulty, []).append(r)
+    if by_difficulty:
+        lines.append("## Pass rate by difficulty")
+        lines.append("")
+        lines.append("| Difficulty | Cases | Passed | Real failures | Skipped |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for diff in ("smoke", "basic", "intermediate", "advanced"):
+            if diff not in by_difficulty:
+                continue
+            diff_results = by_difficulty[diff]
+            diff_skipped = sum(1 for r in diff_results if r.skipped)
+            diff_passed = sum(
+                1 for r in diff_results
+                if not r.skipped and (r.passed or r.case.expected_to_fail)
+            )
+            diff_failed = sum(
+                1 for r in diff_results
+                if not r.skipped and not r.passed and not r.case.expected_to_fail
+            )
+            lines.append(
+                f"| `{diff}` | {len(diff_results)} | {diff_passed} | {diff_failed} | {diff_skipped} |"
+            )
+        lines.append("")
+
+    # Failure-mode distribution — surfaces typos and shows coverage spread.
+    failure_modes: dict[str, int] = {}
+    for r in results:
+        fm = r.case.failure_mode or "(unspecified)"
+        failure_modes[fm] = failure_modes.get(fm, 0) + 1
+    if failure_modes:
+        lines.append("## Failure-mode distribution")
+        lines.append("")
+        lines.append("| Failure mode | Cases |")
+        lines.append("|---|---:|")
+        for fm in sorted(failure_modes):
+            lines.append(f"| `{fm}` | {failure_modes[fm]} |")
+        lines.append("")
+
     # Per-case detail, grouped by category so the report reads as
     # "happy path: ✓✓✓✓; auth: ✓; refusal: ✓; edge case: ✓; ambiguous:
     # ✓; prompt_injection: ✓".
@@ -372,7 +632,17 @@ def write_report(results: list[CaseResult], path: Path | None = None) -> Path:
 
 
 def main() -> None:
-    results = run_all()
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--tier",
+        choices=("smoke", "full", "nightly"),
+        default=None,
+        help="Run only cases at this tier. Default: all tiers.",
+    )
+    args = parser.parse_args()
+
+    results = run_all(tier=args.tier)
     path = write_report(results)
     skipped = [r for r in results if r.skipped]
     real_failures = [
@@ -380,10 +650,12 @@ def main() -> None:
         if not r.skipped and not r.passed and not r.case.expected_to_fail
     ]
     print(f"Wrote eval report: {path}")
+    if args.tier:
+        print(f"Filtered to tier={args.tier!r} — {len(results) - len(skipped)} case(s) ran.")
     if skipped:
-        print(f"\n{len(skipped)} case(s) skipped (live-LLM-only):")
+        print(f"\n{len(skipped)} case(s) skipped:")
         for r in skipped:
-            print(f"  - {r.case.name}")
+            print(f"  - {r.case.name} ({r.skip_reason})")
     if real_failures:
         print(f"\n{len(real_failures)} real failure(s):")
         for r in real_failures:

@@ -1,0 +1,91 @@
+{
+  "patient_id": 999103,
+  "synthetic": true,
+  "scenario": "contradictory_progression_notes",
+  "demographics": {
+    "age": 52,
+    "sex": "F",
+    "name": "Test Patient 999103"
+  },
+  "problems": [
+    {
+      "table": "lists",
+      "record_id": "9103001",
+      "citation_strength": "code_backed",
+      "fields": {
+        "title": "Type 2 diabetes mellitus",
+        "diagnosis": "ICD-10:E11.9",
+        "date_added": "2025-04-12",
+        "type": "medical_problem"
+      }
+    }
+  ],
+  "active_medications": [
+    {
+      "table": "prescriptions",
+      "record_id": "9103101",
+      "citation_strength": "code_backed",
+      "fields": {
+        "drug": "Metformin",
+        "dosage": "500mg",
+        "frequency": "BID",
+        "start_date": "2026-03-15",
+        "active": true
+      }
+    }
+  ],
+  "recent_labs": [
+    {
+      "table": "procedure_result",
+      "record_id": "9103201",
+      "citation_strength": "code_backed",
+      "fields": {
+        "loinc": "4548-4",
+        "name": "HbA1c",
+        "value": "8.1",
+        "units": "%",
+        "reference_range": "<5.7",
+        "abnormal_flag": "H",
+        "date": "2026-03-15"
+      }
+    },
+    {
+      "table": "procedure_result",
+      "record_id": "9103202",
+      "citation_strength": "code_backed",
+      "fields": {
+        "loinc": "4548-4",
+        "name": "HbA1c",
+        "value": "6.2",
+        "units": "%",
+        "reference_range": "<5.7",
+        "abnormal_flag": "H",
+        "date": "2025-09-20"
+      }
+    }
+  ],
+  "allergies": [],
+  "recent_encounters": [
+    {
+      "table": "form_encounter",
+      "record_id": "9103301",
+      "citation_strength": "free_text",
+      "fields": {
+        "date": "2026-03-15",
+        "reason": "Diabetes follow-up",
+        "assessment_plan": "T2DM with suboptimal control. A1c has worsened from 6.2 in September to 8.1 today. Patient reports decreased adherence to dietary restrictions over the holidays. Initiating metformin 500mg BID. Will repeat A1c in 3 months."
+      }
+    },
+    {
+      "table": "form_encounter",
+      "record_id": "9103302",
+      "citation_strength": "free_text",
+      "fields": {
+        "date": "2025-09-20",
+        "reason": "Diabetes follow-up",
+        "assessment_plan": "T2DM, currently diet-controlled. A1c 6.2 — well-controlled without pharmacotherapy. Continue lifestyle measures. Repeat A1c in 6 months."
+      }
+    }
+  ],
+  "notes": "Contradictory-notes fixture: 2025-09-20 encounter (record 9103302) describes diabetes as 'diet-controlled' and 'well-controlled without pharmacotherapy'. 2026-03-15 encounter (record 9103301) describes the same diabetes as 'suboptimal control' and initiates metformin. The contradiction is in the *control state*, not the diagnosis. Tests whether the agent surfaces progression (was diet-controlled, now on metformin) rather than picking one assessment silently. All identifiers deterministic-but-fake; no real PHI."
+}

@@ -8,6 +8,10 @@ description: |
 patient_id: 1
 user_id: 1
 fixture_data_required: true  # Asserts penicillin — Maria fixture only.
+tool_mix:
+  - get_allergies
+failure_mode: allergy_omission
+tier: smoke
 messages:
   - role: user
     content: "Generate a pre-visit brief for this patient."
