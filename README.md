@@ -64,6 +64,7 @@ The week-1 brief lists 8 required deliverables. Each maps to a file in this repo
 | [`DECISIONS.md`](./DECISIONS.md) | Architectural decisions log — every load-bearing choice with the *why*, the *tradeoff*, and an inline `> Updated <date>` callout when newer information changes the answer. |
 | [`PERFORMANCE.md`](./PERFORMANCE.md) | EXPLAIN analysis on the 5 tool queries; one load-bearing fix shipped (full-scan on `forms` table → 4-row indexed lookup). |
 | [`SLO.md`](./SLO.md) | Service-level objectives + alerting plan — 5 SLOs (availability, verifier pass rate, citation match rate, latency P95, tool failure rate) with named thresholds + page-vs-ticket triage. |
+| [`RUNBOOK.md`](./RUNBOOK.md) | Backup, restore, and on-call runbook — what gets backed up at what cadence, three restore scenarios (table / DB / host loss) with RTO targets, monthly restore-drill cadence. |
 | [`RULE_CORPUS.md`](./RULE_CORPUS.md) | The 7-rule clinical corpus the verifier flags against, with selection filters and "adjacent rule considered + why this won." |
 | [`SYNTHETIC_DATA_PLAN.md`](./SYNTHETIC_DATA_PLAN.md) | How the 10 synthetic edge-case patients were designed — sentinel ID range, no-real-PHI validator, per-patient failure mode coverage. |
 | [`SETUP.md`](./SETUP.md) | Local-dev setup: clone, `docker compose up`, agent venv, env vars, pre-commit hook install. |
@@ -94,7 +95,7 @@ AgentForge/
 ├── README.md ARCHITECTURE.md AUDIT.md       ← Submission docs (NET-NEW)
 ├── COST_ANALYSIS.md DECISIONS.md            ← Companion docs (NET-NEW)
 ├── EVAL_SUITE.md PERFORMANCE.md SLO.md
-├── RULE_CORPUS.md SYNTHETIC_DATA_PLAN.md
+├── RULE_CORPUS.md SYNTHETIC_DATA_PLAN.md RUNBOOK.md
 ├── USERS.md SETUP.md
 │
 ├── OPENEMR_README.md                        ← Upstream OpenEMR README, preserved
