@@ -236,6 +236,21 @@ The cleanest implementation point is a single PHI redaction module (e.g., `agent
 
 **Severity rationale:** HIGH not CRITICAL because the agent service is internal-network-only and behind authenticated OpenEMR session; clinician sees the leakage but no external party does. Becomes CRITICAL when the system goes broader (multi-clinic tenant, mobile app, etc.). For week 3 / pre-clinical-pilot, this needs to land.
 
+> **Updated 2026-05-02 — partial closure (Tier 2).** Outbound PHI gate shipped at the response boundary in `agent/agent.py:run_chat` (just before `AgentResponse` construction) and at the Langfuse-mask boundary in `agent/agent.py:_mask_phi`. Implementation in `agent/_phi_scrubber.py`, 24 unit tests at `agent/tests/unit/test_phi_scrubber.py`. **Closes** the high-confidence pattern half:
+>
+> - ✅ Cross-patient `patient_id=N` / `pid=N` / `pid:N` mentions (the eval-26 patient_id half — refused with `refusal_reason: "outbound_phi_leak"`)
+> - ✅ SSN `XXX-XX-XXXX`, US phone in three formats, email (non-allowlist domains), MRN-prefixed identifiers
+> - ✅ Same patterns scrubbed in Langfuse trace exports (replaced with `<REDACTED-*>` placeholders)
+>
+> **Does NOT yet close** (deferred — see [`DECISIONS.md §4a`](./DECISIONS.md#4a-phi-redaction-implementation-plan) "Why name detection is deferred"):
+>
+> - ❌ The eval-26 NAME half ("Maria Hernandez" was repeated by the LLM verbatim alongside the patient_id; we catch the patient_id but not the name yet) — requires patient-name lookup plumbing + careful FP suppression for doctor names
+> - ❌ DOBs in free text (year-month bucketing in place via `_mask_phi` but doesn't refuse-on-detect)
+> - ❌ Geographic identifiers (street, city, ZIP)
+> - ❌ Other 11 of 18 HIPAA Safe Harbor identifiers
+>
+> **Status:** PARTIAL. Severity remains HIGH for the deferred name-detection half. Production-blocker for the cross-patient-name leakage class until full Safe Harbor sweep ships in week 3.
+
 ---
 
 ## Appendix: Findings Index
