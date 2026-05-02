@@ -1,9 +1,29 @@
 # GitLab CI pipeline for the AgentForge fork.
 #
+# === IMPORTANT: NO RUNNER PROVISIONED ON labs.gauntletai.com ===
+# This file is in the repo as a documented-but-not-executing CI gate.
+# The labs.gauntletai.com instance does not provide instance-shared
+# Runners for student projects, and registering a self-hosted Runner
+# was out of scope for the week-1 build. The job below is therefore
+# `when: manual` — the pipeline shows up on each MR / master push as
+# a clickable "Run pipeline" button rather than auto-running and
+# getting stuck on "no available runner."
+#
+# **The same logic runs automatically on every push via the GitHub
+# mirror's Actions workflow:**
+#   https://github.com/TradeUpCards/agentforge/actions
+#
+# The `.github/workflows/agent-eval.yml` file is the executing CI
+# gate; this `.gitlab-ci.yml` is its GitLab-format twin, present so
+# the fork has a CI pipeline visible on its primary review surface.
+# If a reviewer on GitLab wants to trigger an actual run, they need
+# (a) Project Settings > CI/CD > Runners to have at least one runner
+# registered, then (b) click the "Run pipeline" button on this MR.
+#
+# === END RUNNER NOTE ===
+#
 # Mirrors what `.github/workflows/agent-eval.yml` runs on GitHub — same
-# Python image, same fixture-mode env vars, same pytest invocation —
-# so reviewers seeing this fork on GitLab get the same green/red gate
-# on Merge Requests that reviewers on GitHub get on Pull Requests.
+# Python image, same fixture-mode env vars, same pytest invocation.
 #
 # Cost: zero. USE_FIXTURE_LLM + USE_FIXTURE_DATA both true keep this
 # off the Anthropic API and out of the live MariaDB. Nightly-tier
@@ -52,11 +72,20 @@ agent-eval:
   stage: test
   # Skip if the change doesn't touch agent code, the pre-commit hook,
   # or this CI file itself. Saves CI minutes on doc-only changes.
+  #
+  # `when: manual` — pipeline appears on the MR but does NOT auto-run
+  # (see runner note at top of this file). A reviewer can click "Run
+  # pipeline" if a Runner is registered. Without this, the job would
+  # show as "pending / stuck" indefinitely on every MR — visually
+  # worse than "manual" because reviewers read it as broken.
   rules:
     - changes:
         - agent/**/*
         - scripts/git-hooks/pre-commit
         - .gitlab-ci.yml
+      when: manual
+      # Don't fail the pipeline if the manual job isn't run.
+      allow_failure: true
   variables:
     # Both fixture flags ON — keeps the run deterministic + free.
     USE_FIXTURE_LLM: "true"
