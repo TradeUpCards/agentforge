@@ -1,0 +1,152 @@
+name: agent-deploy
+
+# Manual-trigger deploy workflow for the AgentForge agent service to the
+# DigitalOcean droplet. Implements the deploy + rollback pattern that
+# ARCHITECTURE.md §8.2 sketches; addresses the production blocker named
+# in 2026-05-02-system-architecture-review.md ("Manual SSH deploys aren't
+# credible production rollback").
+#
+# Status: STUB. Requires the following GitHub Actions secrets before it
+# can actually deploy. Until they're configured, the workflow fail-fast
+# at the Preflight step with a clear error pointing here.
+#
+#   DROPLET_HOST           — e.g. 142.93.242.40 (or hostname)
+#   DROPLET_SSH_USER       — e.g. root
+#   DROPLET_SSH_KEY        — private key, contents (NOT path)
+#   DROPLET_DEPLOY_PATH    — e.g. /opt/agentforge
+#
+# Rollback model: deploys are tagged via `git describe` so a redeploy of
+# the prior tag rolls forward+back. No state outside the agent service
+# is mutated by deploy (the agent is stateless; agent_log table schema
+# changes are managed separately via .deploy/bootstrap.sh).
+#
+# What this does NOT yet do (week-2+ per ARCHITECTURE.md §8.2):
+#   - Auto-deploy on push to release branch (currently manual only by design)
+#   - Run the eval Golden Set against staging before swapping production
+#   - Health-check the new container with retry/timeout before declaring
+#     success (current pattern: ssh + restart + assume)
+#   - Auto-rollback on health-check failure (current: operator re-runs
+#     this workflow with the previous SHA)
+#   - Notify on deploy success/failure (Slack / email — not wired)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to deploy (commit SHA, tag, or branch). Defaults to current default branch.'
+        required: false
+        type: string
+        default: ''
+      confirm:
+        description: 'Type "DEPLOY" (all caps) to confirm. Guard against accidental runs.'
+        required: true
+        type: string
+        default: ''
+
+# Single deploy at a time per droplet — block concurrent runs.
+concurrency:
+  group: agent-deploy-droplet
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: SSH deploy to droplet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      # Recommend creating a `production` Environment in repo settings
+      # so this job can require a manual approver before running. Until
+      # that's set up, the `confirm: DEPLOY` input above is the gate.
+      name: production
+
+    steps:
+      - name: Confirm deploy intent
+        if: ${{ inputs.confirm != 'DEPLOY' }}
+        run: |
+          echo "::error::Refusing to deploy: confirm input was not exactly 'DEPLOY'."
+          echo "Re-run the workflow and type DEPLOY (all caps) in the confirm input."
+          exit 1
+
+      - name: Preflight — verify required secrets
+        # Fail fast with a clear message if the secrets aren't wired yet.
+        # This is the "intentional stub" behavior — the workflow exists
+        # so the deploy pattern is visible and documented, but it does
+        # not silently no-op.
+        env:
+          DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
+          DROPLET_SSH_USER: ${{ secrets.DROPLET_SSH_USER }}
+          DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+          DROPLET_DEPLOY_PATH: ${{ secrets.DROPLET_DEPLOY_PATH }}
+        run: |
+          missing=""
+          [ -z "$DROPLET_HOST" ]        && missing="$missing DROPLET_HOST"
+          [ -z "$DROPLET_SSH_USER" ]    && missing="$missing DROPLET_SSH_USER"
+          [ -z "$DROPLET_SSH_KEY" ]     && missing="$missing DROPLET_SSH_KEY"
+          [ -z "$DROPLET_DEPLOY_PATH" ] && missing="$missing DROPLET_DEPLOY_PATH"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required secrets:$missing"
+            echo "Configure these in repo Settings > Secrets and variables > Actions."
+            echo "See .github/workflows/agent-deploy.yml header for what each secret means."
+            exit 1
+          fi
+          echo "All required secrets present."
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 1
+
+      - name: Resolve deploy SHA
+        id: sha
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Deploying SHA: $SHA"
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DROPLET_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DROPLET_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull latest, restart agent service
+        env:
+          DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
+          DROPLET_SSH_USER: ${{ secrets.DROPLET_SSH_USER }}
+          DROPLET_DEPLOY_PATH: ${{ secrets.DROPLET_DEPLOY_PATH }}
+          DEPLOY_SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "${DROPLET_SSH_USER}@${DROPLET_HOST}" bash <<EOF
+            set -euo pipefail
+            cd "${DROPLET_DEPLOY_PATH}"
+            echo "Current SHA before deploy:"
+            git rev-parse HEAD
+            git fetch --all --tags
+            git checkout "${DEPLOY_SHA}"
+            echo "Restarting agent service..."
+            docker compose up -d --build agent
+            echo "Deploy complete — new SHA:"
+            git rev-parse HEAD
+          EOF
+
+      - name: Smoke-check /health endpoint
+        env:
+          DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
+        run: |
+          # Give the container ~30s to come up before failing the workflow.
+          for i in $(seq 1 6); do
+            if curl -sk --max-time 10 "https://${DROPLET_HOST}/agent/health" | grep -q '"status":"ok"'; then
+              echo "Health check passed on attempt $i."
+              exit 0
+            fi
+            echo "Health check attempt $i failed; retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::Health check did not return ok after 30s. Investigate before considering this deploy successful."
+          exit 1
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
