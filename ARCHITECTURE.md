@@ -363,6 +363,8 @@ This entire section exists because of `AUDIT.md` findings S-1, S-2, and C-1.
 
 ### 4.2 Agent-side audit log
 
+> **Implementation landed 2026-05-02.** Schema lives as an inline heredoc in [`.deploy/bootstrap.sh`](./.deploy/bootstrap.sh) (kept out of standalone `.sql` files to respect the repo's `*.sql` gitignore — defense against accidentally committing PHI-bearing dumps). Writer at [`agent/_audit_log.py`](./agent/_audit_log.py); wired into all five return paths in `agent/agent.py` via the `_close_audit()` helper. Dedicated `agent_audit_rw` DB user with INSERT-only privileges per the least-privilege pattern (`AUDIT.md` C-3); UPDATE / DELETE / SELECT are denied at the DB layer. Production provisioning automated in `bootstrap.sh`.
+
 `EventAuditLogger` does not log SELECT queries by default (`AUDIT.md` C-1). For HIPAA §164.312(b) compliance with a read-only AI agent, we write our own log entries.
 
 **Schema (`agent_log` table):**

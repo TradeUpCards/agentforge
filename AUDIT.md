@@ -192,6 +192,8 @@ The agent is read-only by design (per `ARCHITECTURE.md`). HIPAA's audit-trail re
 
 **Agent implication (mandatory architectural commitment):** the Python agent service writes its own audit log entry for every request. The log captures: requesting user ID, target patient ID, the question asked, tools invoked with their parameters, retrieved record IDs, the verifier's verdict, the final response, and timestamps. This log writes to a dedicated table that mirrors the structure of OpenEMR's `log` table so the audit trail is unified.
 
+**Implementation landed 2026-05-02.** Schema lives as an inline heredoc in `.deploy/bootstrap.sh` (14 columns matching `ARCHITECTURE.md §4.2` design); kept inline rather than as a tracked `.sql` file to respect the repo's `*.sql` gitignore policy (defense against accidentally committing PHI-bearing dumps). Writer at `agent/_audit_log.py` is fail-safe and uses a dedicated `agent_audit_rw` DB user with INSERT-only privileges per least-privilege pattern from C-3. Wiring in `agent/agent.py` covers all 5 return paths (HMAC fail / tools fail / parse fail / verifier 30% / success) via the `_close_audit()` helper. DB-layer integrity: `agent_audit_rw` cannot SELECT, UPDATE, or DELETE — those statements are explicitly denied (closes `C-2` application-only-enforcement gap as much as a single host can; external syslog forwarding remains week-3 work). Production provisioning automated in `.deploy/bootstrap.sh` — applies the schema and provisions both DB users on first deploy.
+
 ### C-2 [HIGH] — Audit log integrity is application-enforced, not schema-enforced
 The `log` table schema has no append-only constraints. The optional `checksum` column is rarely populated. A database administrator (or a successful SQL injection on a privileged path) could modify or delete log records without schema-level resistance. ATNA (Audit Trail and Node Authentication) syslog forwarding is supported but not required.
 
@@ -256,7 +258,7 @@ The cleanest implementation point is a single PHI redaction module (e.g., `agent
 | D-2 | Data Quality | RxNorm codes optional; drug names free text | HIGH | Drug normalization at agent side |
 | D-3 | Data Quality | Lab results are LOINC-coded | GOOD | Strongest citation tier |
 | D-4 | Data Quality | Demo data sparse for clinical history | SCOPE | Synthetic edge-case patients for eval |
-| C-1 | Compliance | SELECT logging is opt-in | CRITICAL | Agent-side PHI access logging is mandatory |
+| C-1 | Compliance | SELECT logging is opt-in | CRITICAL | **Implemented 2026-05-02:** `agent_log` table + `agent_audit_rw` user (INSERT-only) + `_close_audit` wiring. Schema inline in `.deploy/bootstrap.sh`; writer at `agent/_audit_log.py`. |
 | C-2 | Compliance | Audit log integrity not schema-enforced | HIGH | External syslog forwarding (week 3) |
 | C-3 | Compliance | No column-level encryption for SSN, DL | HIGH | Tools never retrieve these columns |
 | C-4 | Compliance | No anomalous-access alerting | MEDIUM | Week 3 work; agent log enables it |

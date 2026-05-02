@@ -35,6 +35,7 @@ if [[ ! -f .env ]]; then
   MYSQL_ROOT_PASSWORD=$(openssl rand -hex 16)
   MYSQL_USER_PASSWORD=$(openssl rand -hex 16)
   AGENT_RO_PASSWORD=$(openssl rand -hex 16)
+  AGENT_AUDIT_RW_PASSWORD=$(openssl rand -hex 16)
   OE_ADMIN_PASSWORD=$(openssl rand -hex 12)
   HMAC_SECRET=$(openssl rand -hex 32)
 
@@ -44,6 +45,7 @@ PUBLIC_HOSTNAME=$PUBLIC_HOSTNAME
 MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD
 MYSQL_USER_PASSWORD=$MYSQL_USER_PASSWORD
 AGENT_RO_PASSWORD=$AGENT_RO_PASSWORD
+AGENT_AUDIT_RW_PASSWORD=$AGENT_AUDIT_RW_PASSWORD
 OE_ADMIN_PASSWORD=$OE_ADMIN_PASSWORD
 
 # Agent integrity (shared secret between PHP module and Python agent)
@@ -198,6 +200,11 @@ services:
       AGENT_DB_PASS: \${AGENT_RO_PASSWORD}
       AGENT_DB_NAME: "openemr"
 
+      # Audit-log writer user — INSERT-only on agent_log per AUDIT.md C-1
+      # / ARCHITECTURE.md §4.2. Provisioned alongside agent_ro below.
+      AGENT_DB_AUDIT_USER: "agent_audit_rw"
+      AGENT_DB_AUDIT_PASS: \${AGENT_AUDIT_RW_PASSWORD}
+
       # Integrity (must match openemr container's value)
       OPENEMR_HMAC_SECRET: \${OPENEMR_HMAC_SECRET}
 
@@ -282,7 +289,50 @@ docker compose exec -T mysql mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
   FLUSH PRIVILEGES;
 " 2>&1 | grep -v "Using a password" || true
 
-# Restart the agent so it picks up the now-existing DB user.
+echo "==> Applying agent_log schema (audit-trail table per AUDIT.md C-1)..."
+# Schema lives inline rather than as a tracked .sql file. The repo's
+# *.sql gitignore is a defensive policy against accidentally committing
+# database dumps with real PHI (see commit e87ed7b). Keeping the schema
+# in this script avoids an exception to that policy and keeps the deploy
+# self-contained. Idempotent via CREATE TABLE IF NOT EXISTS.
+# Field-by-field rationale: ARCHITECTURE.md §4.2.
+docker compose exec -T mysql mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" openemr <<'AGENTLOG_SCHEMA' 2>&1 | grep -v "Using a password" || true
+CREATE TABLE IF NOT EXISTS agent_log (
+    id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    request_id         CHAR(36) NOT NULL,
+    created_at         DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    user_id            INT UNSIGNED NOT NULL,
+    patient_id         INT UNSIGNED NOT NULL,
+    use_case           VARCHAR(8) NULL,
+    prompt             VARCHAR(4000) NULL,
+    tools_called       JSON NULL,
+    llm_calls          JSON NULL,
+    verifier_verdict   VARCHAR(16) NULL,
+    claims_passed      INT UNSIGNED NOT NULL DEFAULT 0,
+    claims_failed      INT UNSIGNED NOT NULL DEFAULT 0,
+    final_response     VARCHAR(8000) NULL,
+    total_latency_ms   INT UNSIGNED NOT NULL DEFAULT 0,
+    outcome            VARCHAR(16) NOT NULL,
+    refusal_reason     VARCHAR(1000) NULL,
+    PRIMARY KEY (id),
+    INDEX idx_user_patient_date (user_id, patient_id, created_at),
+    INDEX idx_request_id (request_id),
+    INDEX idx_outcome_date (outcome, created_at)
+)
+ENGINE=InnoDB
+DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_unicode_ci
+COMMENT='AgentForge PHI access audit trail. See ARCHITECTURE.md §4.2.';
+AGENTLOG_SCHEMA
+
+echo "==> Creating agent_audit_rw DB user (INSERT-only on agent_log, idempotent)..."
+docker compose exec -T mysql mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
+  CREATE USER IF NOT EXISTS 'agent_audit_rw'@'%' IDENTIFIED BY '$AGENT_AUDIT_RW_PASSWORD';
+  GRANT INSERT ON openemr.agent_log TO 'agent_audit_rw'@'%';
+  FLUSH PRIVILEGES;
+" 2>&1 | grep -v "Using a password" || true
+
+# Restart the agent so it picks up the now-existing DB users + table.
 docker compose restart agent
 
 echo ""

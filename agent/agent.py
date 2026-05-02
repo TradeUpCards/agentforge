@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 import re
 import uuid
@@ -33,6 +34,7 @@ from langfuse import Langfuse, get_client, observe
 from langfuse._client.attributes import LangfuseOtelSpanAttributes
 from opentelemetry import trace as otel_trace
 
+from ._audit_log import AuditRow, write_audit_row
 from .config import Settings, get_settings
 from .llm_client import LLMClient, build_llm_client
 from .schemas import (
@@ -424,6 +426,104 @@ def _parse_structured_output(text: str) -> tuple[str, list[Claim]]:
 
 
 # ---------------------------------------------------------------------------
+# Audit-log helpers — see agent/_audit_log.py + ARCHITECTURE.md §4.2
+# ---------------------------------------------------------------------------
+
+
+_audit_log = logging.getLogger("agent.audit")
+
+
+def _last_user_message(request: ChatRequest) -> str | None:
+    """Return the most recent user message's content, or None. The audit
+    row stores this as `prompt` so PHI-access reports show the trigger
+    text per request."""
+    for m in reversed(request.messages):
+        if m.role == Role.USER:
+            return m.content
+    return None
+
+
+def _infer_use_case(request: ChatRequest) -> str | None:
+    """Best-effort UC1/UC2/UC3 inference from request shape. Returns
+    None when the signal is ambiguous — better to leave the column null
+    than to mis-label.
+
+    UC1: single-turn pre-visit brief, canned starter prompt.
+    UC2: delta-since-last-visit query.
+    UC3: free-text Q&A; usually multi-turn.
+    """
+    user_messages = [m for m in request.messages if m.role == Role.USER]
+    if not user_messages:
+        return None
+    last = user_messages[-1].content.lower()
+    if "pre-visit brief" in last or "pre visit brief" in last:
+        return "UC1"
+    if "since" in last and ("last visit" in last or "previous visit" in last):
+        return "UC2"
+    if len(user_messages) > 1:
+        return "UC3"
+    return None
+
+
+def _summarize_tools(tool_summaries: list[ToolCallSummary]) -> list[dict[str, Any]]:
+    """Convert ToolCallSummary list into the JSON shape ARCHITECTURE.md
+    §4.2 commits to for the agent_log.tools_called column."""
+    return [
+        {
+            "tool": s.tool_name,
+            "params": s.params,
+            "latency_ms": s.latency_ms,
+            "success": s.success,
+            "record_count": s.record_count,
+            "error": s.error,
+        }
+        for s in tool_summaries
+    ]
+
+
+def _summarize_llm_call(model: str, response: Any) -> dict[str, Any]:
+    """Extract token + cache telemetry from an Anthropic SDK response.
+    Defensive — usage attributes vary slightly across SDK versions and
+    fixture-mode responses. Missing fields default to 0."""
+    usage = getattr(response, "usage", None)
+    return {
+        "model": model,
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        "cache_read_input_tokens": int(
+            getattr(usage, "cache_read_input_tokens", 0) or 0
+        ),
+        "cache_creation_input_tokens": int(
+            getattr(usage, "cache_creation_input_tokens", 0) or 0
+        ),
+    }
+
+
+def _close_audit(
+    audit: AuditRow,
+    started_at: float,
+    response: AgentResponse | RefusalResponse,
+) -> AgentResponse | RefusalResponse:
+    """Stamp final-latency, write the audit row, return the response.
+
+    All five return paths in run_chat funnel through this so the
+    agent_log row is written exactly once per request — see
+    ARCHITECTURE.md §4.2. Audit-write failures are swallowed (per the
+    fail-safe contract in agent/_audit_log.py); the response always
+    ships to the user even if the audit write hits a DB problem.
+    """
+    audit.total_latency_ms = int((time.perf_counter() - started_at) * 1000)
+    try:
+        write_audit_row(audit)
+    except Exception:  # defense in depth — write_audit_row is already fail-safe
+        _audit_log.exception(
+            "agent_log write raised despite fail-safe; ignoring",
+            extra={"request_id": audit.request_id},
+        )
+    return response
+
+
+# ---------------------------------------------------------------------------
 # The chat handler
 # ---------------------------------------------------------------------------
 
@@ -444,6 +544,20 @@ async def run_chat(
     settings = settings or get_settings()
     llm = llm or build_llm_client(settings)
     request_id = str(uuid.uuid4())
+    started_at = time.perf_counter()
+
+    # Audit row is constructed up-front with what we know before HMAC
+    # verification fires; subsequent stages (tools, LLM, verifier) update
+    # the row in place. _close_audit() writes it exactly once at every
+    # return path. Per AUDIT.md C-1 + ARCHITECTURE.md §4.2.
+    audit = AuditRow(
+        request_id=request_id,
+        user_id=request.user_id,
+        patient_id=request.patient_id,
+        outcome="error",  # overwritten before any return
+        use_case=_infer_use_case(request),
+        prompt=_last_user_message(request),
+    )
 
     # Promote user_id + session_id to top-level Langfuse trace attributes
     # so the Users + Sessions dashboards work (per-user spend rollups,
@@ -480,12 +594,15 @@ async def run_chat(
         )
         trace_id = get_client().get_current_trace_id()
         _flush_langfuse()
-        return RefusalResponse(
+        audit.outcome = "refused"
+        audit.refusal_reason = "hmac"
+        audit.verifier_verdict = "refused"
+        return _close_audit(audit, started_at, RefusalResponse(
             reason="Request integrity check failed.",
             searched=[],
             request_id=request_id,
             trace_id=trace_id,
-        )
+        ))
 
     # 2. Fetch baseline patient context
     retrieved_records, tool_summaries = await fetch_baseline_context(request.patient_id)
@@ -501,7 +618,11 @@ async def run_chat(
         )
         trace_id = get_client().get_current_trace_id()
         _flush_langfuse()
-        return RefusalResponse(
+        audit.outcome = "refused"
+        audit.refusal_reason = "tools_failed"
+        audit.verifier_verdict = "refused"
+        audit.tools_called = _summarize_tools(tool_summaries)
+        return _close_audit(audit, started_at, RefusalResponse(
             reason=(
                 "One or more clinical data sources could not be reached "
                 "(tool error). Please retry; if this persists, the patient's "
@@ -510,7 +631,7 @@ async def run_chat(
             searched=tool_summaries,
             request_id=request_id,
             trace_id=trace_id,
-        )
+        ))
 
     # 3. Build system prompt with context.
     #
@@ -574,6 +695,8 @@ async def run_chat(
         max_tokens=4096,
         temperature=0.0,
     )
+    audit.tools_called = _summarize_tools(tool_summaries)
+    audit.llm_calls = [_summarize_llm_call(settings.model_workhorse, response)]
 
     # 5. Parse structured output
     raw_text = _extract_text(response)
@@ -603,12 +726,15 @@ async def run_chat(
         )
         trace_id = get_client().get_current_trace_id()
         _flush_langfuse()
-        return RefusalResponse(
+        audit.outcome = "refused"
+        audit.refusal_reason = f"malformed_llm_output (stop_reason={stop_reason})"
+        audit.verifier_verdict = "refused"
+        return _close_audit(audit, started_at, RefusalResponse(
             reason="The agent's response could not be parsed.",
             searched=tool_summaries,
             request_id=request_id,
             trace_id=trace_id,
-        )
+        ))
 
     # 6. Verify (with single bounded retry on >30% failure)
     verdict = verify_claims(claims, retrieved_records)
@@ -651,7 +777,12 @@ async def run_chat(
             )
             trace_id = get_client().get_current_trace_id()
             _flush_langfuse()
-            return RefusalResponse(
+            audit.outcome = "refused"
+            audit.refusal_reason = "verifier_30pct_threshold"
+            audit.verifier_verdict = verdict.verdict.value
+            audit.claims_passed = len(verdict.claims_passed)
+            audit.claims_failed = len(verdict.claims_failed)
+            return _close_audit(audit, started_at, RefusalResponse(
                 reason=(
                     "More than 30% of the agent's claims could not be verified "
                     "against the retrieved records. The agent declines to answer "
@@ -660,12 +791,17 @@ async def run_chat(
                 searched=tool_summaries,
                 request_id=request_id,
                 trace_id=trace_id,
-            )
+            ))
 
     # 7. Return verified response
     trace_id = get_client().get_current_trace_id()
     _flush_langfuse()
-    return AgentResponse(
+    audit.outcome = "success"
+    audit.verifier_verdict = verdict.verdict.value
+    audit.claims_passed = len(verdict.claims_passed)
+    audit.claims_failed = len(verdict.claims_failed)
+    audit.final_response = prose
+    return _close_audit(audit, started_at, AgentResponse(
         message=Message(role=Role.ASSISTANT, content=prose),
         claims=verdict.claims_passed,
         retrieved_records=retrieved_records,
@@ -673,7 +809,7 @@ async def run_chat(
         request_id=request_id,
         trace_id=trace_id,
         claims_stripped=len(verdict.claims_failed),
-    )
+    ))
 
 
 def _flush_langfuse() -> None:

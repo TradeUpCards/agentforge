@@ -29,12 +29,19 @@ class Settings(BaseModel):
     langfuse_secret_key: str
     langfuse_host: str
 
-    # DB
+    # DB — clinical-data reads (least-privilege user, SELECT-only on openemr.*)
     db_host: str
     db_port: int
     db_user: str
     db_password: str
     db_name: str
+
+    # DB — audit-log writes (least-privilege user, INSERT-only on agent_log).
+    # Empty values are tolerated for local-dev iteration — agent/_audit_log.py
+    # falls back to no-op writes with a one-time stderr warning. Production
+    # bootstrap.sh provisions both this user and AGENT_DB_USER.
+    db_audit_user: str
+    db_audit_password: str
 
     # Auth
     openemr_hmac_secret: str
@@ -104,6 +111,8 @@ def get_settings() -> Settings:
         db_user=os.getenv("AGENT_DB_USER", "openemr"),
         db_password=os.getenv("AGENT_DB_PASS", "openemr"),
         db_name=os.getenv("AGENT_DB_NAME", "openemr"),
+        db_audit_user=os.getenv("AGENT_DB_AUDIT_USER", ""),
+        db_audit_password=os.getenv("AGENT_DB_AUDIT_PASS", ""),
         openemr_hmac_secret=os.getenv("OPENEMR_HMAC_SECRET", ""),
         host=os.getenv("AGENT_HOST", "0.0.0.0"),
         port=int(os.getenv("AGENT_PORT", "8000")),
