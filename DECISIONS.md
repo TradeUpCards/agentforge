@@ -23,7 +23,7 @@
 
 **Tradeoff.** Some questions a less-constrained chatbot would answer, this agent will refuse — because the answer can't be verified. Refuse-vs-fabricate is an explicit choice. We accept user-experience cost (some sessions end with "I don't know") to eliminate safety risk.
 
-**Source:** [ARCHITECTURE.md Executive Summary](./ARCHITECTURE.md), [Week 1 brief — "Why this matters"](./.gauntlet/week1/) (north star).
+**Source:** [ARCHITECTURE.md Executive Summary](./ARCHITECTURE.md); week-1 brief "Why this matters" section (the project's north star).
 
 ---
 
@@ -369,7 +369,7 @@ A full cost-analysis document at 100 / 1K / 10K / 100K users with per-tier archi
 - **Module location.** `interface/modules/custom_modules/oe-module-clinical-copilot/` — fully self-contained. Same install posture as any third-party OpenEMR module. Installs and uninstalls via Module Manager UI.
 - **Modern hooks only.** Subscribes to `PatientMenuEvent::MENU_UPDATE` (Symfony EventDispatcher); calls `AclMain::aclCheckCore` (modern PSR-4 service); reads via FHIR R4 (planned for week 2; v1 uses direct DB on a read-only user). Never patches `library/` or legacy `interface/` code where 8.0.0.2/8.0.0.3 patched recent CVEs. ([AUDIT.md S-1, S-2, S-3 + Executive Summary](./AUDIT.md))
 - **Additive schema.** The new `agent_log` table is in its own DDL; does not modify any existing OpenEMR table. A clean uninstall path is `DROP TABLE agent_log` (week 2 work; week 1 documents this).
-- **Network isolation.** The Python agent service runs on the internal Docker network only — not exposed publicly via Caddy. The OpenEMR container reaches it at `agent:8000`; nothing else can. ([prd.md §5](./.gauntlet/week1/prd.md))
+- **Network isolation.** The Python agent service runs on the internal Docker network only — not exposed publicly via Caddy. The OpenEMR container reaches it at `agent:8000`; nothing else can.
 - **REST endpoint scoping.** Lives under the module's `public/` directory, not under `/apis/` (which is OpenEMR's OAuth-protected dispatcher reserved for third-party API clients). Keeps the existing API contract uncluttered. CSRF token verification on every state-changing request, matching OpenEMR's existing pattern.
 - **Agent never auto-acts.** Read-only by design. No order entry, no prescription writing, no chart edits. Architectural rule, not preference. ([USERS.md "What This Persona Does NOT Need"](./USERS.md))
 
