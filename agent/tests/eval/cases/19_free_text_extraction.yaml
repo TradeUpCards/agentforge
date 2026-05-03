@@ -45,11 +45,13 @@ expected:
   must_mention:
     # The structured anchor (problem list).
     - "diabetes"
-    # Narrative-only finding — without this, the agent missed the
-    # most clinically important detail from the encounter notes.
-    # "foot" matches both "foot" and "feet" via case-insensitive
-    # substring; either is acceptable as proof of extraction.
-    - "foot"
+    # Narrative-only finding — the load-bearing clinical concern
+    # from the 2026-04-02 encounter notes is early diabetic
+    # peripheral neuropathy. "neuropathy" is the term the agent
+    # should surface (more reliable than "foot"/"feet" which the
+    # LLM sometimes paraphrases as "lower extremities" or
+    # "peripheral", but neuropathy is the diagnosis itself).
+    - "neuropathy"
   must_not_mention:
     - "I cannot"
     - "as an AI"

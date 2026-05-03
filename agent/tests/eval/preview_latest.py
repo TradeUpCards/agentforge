@@ -42,7 +42,12 @@ def main() -> None:
     )
     if not reports:
         raise SystemExit(f"No eval reports found in {_RESULTS}")
-    latest = reports[-1]
+    # Prefer the most recent merged "-all-modes.md" report if one exists —
+    # it shows every case across live/fixture/hybrid in one view (no
+    # misleading "skipped" badges from a single-mode run). Falls back to
+    # the chronologically latest per-mode report otherwise.
+    merged = [p for p in reports if p.name.endswith("-all-modes.md")]
+    latest = merged[-1] if merged else reports[-1]
     html_body = markdown.markdown(
         latest.read_text(encoding="utf-8"),
         extensions=["tables", "fenced_code"],

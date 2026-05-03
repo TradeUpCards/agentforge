@@ -12,3 +12,9 @@ htmlcov/
 
 # Eval run artifacts (regenerated on each run)
 tests/eval/results/
+# EXCEPT the merged "all-modes" reports — these are the deliverable
+# views shown to reviewers / on the repo web UI. Per-mode reports
+# stay gitignored as transient debugging artifacts.
+!tests/eval/results/*-all-modes.md
+# And keep the auto-generated HTML preview out of git too.
+tests/eval/results/_preview.html

@@ -23,6 +23,20 @@ A physician walks toward an exam room with ~90 seconds to recall who they're see
 - **Explicit Anthropic prompt caching** — `cache_control` breakpoint on the per-patient context block; UC3 follow-ups read from the same cache entry within the 5-min TTL.
 - **Stateless agent service** — full conversation history sent every turn; OpenEMR module owns auth, ACL, CSRF, HMAC, session.
 
+### LLM-callable tools (5 baseline, all read-only, all patient-scoped)
+
+Every tool takes `patient_id` as the *only* identifier parameter — derived from the OpenEMR session, never from LLM output (per AUDIT.md S-2). Schemas live in `agent/agent.py`'s `_TOOL_DEFS` block; implementations in `agent/tools.py`.
+
+| Tool | Schema (Anthropic tool-call shape) | Returns | Cite via |
+|---|---|---|---|
+| `get_problem_list` | `{patient_id: int}` | Active problems with ICD-10 codes + onset dates | `lists:<id>` |
+| `get_active_medications` | `{patient_id: int}` | Currently-active prescriptions: drug, dose, frequency, start date | `prescriptions:<id>` |
+| `get_recent_labs` | `{patient_id: int, since_date?: str, lab_codes?: list[str]}` | Lab results within window, optionally LOINC-filtered | `procedure_result:<id>` |
+| `get_allergies` | `{patient_id: int}` | Documented allergies with reaction + severity | `lists:<id>` |
+| `get_recent_encounters` | `{patient_id: int, limit?: int}` | Recent visits with assessment_plan + reason | `form_encounter:<id>` |
+
+**Deliberately not a tool:** demographics, vitals (queried via `get_recent_encounters`), medication history (queried via `get_active_medications` with active=false filter — also not exposed today), appointments. ARCHITECTURE.md §2.6 deviation appendix explains why the original 9-tool design collapsed to 5; tighter prompt + clearer model reasoning surface.
+
 ---
 
 ## Try it
@@ -30,6 +44,7 @@ A physician walks toward an exam room with ~90 seconds to recall who they're see
 | | |
 |---|---|
 | **Deployed agent** | https://142-93-242-40.nip.io (credentials provided via the GauntletAI submission portal — synthetic demo data only, no real PHI) |
+| **Eval results (latest run)** | **[`EVAL_RESULTS.md`](./EVAL_RESULTS.md)** — 30/30 cases passing across 6 categories; per-case detail + matrix breakdowns by category, tier, difficulty |
 | **Demo video (final submission)** | *Recording today; link added on final commit.* |
 | **Demo video (early submission, MVP gate)** | See `.gauntlet/week1/early-submission-video-script.md` (private notes; the video itself was submitted via the GauntletAI portal) |
 | **GitHub mirror** | https://github.com/TradeUpCards/agentforge |
@@ -50,7 +65,7 @@ The week-1 brief lists 8 required deliverables. Each maps to a file in this repo
 | 3 | **User Doc** | [`USERS.md`](./USERS.md) | Target user (primary care physician), three concrete use cases UC1/UC2/UC3, and *why an agent* is the right shape for each. |
 | 4 | **Agent Architecture Doc** | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | The integration plan + verification strategy + tradeoffs. Begins with a 1-page summary; subsequent sections cover model selection, tool design, verifier placement, observability, deployment. |
 | 5 | **Demo Video (3–5 min)** | *See "Try it" above* | Final-submission re-record links here on commit. |
-| 6 | **Eval Dataset** | [`EVAL_SUITE.md`](./EVAL_SUITE.md) + [`agent/tests/eval/cases/`](./agent/tests/eval/cases/) + [`agent/tests/eval/results/`](./agent/tests/eval/results/) | 26 cases across 6 categories (happy_path, auth_boundary, edge_case, ambiguous, prompt_injection, leakage_attempt); per-tier markdown reports + 12 synthetic patient fixtures. |
+| 6 | **Eval Dataset** | **[`EVAL_RESULTS.md`](./EVAL_RESULTS.md)** (latest run, 30/30 passing) + [`EVAL_SUITE.md`](./EVAL_SUITE.md) (suite design) + [`agent/tests/eval/cases/`](./agent/tests/eval/cases/) (30 case YAMLs) + [`agent/tests/eval/COVERAGE.md`](./agent/tests/eval/COVERAGE.md) (coverage matrix) | 30 cases across 6 categories (happy_path, auth_boundary, edge_case, ambiguous, prompt_injection, leakage_attempt); merged report shows 100% pass-rate across live + fixture + hybrid modes; 12 synthetic patient fixtures. |
 | 7 | **AI Cost Analysis** | [`COST_ANALYSIS.md`](./COST_ANALYSIS.md) | Actual dev burn + per-PCP/mo projections at 100 / 1K / 10K / 100K with the architectural changes named at each tier. |
 | 8 | **Deployed Application** | https://142-93-242-40.nip.io | Single DigitalOcean droplet running the full stack (OpenEMR + agent service + MariaDB + Caddy). |
 | 9 | **Social Post** *(final only)* | *Posted on X; link added on final commit.* | |
