@@ -118,7 +118,7 @@ The targets above are aspirational; this section records the **actual measured b
 
 The LLM call is essentially the entire latency. Tool fetch + verifier + audit-write together are noise. This concentrates the optimization lever on Anthropic-side performance: prompt caching, model selection, output token cap.
 
-**One concerning observation:** the median at 4990ms is **just over** the documented <4s P50 target. n=50 may not be enough to draw a strong conclusion (smoke-tier shape is one of the lighter shapes the system handles), but this is the closest existing numbers come to *missing* a target. Worth re-baselining once the cache anomaly in §3 is resolved — explicit caching alone could drop median latency 30-50% according to Anthropic's documented prompt-cache savings.
+**One concerning observation:** the median at 4990ms is **just over** the documented <4s P50 target. n=50 may not be enough to draw a strong conclusion (smoke-tier shape is one of the lighter shapes the system handles), but this is the closest existing numbers come to *missing* a target. Worth re-baselining against Synthea-shaped contexts (the §3 baseline used Maria fixture, which is below Anthropic's prompt-cache size threshold so caching didn't activate) — explicit caching against properly-sized inputs could drop median latency 30-50% per Anthropic's documented prompt-cache savings.
 
 **Where the baseline lives:**
 - Raw rows: `agent_log` table, `outcome='success' AND created_at BETWEEN '2026-05-02 21:26' AND '21:32'`
@@ -143,17 +143,28 @@ Not an SLO in the traditional sense — caching is a cost optimization, not a co
 
 This isn't a paging condition — it's a weekly review item. A persistent <15% over a week triggers a one-line config change (drop the `cache_control` key in `agent/agent.py:run_chat`). Documented in DECISIONS.md as a designed-in kill switch, not a regression.
 
-**⚠ Observed 2026-05-02 (n=50): cache hit rate is 0%.** Every one of 50 live calls came back with `cache_read_input_tokens=0`. The 50 calls were: 5 different smoke-tier cases × 10 iterations, all using identical patient context (Maria fixture, patient_id=1) and identical "Generate a pre-visit brief" message, with iteration-to-iteration spacing well under the 5-minute cache TTL. Under the documented design (`cache_control: ephemeral` on the patient-context system block per `agent/agent.py:run_chat`), iterations 2-10 of any case should have hit the cache. None did.
+**⚠ Observed 2026-05-02 (n=50): cache hit rate is 0% in this baseline — but the test setup is the explanation, not a code bug.**
 
-This means the kill-switch threshold is **already triggered** under the current cache configuration — but it's not yet a kill-switch decision because the root cause hasn't been investigated. Three plausible explanations, each pointing to a different fix:
+Every one of 50 live calls came back with `cache_read_input_tokens=0`. The 50 calls were: 5 different smoke-tier cases × 10 iterations, all using identical patient context (**Maria fixture, patient_id=1, ~500 tokens of prefix**) with sub-TTL spacing.
 
-1. **Min-cacheable-prefix threshold not met.** Anthropic Haiku 4.5 requires ≥1024 tokens of prefix before caching activates. The static system block alone may be under that threshold; if so, the breakpoint placement in `agent/agent.py` needs to move *down* the prompt to capture more prefix.
-2. **Per-request variation in the prefix.** Some field (timestamp, request_id, session_id) might be ending up in the cached prefix when it shouldn't. The fix is identifying the variant field and excluding it.
-3. **Anthropic-side fingerprinting.** Less likely but possible — some property of how the SDK constructs the request (e.g., `cache_control` being applied with the wrong `type` value) silently disables caching.
+**Why this is expected (not a bug):** Anthropic's prompt caching has a minimum input-size threshold of ~1024 tokens for both Sonnet and Haiku. Inputs below that threshold don't qualify for caching at all — the API silently no-ops the `cache_control` directive rather than erroring. The Maria fixture context is well below threshold, so 0% cache reads is the documented Anthropic behavior, not a misconfiguration in our code.
 
-**Investigation cost:** ~30 minutes to inspect one Langfuse trace and verify which of the three is the actual cause. Worth doing **before** considering the kill switch, because the cost-economics in [COST_ANALYSIS.md](./COST_ANALYSIS.md) assume cache savings are real. If the cache *can* work and we just have a misconfiguration, fixing it is much higher leverage than killing it.
+**Independent verification that cache works against production-shaped contexts:** [`agent/tests/verify_cache.py`](./agent/tests/verify_cache.py) fires two consecutive identical requests against patient_id=92 (Synthea-Guadalupe, ~6,953 tokens combined static + context — well above the 1024 minimum). Result captured in [COST_ANALYSIS.md §3](./COST_ANALYSIS.md):
 
-Filed as a P2 finding from the n=50 baseline measurement. Not blocking SLO targets above (SLO-4's p95 is well under target without cache), but it's load-bearing for the cost projections.
+```
+Call 1 (CREATION): cache_creation_input_tokens=10,057 · cache_read=0
+Call 2 (READ):     cache_creation=0 · cache_read_input_tokens=10,057
+→ 100% of the cached prefix served from cache.
+```
+
+Cache works. The n=50 baseline didn't see it fire because the wrong-shaped fixture was used for cache measurement.
+
+**What's actually open** (these are real, just smaller than originally framed):
+
+1. **Re-baseline against Synthea-shaped contexts** (~30 min, ~$0.30) — produces realistic UC1 single-turn cache numbers against production-representative input sizes. Filed as a P2 follow-up; the cost-economics in COST_ANALYSIS.md already use Synthea-derived per-request rates, so this is observability cleanup, not an econ revision.
+2. **Per-tier cache projections** for UC2 and UC3 against Synthea — naturally clears since UC3 multi-turn cache benefit is the bigger story regardless (each turn appends to messages but the static-+-context prefix stays cached).
+
+The kill switch and the underlying cost-economics assumptions remain unchanged — cache works, the metric was measured against the wrong shape, the fix is a rerun, not a code change.
 
 ---
 
