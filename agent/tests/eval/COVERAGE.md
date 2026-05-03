@@ -1,7 +1,8 @@
 # Eval Suite Coverage
 
 **Generated:** 2026-05-02 (after `SYNTHETIC_DATA_PLAN.md` step 7)
-**Total cases:** 26 across 26 unique failure modes
+**Total cases:** 30 across 30 unique failure modes
+**Latest run results:** [**`EVAL_RESULTS.md`**](../../../EVAL_RESULTS.md) at the repo root — merged across live + fixture + hybrid modes, 30/30 passing.
 **How to regenerate:** rerun the loader / matrix introspection script under `agent/tests/eval/runner.py:EvalCase.load_all()` after adding cases. The latest auto-generated per-run report (per-tier, per-difficulty, failure-mode-distribution tables) is at `agent/tests/eval/results/<timestamp>.md`.
 
 ---
@@ -10,26 +11,26 @@
 
 | Dimension | Value |
 |---|---|
-| Total cases | 26 |
-| Unique failure modes | 26 (one case per mode — no duplicates, no typos) |
+| Total cases | 30 |
+| Unique failure modes | 30 (one case per mode — no duplicates, no typos) |
 | Synthetic-patient cases | 12 (using sentinel range 999100-999999) |
-| Cases with `source_incident_id` provenance | 11 |
+| Cases with `source_incident_id` provenance | 13 |
 | Smoke tier (pre-commit) | 6 cases, all green in fixture mode |
 | Full tier (CI default) | 3 cases |
-| Nightly tier (live LLM/DB) | 17 cases |
+| Nightly tier (live LLM/DB) | 21 cases |
 | Adversarial cases | 6 (auth=1, prompt-injection=5, leakage=1) |
 
 ## Category × Difficulty
 
 | Category | basic | intermediate | advanced | total |
 |---|---:|---:|---:|---:|
-| `happy_path` | 4 | 5 | 7 | 16 |
+| `happy_path` | 4 | 6 | 7 | 17 |
 | `prompt_injection` | 0 | 0 | 5 | 5 |
-| `edge_case` | 0 | 2 | 0 | 2 |
+| `edge_case` | 1 | 2 | 2 | 5 |
 | `auth_boundary` | 1 | 0 | 0 | 1 |
 | `ambiguous` | 0 | 1 | 0 | 1 |
 | `leakage_attempt` | 0 | 0 | 1 | 1 |
-| **total** | **5** | **8** | **13** | **26** |
+| **total** | **6** | **9** | **15** | **30** |
 
 The `prompt_injection` and `leakage_attempt` categories are pure-advanced — these are adversarial cases by design. `happy_path` covers all three difficulties because it includes baseline UC1 briefs (basic), focused queries and trend recognition (intermediate), and analytical synthesis on real-shaped polypharmacy data (advanced).
 
@@ -37,13 +38,13 @@ The `prompt_injection` and `leakage_attempt` categories are pure-advanced — th
 
 | Category | smoke | full | nightly | total |
 |---|---:|---:|---:|---:|
-| `happy_path` | 5 | 2 | 9 | 16 |
+| `happy_path` | 5 | 2 | 10 | 17 |
 | `prompt_injection` | 0 | 0 | 5 | 5 |
-| `edge_case` | 0 | 0 | 2 | 2 |
+| `edge_case` | 0 | 0 | 5 | 5 |
 | `auth_boundary` | 1 | 0 | 0 | 1 |
 | `ambiguous` | 0 | 1 | 0 | 1 |
 | `leakage_attempt` | 0 | 0 | 1 | 1 |
-| **total** | **6** | **3** | **17** | **26** |
+| **total** | **6** | **3** | **21** | **30** |
 
 Smoke tier is `auth_boundary_bad_hmac` plus 5 Maria-fixture happy-path cases — all run deterministically in fixture mode in ~3.8s (under the pre-commit budget). Nightly is dominated by adversarial cases and Synthea live-data cases that require a real LLM.
 
@@ -53,10 +54,10 @@ How many cases declare each tool in `tool_mix:`. The tool-mix field is a *declar
 
 | Tool | Cases declaring it |
 |---|---:|
-| `get_problem_list` | 15 |
-| `get_recent_labs` | 10 |
-| `get_active_medications` | 9 |
-| `get_recent_encounters` | 7 |
+| `get_problem_list` | 18 |
+| `get_recent_labs` | 11 |
+| `get_active_medications` | 11 |
+| `get_recent_encounters` | 9 |
 | `get_allergies` | 4 |
 
 `get_allergies` is thinnest — only 4 of 26 cases explicitly exercise it, despite allergies being clinically high-stakes context (a missed PCN allergy that the agent doesn't surface is exactly the failure mode the brief calls out). Worth backfilling 1-2 more allergy-focused cases in week 2.
@@ -93,7 +94,7 @@ The legacy hardcoded sentinels (999998, 999999) live in `_fixture_prompt_injecti
 
 ## Failure Modes (alphabetical)
 
-Every case is tagged with a `failure_mode` string. The runner reports unique values to surface typos. All 26 modes below are unique — no duplicates in the suite.
+Every case is tagged with a `failure_mode` string. The runner reports unique values to surface typos. All 30 modes below are unique — no duplicates in the suite.
 
 | Failure mode | Case |
 |---|---|
@@ -103,6 +104,7 @@ Every case is tagged with a `failure_mode` string. The runner reports unique val
 | `ambiguous_input_grounding` | `ambiguous_query` |
 | `analytical_synthesis_polypharmacy` | `synthea_focused_diabetes_status` |
 | `baseline_uc1_brief` | `uc1_happy_path` |
+| `contradictory_progression_silent_smoothing` | `contradictory_progression_acknowledgment` |
 | `cross_patient_leakage_resistance` | `cross_patient_leakage_resistance` |
 | `drug_class_completeness` | `maria_drug_class_completeness` |
 | `focused_lab_query_grounding` | `maria_focused_lab_query` |
@@ -116,12 +118,15 @@ Every case is tagged with a `failure_mode` string. The runner reports unique val
 | `injection_via_lab_field_name` | `injection_via_lab_field_name` |
 | `lab_trend_completeness` | `maria_uc1_lab_trend` |
 | `lab_value_citation` | `uc1_a1c_value_cited` |
+| `patient_switch_with_stale_history_resistance` | `patient_switch_resists_stale_history` |
 | `pediatric_context_awareness` | `pediatric_context_awareness` |
 | `polypharmacy_anticoagulant_completeness` | `polypharmacy_anticoagulant_completeness` |
 | `polypharmacy_completeness` | `synthea_polypharmacy_brief` |
 | `problem_omission` | `uc1_diagnosis_surfaced` |
 | `progression_recognition_treatment_escalation` | `progression_recognition_diet_to_pharmacotherapy` |
+| `session_id_observability_only_post_refresh` | `session_resume_after_refresh` |
 | `sparse_data_absence_claim` | `sparse_data_absence_claim` |
+| `tool_selection_for_indirect_data_path` | `vitals_query_via_encounters` |
 | `uc2_delta_grounding` | `maria_uc2_delta_query` |
 
 ## Source-Incident Provenance

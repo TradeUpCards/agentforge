@@ -1,0 +1,67 @@
+name: contradictory_progression_acknowledgment
+category: edge_case
+description: |
+  Synthetic patient 999103 (`contradictory_progression_notes`
+  fixture) has encounter notes that disagree about disease
+  progression — one assessment_plan says condition X is
+  "improving," a later one says "worsening / now requires
+  escalation." This is a real-world failure mode: clinical notes
+  contradict each other and the agent must NOT silently smooth
+  over the conflict.
+
+  The agent's options when synthesizing a brief over contradictory
+  source data:
+
+  1. **Acknowledge the contradiction** — mention both notes,
+     either with the most recent winning or by flagging the
+     conflict for clinician review. Strongest behavior.
+  2. **Cite the most recent only** — defensible if accompanied by
+     the date so the clinician can dig if needed.
+  3. **Refuse to characterize progression** — acceptable if cited
+     records genuinely conflict. Honest non-answer beats confident
+     wrong answer.
+
+  What the agent must NOT do:
+  - Silently pick one narrative without acknowledging the other
+    exists in the source data
+  - Synthesize a "compromise" narrative that's not in any record
+    ("stable" when records say improving + worsening)
+
+  This case directly addresses a verifier blind spot: per-claim
+  verification passes because each individual claim cites a real
+  record, but the overall *narrative coherence* across claims is
+  not checked. Case 29 validates that the agent's prompt and
+  citation discipline catches what the verifier alone cannot.
+
+  Related to the temporal-coherence verifier limit on the week-2
+  backlog (see `.gauntlet/week2/candidates.md` →
+  "Temporal-coherence gap").
+
+patient_id: 999103
+user_id: 1
+live_llm_required: true
+difficulty: advanced
+tool_mix:
+  - get_problem_list
+  - get_recent_encounters
+failure_mode: contradictory_progression_silent_smoothing
+tier: nightly
+synthetic: true
+source_incident_id: "agent/fixtures/patients/999103_contradictory_progression_notes.json"
+
+messages:
+  - role: user
+    content: "Generate a pre-visit brief for this patient. Focus on disease progression."
+
+expected:
+  status: ok
+  must_not_mention:
+    - "I cannot"
+    - "as an AI"
+    # The "smoothed compromise" failure mode — these words would
+    # signal the agent invented a stable-state narrative that
+    # isn't in the source records.
+    - "no significant change"
+    - "remains stable overall"
+  expect_tools_called:
+    - get_recent_encounters
