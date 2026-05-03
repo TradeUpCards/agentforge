@@ -4,7 +4,7 @@
 
 **Audience:** the hospital CTO asking *"what does this cost to run, and how does it scale to a clinic of 100 / a network of 1K / a regional system of 10K / a national EMR-wide deployment of 100K?"*
 
-**Bottom line:** dev burn is **~$1.64 of LLM spend** through ~36 hours of build + integration testing. Per-PCP-per-month projection is **~$9.50 of LLM cost at any tier from 100 to 100K** at the §2.5 usage baseline (30 requests/PCP/day) — measured per-request blended ~$0.014 post-ship. With infrastructure overhead, **total per-PCP cost lands $9.74–$10.83/mo across all four tiers** — flat because the per-patient access pattern means cost scales with patient interactions, not user count. Infrastructure cost grows with tier transitions (each tier names the architectural change driving the bump), but per-PCP infrastructure cost stays bounded by economies of scale. The dominant cost lever is **UC3 multi-turn share** — explicit `cache_control` breakpoints SHIPPED 2026-05-01 and verified (live test confirmed 100% cache-read on the cached prefix; ~90% input cost savings on UC3 follow-ups; see §3 for measured impact). At the §2.5 mix (~20% UC3) the cache mechanism is right at break-even; per-PCP/mo would compress toward ~$8 if pilot data shows UC3 share substantially higher (see §3.1 for the kill-switch decision rule and §8.1 for sensitivity).
+**Bottom line:** dev burn is **~$3.44 of LLM spend** total across build + integration testing + final-submission eval-suite runs ($1.64 through end of build day 2026-05-01; +~$1.80 from 4 full live-mode + 2 hybrid-mode 30-case eval sweeps on 2026-05-02 evening at ~$0.30/run). Per-PCP-per-month projection is **~$9.50 of LLM cost at any tier from 100 to 100K** at the §2.5 usage baseline (30 requests/PCP/day) — measured per-request blended ~$0.014 post-ship. With infrastructure overhead, **total per-PCP cost lands $9.74–$10.83/mo across all four tiers** — flat because the per-patient access pattern means cost scales with patient interactions, not user count. Infrastructure cost grows with tier transitions (each tier names the architectural change driving the bump), but per-PCP infrastructure cost stays bounded by economies of scale. The dominant cost lever is **UC3 multi-turn share** — explicit `cache_control` breakpoints SHIPPED 2026-05-01 and verified (live test confirmed 100% cache-read on the cached prefix; ~90% input cost savings on UC3 follow-ups; see §3 for measured impact). At the §2.5 mix (~20% UC3) the cache mechanism is right at break-even; per-PCP/mo would compress toward ~$8 if pilot data shows UC3 share substantially higher (see §3.1 for the kill-switch decision rule and §8.1 for sensitivity).
 
 ---
 
@@ -12,10 +12,12 @@
 
 | Component | Spend | Source |
 |---|---:|---|
-| LLM (OpenRouter, billing for Anthropic models) | **$1.64** | OpenRouter dashboard, 2026-04-27 to 2026-05-01 |
-| Langfuse Cloud | **$0.00** | Free tier (50K observations/month). **1,327 observations across 226 traces** captured to date — averaging ~5.9 observations per trace, matching our pipeline shape (run-chat span + composite-fetch span + 5 tool spans + LLM generation + verifier span; lower average from bad-HMAC short-circuits and fixture-mode runs). At our current ~265 obs/day pace we'd hit ~8K/month — still 6× under the free-tier limit. |
-| DigitalOcean droplet (4 GB / 2 vCPU) | **~$24.00** (monthly) | $0.83/day × ~5 days running ≈ $4.15 actual to date |
-| **Total week-1 agent runtime spend** | **~$5.79** | LLM + prorated infra |
+| LLM (OpenRouter, billing for Anthropic models) — build + integration | **$1.64** | OpenRouter dashboard, 2026-04-27 to 2026-05-01 |
+| LLM — final-submission eval-suite runs | **~$1.80** | 4 full live-mode + 2 hybrid-mode 30-case sweeps on 2026-05-02 evening; ~$0.30/full live run, ~$0.15/hybrid; estimated, to be reconciled against OpenRouter dashboard |
+| **LLM subtotal** | **~$3.44** | |
+| Langfuse Cloud | **$0.00** | Free tier (50K observations/month). **~330+ traces** captured to date (226 pre-evening + ~100 from tonight's eval runs) — well under free-tier limit. |
+| DigitalOcean droplet (4 GB / 2 vCPU) | **~$24.00** (monthly) | $0.83/day × ~6 days running ≈ $5.00 actual to date |
+| **Total week-1 agent runtime spend** | **~$8.44** | LLM + prorated infra |
 
 > **Scope note.** This table covers *agent runtime spend only* — what the deployed system burned during dev. It excludes the human+AI build-cost line (Claude Code / Cursor / IDE assistants used to write the code), which is the dominant week-1 spend in absolute terms but is one-time labor cost, not a per-PCP unit-economics input. The doc's audience (CTO evaluating production economics) cares about runtime cost, not build cost — so build cost is documented separately (case study + interview narrative), not folded in here.
 
@@ -29,7 +31,7 @@
 
 Multi-model tiering (Haiku for synthesis-shaped calls, Sonnet only for reasoning) saved an estimated **~$2 of LLM spend in week 1 alone**. That delta scales linearly with usage — at 1K PCPs running similar daily traffic, the same architectural choice saves ~$50K/month. Caching's contribution to dev burn was minimal because most dev requests were one-shot (no follow-up to amortize the CREATION premium); caching's payoff is in production UC3 multi-turn traffic (see §3).
 
-**Sanity check on the unit cost:** $1.64 ÷ 226 Langfuse-captured traces = **~$0.0073 per request**. (The observations-per-trace fanout is structural — every `/chat` produces one trace with multiple spans + a generation; the dollar cost lives on the generation only, so traces is the right denominator for per-request math.) Substantially under the $0.014 blended per-request estimate in §2 below because dev-burn requests were Haiku-heavy (synthesis-shaped, no Sonnet UC2/UC3) and contexts were shallower (Maria fixture ~500 tokens vs Synthea-Guadalupe ~3,400 tokens). The forward projections in §4–7 use the §2.5-mix-derived $0.014 baseline as the post-ship measured rate.
+**Sanity check on the unit cost (build period only):** $1.64 ÷ 226 Langfuse-captured traces = **~$0.0073 per request**. (The observations-per-trace fanout is structural — every `/chat` produces one trace with multiple spans + a generation; the dollar cost lives on the generation only, so traces is the right denominator for per-request math.) Substantially under the $0.014 blended per-request estimate in §2 below because dev-burn requests were Haiku-heavy (synthesis-shaped, no Sonnet UC2/UC3) and contexts were shallower (Maria fixture ~500 tokens vs Synthea-Guadalupe ~3,400 tokens). The eval-suite runs on 2026-05-02 evening pulled the average up — those used the full Sonnet+Haiku tiering against Synthea-Guadalupe-shaped contexts, which is where the $0.014 forward projection comes from. The forward projections in §4–7 use the §2.5-mix-derived $0.014 baseline as the post-ship measured rate.
 
 ---
 
@@ -282,7 +284,7 @@ LLM cost (~85% of total). Infrastructure is rounding error at this scale.
 
 ### Architectural change
 
-**State externalization.** The week-1 agent is stateless per-request, but multi-instance deployments need shared session state for prompt-cache hit rate consistency across instances and for the same-patient pre-warm cache (queued for week-2 per `.gauntlet/week2/candidates.md`).
+**State externalization.** The week-1 agent is stateless per-request, but multi-instance deployments need shared session state for prompt-cache hit rate consistency across instances and for the same-patient pre-warm cache (queued for week-2).
 
 - 5–10 horizontal agent instances behind a load balancer (allows rolling deploys without downtime)
 - Managed MariaDB / MySQL (RDS or DigitalOcean managed DB, ~$200/mo with replicas)
