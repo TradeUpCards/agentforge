@@ -15,7 +15,7 @@ pydantic>=2.5.0
 python-dotenv>=1.0.0
 
 # DB driver (direct DB access for v1; FHIR is week-2)
-PyMySQL>=1.1.0
+PyMySQL>=1.1.3
 cryptography>=42.0.0  # required by PyMySQL for some MariaDB auth modes
 
 # Observability
