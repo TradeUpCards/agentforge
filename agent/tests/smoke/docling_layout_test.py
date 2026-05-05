@@ -57,6 +57,15 @@ def _docling_available() -> bool:
     not _docling_available(),
     reason="Docling not installed. Run inside agent Docker container or install docling>=2.0.0.",
 )
+@pytest.mark.xfail(
+    sys.platform == "win32",
+    reason=(
+        "Docling std::bad_alloc / paging-file exhaustion on repeated in-process "
+        "ML model loads (Windows). Docker (Linux) is the authoritative smoke "
+        "environment. Same guard as test_docling_multipage_tracking."
+    ),
+    strict=False,
+)
 def test_docling_produces_nonzero_distinct_bboxes() -> None:
     """Layout extraction returns blocks with real, distinct bounding boxes.
 
@@ -75,6 +84,7 @@ def test_docling_produces_nonzero_distinct_bboxes() -> None:
         doc_ref_id=_DOC_REF_ID,
         doc_type=_DOC_TYPE,
         pdf_path=_FIXTURE_PDF,
+        stage1_only=True,  # Stage-2 Haiku extraction is not under test here
     )
 
     # Basic document structure
@@ -170,6 +180,7 @@ def test_docling_multipage_tracking() -> None:
         doc_ref_id=_DOC_REF_ID,
         doc_type=_DOC_TYPE,
         pdf_path=_FIXTURE_PDF,
+        stage1_only=True,  # Stage-2 Haiku extraction is not under test here
     )
 
     assert doc.page_count >= 2, (
