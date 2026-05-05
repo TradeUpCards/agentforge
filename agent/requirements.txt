@@ -27,6 +27,12 @@ langfuse>=2.40.0
 # Fallback: Mistral OCR API per W2_ARCHITECTURE.md §2.3 if install is blocked.
 docling>=2.0.0
 
+# Hybrid RAG — Stage-3a (W2_ARCHITECTURE.md §4.1, §6.1)
+qdrant-client>=1.10.0            # Vector DB client (Qdrant in Docker, default port 6333)
+sentence-transformers>=3.0.0     # all-MiniLM-L6-v2 embeddings + BAAI reranker fallback
+rank-bm25>=0.2.2                 # BM25 keyword retriever (in-memory, no service needed)
+cohere>=5.0.0                    # Cohere Rerank API (primary reranker; gated by COHERE_API_KEY)
+
 # Testing
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

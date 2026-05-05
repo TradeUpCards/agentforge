@@ -182,6 +182,23 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+  # W2 Stage-3a: Qdrant vector DB for hybrid RAG guideline retrieval.
+  # W2_ARCHITECTURE.md §6.1 (Qdrant choice), §6.3 (retrieval pipeline).
+  # After container starts, run: python -m agent.corpus.ingest
+  qdrant:
+    restart: unless-stopped
+    image: qdrant/qdrant:v1.10.0
+    ports:
+    - "${QDRANT_PORT:-6333}:6333"
+    - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+    - qdrantvolume:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:6333/healthz"]
+      start_period: 10s
+      interval: 30s
+      timeout: 5s
+      retries: 3
 volumes:
   databasevolume: {}
   assetvolume: {}
@@ -194,3 +211,4 @@ volumes:
   logvolume: {}
   couchdbvolume: {}
   mailpitvolume: {}
+  qdrantvolume: {}

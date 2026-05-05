@@ -33,6 +33,7 @@ import pymysql
 import pymysql.cursors
 from langfuse import get_client, observe
 
+from ._phi_scrubber import mask_observability_patterns
 from ._validators import validate_no_real_pii
 from .config import get_settings
 from .schemas import CitationStrength, RetrievedRecord
@@ -44,6 +45,35 @@ from .schemas import CitationStrength, RetrievedRecord
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "name": "search_guidelines",
+        "description": (
+            "Search the clinical-guideline corpus for evidence relevant to a "
+            "clinical query. Returns up to top_k guideline chunks with source "
+            "metadata suitable for constructing Citation(source_type='guideline') "
+            "objects. Use this tool to ground recommendations in published "
+            "clinical evidence (ADA, JNC8, ACC-AHA, USPSTF, etc.). "
+            "Cite results using chunk_id as source_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Clinical question or concept to search for "
+                        "(e.g. 'A1c target type 2 diabetes', 'metformin CKD eGFR')."
+                    ),
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of chunks to return (default 5, max 10).",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    },
     {
         "name": "get_problem_list",
         "description": (
@@ -132,13 +162,40 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> list[Retri
 
     Returns a list of RetrievedRecord. An empty list is a valid "no records
     found" response per ARCHITECTURE.md §2.6 (explicit absence).
+
+    search_guidelines is dispatched before patient-sentinel logic because it
+    does not take a patient_id — it is a corpus lookup, not a patient record
+    lookup.  The result is wrapped in a RetrievedRecord so the caller sees a
+    uniform return type.
     """
     settings = get_settings()
     lf = get_client()
+
+    # Fix #1 (obs-sec): For search_guidelines the raw tool_input.query is a
+    # clinician's free-text question which may be PHI-adjacent (patient name,
+    # MRN, history).  Log only structural metadata — query length and top_k —
+    # never the raw query string.  All other tools carry patient_id (already
+    # in the audit trail) so the existing behavior is preserved there.
+    if tool_name == "search_guidelines":
+        span_input = {
+            "tool_name": tool_name,
+            "query_len": len(str(tool_input.get("query", ""))),
+            "top_k": tool_input.get("top_k", 5),
+        }
+    else:
+        span_input = {"tool_name": tool_name, "params": tool_input}
+
     lf.update_current_span(
-        input={"tool_name": tool_name, "params": tool_input},
+        input=span_input,
         metadata={"data_mode": "fixture" if settings.use_fixture_data else "live"},
     )
+
+    # Route search_guidelines before patient sentinel logic.
+    if tool_name == "search_guidelines":
+        records = _execute_search_guidelines(tool_input)
+        lf.update_current_span(output={"record_count": len(records)})
+        return records
+
     # Sentinel patient_ids fire independently of data mode so eval
     # cases targeting them (06_empty_records, 08_prompt_injection,
     # 12_sparse_data and any future JSON-backed fixtures) work whether
@@ -400,6 +457,129 @@ def _fixture_encounters() -> list[RetrievedRecord]:
             },
         ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# search_guidelines — hybrid RAG tool (Stage-3a)
+# ---------------------------------------------------------------------------
+
+
+def search_guidelines(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    """Run hybrid RAG search and return a JSON-serializable list of guideline chunks.
+
+    This is the public function the supervisor and tests call directly.
+    It is intentionally synchronous (pure CPU / local-network I/O) and
+    has no global state or implicit kwargs so it can be cleanly wrapped
+    as a LangGraph node in Stage-3b.
+
+    Returns:
+        list[dict] with keys:
+            chunk_id          — stable identifier (§4.3 source_id)
+            section           — guideline section anchor (§4.3 page_or_section)
+            source_url        — canonical public URL of the source
+            source_attribution — human-readable attribution
+            body              — full chunk body (~200-500 words)
+            leading_excerpt   — body[:150].strip(); use as §4.3 quote_or_value
+                                when a sentence-level citation is not yet extracted.
+                                Stage-3b TODO: extract the most-relevant sentence.
+            score             — reranker score (float) or None if unavailable
+
+    Citation contract (W2_ARCHITECTURE.md §4.3):
+        source_type:       "guideline"
+        source_id:         chunk_id
+        page_or_section:   section
+        field_or_chunk_id: chunk_id
+        quote_or_value:    leading_excerpt (Stage-3b: sentence-level extraction)
+    """
+    top_k = min(max(int(top_k), 1), 10)  # clamp to [1, 10]
+    try:
+        from agent.retrieval.hybrid import hybrid_search  # noqa: PLC0415
+
+        chunks = hybrid_search(query, top_k_final=top_k)
+    except Exception as exc:
+        # Fix #2 (obs-sec): scrub exception message before logging — it may
+        # echo the query string which is PHI-adjacent.  Only the exception
+        # class name is safe to log without scrubbing.
+        scrubbed = mask_observability_patterns(str(exc))
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "search_guidelines hybrid_search failed: %s — %s",
+            type(exc).__name__,
+            scrubbed,
+        )
+        return []
+
+    return [
+        {
+            "chunk_id": c.chunk_id,
+            "section": c.section,
+            "source_url": c.source_url,
+            "source_attribution": c.source_attribution,
+            # Fix #7: renamed from 'quote' to 'body' (full text) +
+            # 'leading_excerpt' (citation-shaped truncation, ≤150 chars).
+            "body": c.body,
+            "leading_excerpt": c.body[:150].strip(),
+            # score is not surfaced here; hybrid_search() returns chunks in
+            # rerank-score order but drops per-chunk scores from the public
+            # interface.  Stage-3b may thread scores through if needed.
+            "score": None,
+        }
+        for c in chunks
+    ]
+
+
+def _execute_search_guidelines(tool_input: dict[str, Any]) -> list[RetrievedRecord]:
+    """Internal dispatcher: search_guidelines → list[RetrievedRecord].
+
+    Wraps the search_guidelines results in RetrievedRecord objects so the
+    execute_tool return type is uniform.  The RetrievedRecord.fields dict
+    carries the full §4.3 citation fields so downstream code can construct
+    a Citation(source_type='guideline', ...) without a second lookup.
+
+    Fix #2 (obs-sec): wraps in try/except and scrubs any exception message
+    before re-raising so the raw query string cannot leak through tracebacks.
+    fix #6: adds the missing quote_or_value field (leading_excerpt of body).
+    """
+    query = str(tool_input.get("query", "")).strip()
+    top_k = int(tool_input.get("top_k", 5))
+    if not query:
+        return []
+
+    try:
+        raw = search_guidelines(query, top_k=top_k)
+        records: list[RetrievedRecord] = []
+        for item in raw:
+            records.append(
+                RetrievedRecord(
+                    table="guideline_corpus",
+                    record_id=item["chunk_id"],
+                    citation_strength=CitationStrength.STRUCTURED,
+                    fields={
+                        # §4.3 citation fields — all required for Citation construction.
+                        "source_type": "guideline",
+                        "source_id": item["chunk_id"],
+                        "page_or_section": item["section"],
+                        "field_or_chunk_id": item["chunk_id"],
+                        # Fix #6: quote_or_value is the leading excerpt (≤150 chars).
+                        # The full body is also stored for context.
+                        "quote_or_value": item["leading_excerpt"],
+                        # Convenience fields.
+                        "chunk_id": item["chunk_id"],
+                        "section": item["section"],
+                        "source_url": item["source_url"],
+                        "source_attribution": item["source_attribution"],
+                        "body": item["body"],
+                        "score": item["score"],
+                    },
+                )
+            )
+        return records
+    except Exception as exc:
+        # Fix #2 (obs-sec): scrub exception message — the original exception's
+        # args may echo the query string (PHI-adjacent).  Drop __cause__ with
+        # `from None` so the traceback does not re-expose the raw message.
+        scrubbed = mask_observability_patterns(str(exc))
+        raise RuntimeError(f"search_guidelines tool failed: {scrubbed}") from None
 
 
 # ---------------------------------------------------------------------------
