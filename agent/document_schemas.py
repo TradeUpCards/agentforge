@@ -317,3 +317,56 @@ class DoclingDoc(BaseModel):
             if block.block_id == block_id:
                 return block
         return None
+
+
+# ---------------------------------------------------------------------------
+# GuidelineChunk — corpus unit for hybrid RAG (Stage-3a)
+# ---------------------------------------------------------------------------
+
+
+class GuidelineChunk(BaseModel):
+    """A single clinical-guideline chunk from the hybrid RAG corpus.
+
+    Each chunk corresponds to one markdown file in agent/corpus/guidelines/.
+    The chunk_id is stable across re-ingestion and is used as the citation
+    anchor in the §4.3 citation contract:
+
+        {
+            "source_type":       "guideline",
+            "source_id":         chunk_id,           # e.g. "ada-2024-s6-1-chunk-1"
+            "page_or_section":   section,             # e.g. "S6.1"
+            "field_or_chunk_id": chunk_id,
+            "quote_or_value":    <excerpt from body>
+        }
+
+    No patient data.  Corpus is public-domain clinical guidance only
+    (W2_ARCHITECTURE.md §4.2, §8.3).
+
+    Product-architect review requested before any schema-breaking change
+    to this model (per Stage-3a task constraints).
+    """
+
+    chunk_id: str = Field(
+        description=(
+            "Stable chunk identifier, e.g. 'ada-2024-s6-1-chunk-1'. "
+            "Used as source_id in §4.3 guideline citations."
+        )
+    )
+    section: str = Field(
+        description="Section anchor from the source guideline, e.g. 'S6.1'."
+    )
+    source_url: str = Field(
+        description="Canonical public URL of the source guideline document."
+    )
+    source_attribution: str = Field(
+        description=(
+            "Human-readable attribution for the chunk source (publication, "
+            "author, license)."
+        )
+    )
+    body: str = Field(
+        description=(
+            "Public-domain clinical guideline text (~200-500 words). "
+            "No PHI. No copyrighted verbatim blocks."
+        )
+    )

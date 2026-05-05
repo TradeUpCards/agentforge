@@ -23,7 +23,11 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY . /app/agent/
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    # Sentence-transformers / HuggingFace model cache (all-MiniLM-L6-v2,
+    # BAAI reranker).  Persisted via a named Docker volume so the ~80 MB
+    # model download survives container restarts.  W2_ARCHITECTURE.md §4.1.
+    HF_HOME=/app/.hf_cache
 
 EXPOSE 8000
 
