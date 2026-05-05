@@ -324,9 +324,8 @@ async def _run_haiku_extraction(
 
     llm_client = build_llm_client()
 
-    # TODO(stage-3): replace with lf.start_span("haiku_schema_extraction") when
-    # supervisor/worker graph is wired (see W2_ARCHITECTURE.md §3.3 trace shape).
     # Langfuse span metadata: structural only, no PHI.
+    # Stage-3b: span opened below with lf.start_span("haiku_schema_extraction").
     span_meta: dict[str, Any] = {
         "doc_type": doc_type,
         "n_blocks": len(doc.blocks),
@@ -337,6 +336,19 @@ async def _run_haiku_extraction(
 
     latency_ms = 0
     t0 = time.monotonic()
+    # Stage-3b: open a named span for haiku schema extraction per §3.3 trace shape.
+    # Uses lf.start_observation() (returns a span object; call .update() + .end()
+    # manually).  The installed Langfuse version does not expose start_span();
+    # start_as_current_observation() is its context-manager form but requires
+    # synchronous context manager semantics incompatible with the async try/except
+    # structure here — so we use start_observation() with explicit .end() calls.
+    # Metadata is structural only — no PHI, no raw doc text, no extracted values.
+    haiku_span_obj = None
+    try:
+        haiku_span_obj = lf.start_observation(name="haiku_schema_extraction", metadata=span_meta)
+    except Exception:
+        pass
+
     try:
         response = await llm_client.create(
             model=_HAIKU_MODEL,
@@ -349,10 +361,14 @@ async def _run_haiku_extraction(
         latency_ms = int((time.monotonic() - t0) * 1000)
         # Scrub exception message: SDK errors may echo request-body fragments.
         scrubbed_msg = mask_observability_patterns(str(sdk_exc))
-        lf.update_current_trace(
-            name="haiku_schema_extraction",
-            metadata={**span_meta, "latency_ms": latency_ms, "error": "sdk_error"},
-        )
+        if haiku_span_obj is not None:
+            try:
+                haiku_span_obj.update(
+                    metadata={**span_meta, "latency_ms": latency_ms, "error": "sdk_error"},
+                )
+                haiku_span_obj.end()
+            except Exception:
+                pass
         raise RuntimeError(
             f"Haiku SDK call failed for doc_type={doc_type}: {scrubbed_msg}"
         ) from None
@@ -371,24 +387,26 @@ async def _run_haiku_extraction(
         inner = lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:]
         response_text = "\n".join(inner).strip()
 
-    # Emit token/cache usage to Langfuse in a single call — no PHI, structural only.
-    # (Collapsed from two calls: the earlier try/finally draft emitted latency_ms
-    # on the way out, then overwrote it here. Single call avoids the overwrite.)
+    # Emit token/cache usage to Langfuse span — no PHI, structural only.
     usage = response.usage
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
     cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    lf.update_current_trace(
-        name="haiku_schema_extraction",
-        metadata={
-            **span_meta,
-            "latency_ms": latency_ms,
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "cache_read_input_tokens": cache_read,
-            "cache_creation_input_tokens": cache_create,
-            "stop_reason": response.stop_reason,
-        },
-    )
+    if haiku_span_obj is not None:
+        try:
+            haiku_span_obj.update(
+                metadata={
+                    **span_meta,
+                    "latency_ms": latency_ms,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_create,
+                    "stop_reason": response.stop_reason,
+                },
+            )
+            haiku_span_obj.end()
+        except Exception:
+            pass
 
     # Parse the JSON response into the appropriate schema.
     # Fix #1: json.JSONDecodeError carries the raw response text in its .doc

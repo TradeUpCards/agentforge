@@ -1,20 +1,26 @@
 """Live integration test for the reranker module.
 
-Gated by COHERE_API_KEY.  Verifies:
+Marked `@pytest.mark.live` — SKIPPED by default unless pytest is invoked
+with `--live`.  This prevents accidental API cost in CI.
+
+Verifies:
   1. Cohere Rerank API returns non-empty rerank scores.
   2. BAAI fallback path produces equivalent shape (list of (chunk, float) tuples).
 
-NOT run in CI (no keys).  Run locally:
-    pytest agent/tests/integration/test_rerank_live.py -v -s
+Run locally:
+    pytest agent/tests/integration/test_rerank_live.py --live -v -s
 
 W2_ARCHITECTURE.md §4.1 (reranker in retrieval pipeline).
 """
 
 from __future__ import annotations
 
-import os
-
 import pytest
+
+# All tests in this file make real API calls (Cohere) or require optional
+# ML dependencies.  The --live marker gate in conftest.py skips them unless
+# the caller opts in with `pytest --live`.
+pytestmark = pytest.mark.live
 
 from agent.document_schemas import GuidelineChunk
 
@@ -42,10 +48,6 @@ _TEST_QUERY = "metformin A1c target type 2 diabetes"
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    os.getenv("COHERE_API_KEY") is None,
-    reason="COHERE_API_KEY not set — live Cohere reranker test requires a real key",
-)
 def test_cohere_rerank_returns_scores() -> None:
     """Cohere Rerank API returns non-empty list with float relevance scores."""
     from agent.retrieval.reranker import _rerank_cohere
