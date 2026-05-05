@@ -77,6 +77,7 @@ The week-1 brief lists 8 required deliverables. Each maps to a file in this repo
 | Doc | Purpose |
 |---|---|
 | [`DECISIONS.md`](./DECISIONS.md) | Architectural decisions log — every load-bearing choice with the *why*, the *tradeoff*, and an inline `> Updated <date>` callout when newer information changes the answer. |
+| [`W2_ARCHITECTURE.md`](./W2_ARCHITECTURE.md) | **Week 2 architecture** — multimodal evidence agent. Two-stage document extraction (Docling + Haiku), LangGraph supervisor + 2 workers, Qdrant hybrid RAG, 50-case PR-blocking CI gate. Companion to `ARCHITECTURE.md` (which is the Week-1 baseline). |
 | [`PERFORMANCE.md`](./PERFORMANCE.md) | EXPLAIN analysis on the 5 tool queries; one load-bearing fix shipped (full-scan on `forms` table → 4-row indexed lookup). |
 | [`SLO.md`](./SLO.md) | Service-level objectives + alerting plan — 5 SLOs (availability, verifier pass rate, citation match rate, latency P95, tool failure rate) with named thresholds + page-vs-ticket triage. |
 | [`RUNBOOK.md`](./RUNBOOK.md) | Backup, restore, and on-call runbook — what gets backed up at what cadence, three restore scenarios (table / DB / host loss) with RTO targets, monthly restore-drill cadence. |
