@@ -27,6 +27,9 @@ langfuse>=2.40.0
 # Fallback: Mistral OCR API per W2_ARCHITECTURE.md §2.3 if install is blocked.
 docling>=2.0.0
 
+# Multi-agent graph — Stage-3b (W2_ARCHITECTURE.md §3)
+langgraph>=0.2.0
+
 # Hybrid RAG — Stage-3a (W2_ARCHITECTURE.md §4.1, §6.1)
 qdrant-client>=1.10.0            # Vector DB client (Qdrant in Docker, default port 6333)
 sentence-transformers>=3.0.0     # all-MiniLM-L6-v2 embeddings + BAAI reranker fallback
