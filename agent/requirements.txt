@@ -21,6 +21,12 @@ cryptography>=42.0.0  # required by PyMySQL for some MariaDB auth modes
 # Observability
 langfuse>=2.40.0
 
+# Document layout extraction (W2 Stage 1 — two-stage pipeline)
+# Self-hosted; PHI never leaves the container at OCR stage (W2_ARCHITECTURE.md §2.3).
+# Docling pulls torch + transformers for its ML models on first install.
+# Fallback: Mistral OCR API per W2_ARCHITECTURE.md §2.3 if install is blocked.
+docling>=2.0.0
+
 # Testing
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

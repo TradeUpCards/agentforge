@@ -8,6 +8,7 @@ Architectural references:
 - ARCHITECTURE.md §3.2 (LLM emission contract — structured-first)
 - ARCHITECTURE.md §3.6 (verifier placement, atomic strip, 30% rule)
 - prd.md §5 (chat-shaped contract decisions)
+- W2_ARCHITECTURE.md §7.3 (Citation extension — bbox / page / visual-overlay)
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+from agent.document_schemas import BBox
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +41,68 @@ class Message(BaseModel):
 # ---------------------------------------------------------------------------
 # Citation primitives
 # ---------------------------------------------------------------------------
+
+
+class Citation(BaseModel):
+    """Machine-readable citation attached to every clinical claim.
+
+    W2_ARCHITECTURE.md §7.3 — extends Week 1's source_record_ids pattern
+    to a richer object that can represent patient-record facts, guideline
+    evidence, and extracted-document facts distinctly. The discriminator
+    (source_type) prevents the answer model from blurring the three flavors.
+
+    bbox is populated only for extracted_document citations, where Docling
+    supplied real page-coordinate bounding boxes. It is never filled by an
+    LLM — coordinates always come from the layout engine.
+
+    Guideline evidence cites:
+        source_id          → guideline chunk_id (e.g. "ada-2024-s2-3-chunk-7")
+        page_or_section    → guideline section (e.g. "S2.3")
+        field_or_chunk_id  → stable chunk ID for RAG roundtrip
+        quote_or_value     → the specific text quoted from the guideline
+
+    Patient record facts cite:
+        source_id          → OpenEMR table:id (e.g. "prescriptions:573")
+        field_or_chunk_id  → field name within the record
+        quote_or_value     → the value cited
+
+    Extracted document facts cite:
+        source_id          → FHIR DocumentReference ID
+        page_or_section    → page number (e.g. "2")
+        field_or_chunk_id  → Docling block_id
+        quote_or_value     → the extracted text from that block
+        bbox               → real BBox from Docling layout engine
+    """
+
+    source_type: Literal["patient_record", "guideline", "extracted_document"]
+    source_id: str = Field(
+        description=(
+            "OpenEMR table:id for patient_record; "
+            "guideline corpus chunk_id for guideline; "
+            "FHIR DocumentReference ID for extracted_document."
+        )
+    )
+    page_or_section: str | None = Field(
+        default=None,
+        description="Page number or section identifier (guidelines / multi-page docs).",
+    )
+    field_or_chunk_id: str = Field(
+        description=(
+            "Field name for patient_record; "
+            "stable chunk_id for guideline; "
+            "Docling block_id for extracted_document."
+        )
+    )
+    quote_or_value: str = Field(
+        description="The specific text or value from the source that grounds this claim."
+    )
+    bbox: BBox | None = Field(
+        default=None,
+        description=(
+            "Page-coordinate bounding box from Docling. Populated only for "
+            "extracted_document citations. Never filled by an LLM."
+        ),
+    )
 
 
 class CitationStrength(str, Enum):
