@@ -29,6 +29,7 @@ use OpenEMR\Common\Utils\ValidationUtils;
 use OpenEMR\Common\Uuid\UuidRegistry;
 use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\Events\PatientDocuments\PatientDocumentStoreOffsite;
+use OpenEMR\Modules\ClinicalCopilot\Events\DocumentCreatedEvent;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 
 class Document extends ORDataObject
@@ -1129,6 +1130,40 @@ class Document extends ORDataObject
         if (is_numeric($this->get_id()) && is_numeric($category_id)) {
             $sql = "REPLACE INTO categories_to_documents SET category_id = ?, document_id = ?";
             $this->_db->Execute($sql, [$category_id, $this->get_id()]);
+        }
+
+        // Dispatch a post-persist event so module subscribers (e.g. the
+        // Clinical Co-Pilot auto-extraction subscriber) can react to the new
+        // document without polling the database.  The event carries only
+        // structural identifiers — no file bytes, no PHI field values.
+        $docId = (int) $this->get_id();
+        $ownerId = (int) ($this->owner ?: 0);
+        if ($docId > 0) {
+            // Wrap dispatch in try/catch so a misbehaving subscriber cannot
+            // cause document persistence to fail.  Per W2_ARCHITECTURE.md §2.1
+            // the event is fire-and-forget — subscribers run side-effect work
+            // (e.g. agent extraction) and must not be allowed to roll back the
+            // OpenEMR-native document save.
+            try {
+                $this->eventDispatcher->dispatch(
+                    new DocumentCreatedEvent(
+                        documentId: $docId,
+                        patientId:  (int) $patient_id,
+                        categoryId: (int) $category_id,
+                        ownerId:    $ownerId,
+                    ),
+                    DocumentCreatedEvent::EVENT_NAME,
+                );
+            } catch (\Throwable $e) {
+                // Log structural data only — no exception message echo (a
+                // subscriber's exception could carry arbitrary content).
+                error_log(sprintf(
+                    'Document::_set_category dispatch failed: doc_id=%d category_id=%d error_type=%s',
+                    $docId,
+                    (int) $category_id,
+                    get_class($e),
+                ));
+            }
         }
 
         return '';

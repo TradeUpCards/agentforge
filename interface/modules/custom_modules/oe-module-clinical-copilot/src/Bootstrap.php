@@ -19,9 +19,11 @@ declare(strict_types=1);
 
 namespace OpenEMR\Modules\ClinicalCopilot;
 
+use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\DocumentSavedSubscriber;
 use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\PageHeadingSubscriber;
 use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\PatientMenuSubscriber;
 use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\ScriptFilterSubscriber;
+use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 
 final class Bootstrap
@@ -48,6 +50,8 @@ final class Bootstrap
         $this->eventDispatcher->addSubscriber(new PatientMenuSubscriber());
         $this->eventDispatcher->addSubscriber(new ScriptFilterSubscriber());
         $this->eventDispatcher->addSubscriber(new PageHeadingSubscriber());
+        // Stage-4a: auto-extraction subscriber for lab/intake documents.
+        $this->eventDispatcher->addSubscriber(new DocumentSavedSubscriber(new AgentClient()));
     }
 
     /**

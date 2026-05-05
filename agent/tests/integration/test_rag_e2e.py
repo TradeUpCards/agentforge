@@ -89,12 +89,20 @@ def test_search_guidelines_returns_citation_shaped_results() -> None:
     reason="rank-bm25 not installed — run: pip install rank-bm25>=0.2.2",
 )
 def test_corpus_loader_returns_expected_chunk_count() -> None:
-    """Corpus loader must return all 8 guideline chunks."""
+    """Corpus loader must return all 26 guideline chunks.
+
+    Breakdown (Stage-3a + Stage-4a):
+      - 8 Tier-A guidelines (ADA / ACC-AHA / JNC8 / USPSTF) — Stage-3a baseline
+      - 8 RULE_CORPUS rules (anticoagulant, raas-hyperkalemia, allergy,
+        a1c-trajectory, egfr-decline, statin-gap, htn-trajectory, criteria) —
+        Stage-4a rule-corpus import
+      - 10 DailyMed FDA-label summaries — Stage-4a dailymed import
+    """
     from agent.corpus.loader import load_corpus
 
     chunks = load_corpus()
-    assert len(chunks) == 8, (
-        f"Expected 8 guideline chunks, got {len(chunks)}. "
+    assert len(chunks) == 26, (
+        f"Expected 26 guideline chunks, got {len(chunks)}. "
         "Did you add or remove corpus files?"
     )
     for chunk in chunks:
