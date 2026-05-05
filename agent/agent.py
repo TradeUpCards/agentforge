@@ -352,6 +352,34 @@ def verify_score_hmac(user_id: int, patient_id: int, trace_id: str, name: str, v
     return hmac.compare_digest(expected, hmac_str)
 
 
+def verify_attach_hmac(
+    user_id: int,
+    patient_id: int,
+    doc_ref_id: str,
+    doc_type: str,
+    timestamp: int,
+    file_sha256_hex: str,
+    hmac_str: str,
+    secret: str,
+) -> bool:
+    """Attach-and-extract endpoint HMAC. Payload convention (must match PHP):
+        f"{user_id}|{patient_id}|{doc_ref_id}|{doc_type}|{timestamp}|{file_sha256_hex}"
+
+    Constant-time comparison via hmac.compare_digest prevents timing attacks.
+    Returns False (fail-closed) when secret is empty — a misconfigured deploy
+    must never silently accept requests.
+    """
+    if not secret:
+        return False
+    payload = f"{user_id}|{patient_id}|{doc_ref_id}|{doc_type}|{timestamp}|{file_sha256_hex}"
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, hmac_str)
+
+
 async def record_score(
     *,
     trace_id: str,

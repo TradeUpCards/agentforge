@@ -11,16 +11,22 @@ verifies the signature before any tool runs.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
+import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from .agent import record_score, run_chat, verify_score_hmac
+from .agent import record_score, run_chat, verify_attach_hmac, verify_score_hmac
+from ._phi_scrubber import mask_observability_patterns
 from .config import get_settings
+from .document_schemas import IntakeForm, LabReport
+from .extractors import attach_and_extract_async
 from .schemas import (
     AgentResponse,
     ChatRequest,
@@ -151,6 +157,292 @@ async def score(request: ScoreRequest) -> ScoreResponse:
         comment=request.comment,
     )
     return ScoreResponse()
+
+
+# ---------------------------------------------------------------------------
+# /attach_and_extract — Stage-4a multipart ingestion endpoint
+#
+# Replay-window constant: ±300s (5 minutes), wider than the /chat endpoint's
+# 30s window to accommodate slower front-desk upload workflows where PHP and
+# Python may be separated by more network hops than a same-container chat call.
+# ---------------------------------------------------------------------------
+
+_ATTACH_HMAC_MAX_AGE_SECONDS = 300
+"""Reject /attach_and_extract requests whose signed timestamp is more than
+this many seconds off the agent's clock. 300s (5 min) is generous for
+front-desk upload flows; tighten if the PHP implementer confirms tighter
+clock sync is achievable on the deployed stack."""
+
+_SUPPORTED_DOC_TYPES = frozenset({"lab_pdf", "intake_form"})
+
+# Sentinel range re-exported for the endpoint (mirrors extractors/__init__.py).
+_SENTINEL_MIN = 999_100
+_SENTINEL_MAX = 999_199
+
+
+@app.post("/attach_and_extract", response_model=None)
+async def attach_and_extract_endpoint(
+    request: Request,
+    patient_id: int = Form(...),
+    doc_ref_id: str = Form(...),
+    doc_type: str = Form(...),
+    file: UploadFile = Form(...),
+) -> JSONResponse:
+    """Accept a scanned document (PDF/PNG), verify HMAC, run the two-stage
+    extraction pipeline (Docling layout → Haiku schema), and return the
+    structured extraction.
+
+    Security controls (mirrors /chat and /score patterns):
+    - X-OpenEMR-HMAC header verification (sha256, constant-time compare)
+    - Replay-window gate: ±300s on X-OpenEMR-Timestamp
+    - Sentinel patient_id range: 999100–999199 only
+    - doc_type allowlist: "lab_pdf" | "intake_form"
+    - Exception scrubbing via mask_observability_patterns + raise from None
+      (Stage-2 fix #1 pattern) — no raw doc text or PHI in error responses
+
+    No FHIR persistence (Thursday). No drawer rendering. No bbox overlay.
+    Extraction is dispatched directly to attach_and_extract_async() — the
+    supervisor graph is not involved in this path.
+    """
+    request_id = str(uuid.uuid4())
+    t0 = time.perf_counter()
+
+    # --- Read and verify headers before touching the multipart body. --------
+    user_id_raw = request.headers.get("X-OpenEMR-User-Id", "")
+    timestamp_raw = request.headers.get("X-OpenEMR-Timestamp", "")
+    hmac_header = request.headers.get("X-OpenEMR-HMAC", "")
+
+    # Parse user_id: must be a valid integer.
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "refused",
+                "reason": "missing_or_invalid_user_id",
+                "request_id": request_id,
+            },
+        )
+
+    # Parse timestamp.
+    try:
+        timestamp = int(timestamp_raw)
+    except (ValueError, TypeError):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "refused",
+                "reason": "missing_or_invalid_timestamp",
+                "request_id": request_id,
+            },
+        )
+
+    # --- Replay-window check (before reading file bytes). -------------------
+    now = time.time()
+    age = now - timestamp
+    if abs(age) > _ATTACH_HMAC_MAX_AGE_SECONDS:
+        logger.info(
+            "/attach_and_extract: stale timestamp rejected",
+            extra={
+                "request_id": request_id,
+                "age_seconds": int(age),
+                "doc_type": doc_type,
+            },
+        )
+        return JSONResponse(
+            status_code=401,
+            content={
+                "status": "refused",
+                "reason": "stale_timestamp",
+                "request_id": request_id,
+            },
+        )
+
+    # --- Sentinel patient_id range check. -----------------------------------
+    if not (_SENTINEL_MIN <= patient_id <= _SENTINEL_MAX):
+        logger.info(
+            "/attach_and_extract: patient_id outside sentinel range",
+            extra={
+                "request_id": request_id,
+                "patient_id_in_sentinel_range": False,
+                "doc_type": doc_type,
+            },
+        )
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "refused",
+                "reason": "patient_id_out_of_sentinel_range",
+                # Intentionally no echo of the offending pid (Stage-2 fix #2 pattern).
+                "request_id": request_id,
+            },
+        )
+
+    # --- doc_type allowlist check. ------------------------------------------
+    if doc_type not in _SUPPORTED_DOC_TYPES:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "refused",
+                "reason": "unsupported_doc_type",
+                "request_id": request_id,
+            },
+        )
+
+    # --- Read file bytes (deferred until after cheap checks pass). ----------
+    file_bytes = await file.read()
+
+    # --- Compute file hash for HMAC. ----------------------------------------
+    file_sha256_hex = hashlib.sha256(file_bytes).hexdigest()
+
+    # --- HMAC verification. -------------------------------------------------
+    settings = get_settings()
+    hmac_ok = verify_attach_hmac(
+        user_id=user_id,
+        patient_id=patient_id,
+        doc_ref_id=doc_ref_id,
+        doc_type=doc_type,
+        timestamp=timestamp,
+        file_sha256_hex=file_sha256_hex,
+        hmac_str=hmac_header,
+        secret=settings.openemr_hmac_secret,
+    )
+    if not hmac_ok:
+        logger.info(
+            "/attach_and_extract: HMAC verification failed",
+            extra={
+                "request_id": request_id,
+                "doc_type": doc_type,
+                "file_sha256_hex": file_sha256_hex,
+            },
+        )
+        return JSONResponse(
+            status_code=401,
+            content={
+                "status": "refused",
+                "reason": "invalid_signature",
+                "request_id": request_id,
+            },
+        )
+
+    # --- Dispatch extraction. -----------------------------------------------
+    # Write bytes to a temp file so attach_and_extract_async can use a Path.
+    import tempfile
+    import os as _os
+    from pathlib import Path
+
+    suffix = ".pdf" if file_bytes[:4] == b"%PDF" else ".png"
+    tmp_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = Path(tmp.name)
+
+        logger.info(
+            "/attach_and_extract: dispatching extraction",
+            extra={
+                "request_id": request_id,
+                "doc_type": doc_type,
+                "file_sha256_hex": file_sha256_hex,
+                "patient_id_in_sentinel_range": True,
+            },
+        )
+
+        result = await attach_and_extract_async(
+            patient_id=patient_id,
+            doc_ref_id=doc_ref_id,
+            doc_type=doc_type,
+            pdf_path=tmp_path,
+        )
+
+    except Exception as exc:
+        # Stage-2 fix #1 pattern: scrub exception message and break __cause__
+        # chain so no raw doc text or PHI reaches the caller.
+        scrubbed = mask_observability_patterns(str(exc))
+        logger.warning(
+            "/attach_and_extract: extraction failed",
+            extra={
+                "request_id": request_id,
+                "doc_type": doc_type,
+                "error_type": type(exc).__name__,
+                "error_scrubbed": scrubbed,
+            },
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "reason": "extraction_failed",
+                "request_id": request_id,
+            },
+        )
+    finally:
+        # Clean up temp file regardless of outcome.
+        if tmp_path is not None:
+            try:
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    # --- Build response. ----------------------------------------------------
+    extraction_dict = result.model_dump(mode="json")
+
+    # Compute derived response fields: n_blocks, n_pages, avg confidence.
+    if isinstance(result, LabReport):
+        n_blocks = len(result.results)
+        n_pages = result.extraction_metadata.page_count
+        confidences = [r.confidence for r in result.results]
+    elif isinstance(result, IntakeForm):
+        # IntakeForm doesn't have a flat results list; use source_citations count
+        # as proxy for n_blocks, and extraction_metadata for page count.
+        n_blocks = (
+            len(result.current_medications)
+            + len(result.allergies)
+            + len(result.family_history)
+        )
+        n_pages = result.extraction_metadata.page_count
+        confidences = []
+    else:
+        # DoclingDoc — shouldn't reach here (doc_type is validated above)
+        # but handle gracefully.
+        n_blocks = len(getattr(result, "blocks", []))
+        n_pages = getattr(result, "page_count", 1)
+        confidences = []
+
+    extraction_confidence_avg = (
+        sum(confidences) / len(confidences) if confidences else 0.0
+    )
+
+    latency_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "/attach_and_extract: extraction complete",
+        extra={
+            "request_id": request_id,
+            "doc_type": doc_type,
+            "n_blocks": n_blocks,
+            "n_pages": n_pages,
+            "extraction_confidence_avg": round(extraction_confidence_avg, 4),
+            "latency_ms": latency_ms,
+            "http_status": 200,
+            "patient_id_in_sentinel_range": True,
+        },
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok",
+            "doc_ref_id": doc_ref_id,
+            "doc_type": doc_type,
+            "extraction": extraction_dict,
+            "n_blocks": n_blocks,
+            "n_pages": n_pages,
+            "extraction_confidence_avg": extraction_confidence_avg,
+            "request_id": request_id,
+        },
+    )
 
 
 @app.exception_handler(HTTPException)
