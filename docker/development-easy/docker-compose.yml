@@ -92,6 +92,11 @@ services:
       OPENEMR_SETTING_SMTP_Auth: 'TRUE'
       OPENEMR_SETTING_practice_return_email_path: 'noreply@openemr.local'
       OPENEMR_SETTING_Patient_Reminder_Sender_Name: 'OpenEMR Reminders'
+      # W2 Stage-4a: Clinical Co-Pilot agent service connection.
+      # AgentClient.php reads AGENT_BASE_URL via getenv() at request time;
+      # OPENEMR_HMAC_SECRET must match the agent container's same env var.
+      AGENT_BASE_URL: http://agent:8000
+      OPENEMR_HMAC_SECRET: dev-secret-not-for-production-only-local
     depends_on:
       mysql:
         condition: service_healthy
@@ -182,6 +187,71 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+  # W2 Stage-4a: Clinical Co-Pilot Python agent service.
+  # Internal-network only — OpenEMR talks to it at http://agent:8000.
+  # W2_ARCHITECTURE.md §2.1 (two-actor workflow), §3 (multi-agent graph).
+  # First build downloads Docling layout models (~80MB) into HF_HOME volume.
+  agent:
+    restart: always
+    build:
+      context: ../../agent
+      dockerfile: Dockerfile
+    environment:
+      # Anthropic / LLM, Langfuse — intentionally NOT set here.
+      # The agent's config.py calls load_dotenv() at import time, which reads
+      # /app/agent/.env (bind-mounted from agent/.env on the host).  If we set
+      # these as empty defaults via ${VAR:-}, docker-compose injects an empty
+      # string into the container env, and load_dotenv (override=False by default)
+      # then refuses to overwrite it — silently breaking Haiku / Langfuse.
+      # Production deploy on the droplet sources these from /opt/agentforge/.env
+      # via .deploy/bootstrap.sh, which writes them as real values, not empties.
+      # HMAC must match the openemr service's OPENEMR_HMAC_SECRET above.
+      # Sourced from host shell so we can sync it on the fly with whatever
+      # openemr's running container already has set (avoids a 10-min openemr
+      # cold-start retake just to align the secret).  Pull from the running
+      # openemr container before bringing the agent up:
+      #   export OPENEMR_HMAC_SECRET=$(docker compose exec -T openemr \
+      #     printenv OPENEMR_HMAC_SECRET | tr -d '\r\n')
+      #   docker compose up -d agent
+      OPENEMR_HMAC_SECRET: ${OPENEMR_HMAC_SECRET:-}
+      # MariaDB access for W1 patient-record tools (get_problem_list,
+      # get_active_medications, etc.).  agent/config.py reads these
+      # specific env-var names — `AGENT_DB_*`, not `MYSQL_*`.  In dev we
+      # use the existing openemr user (full DB access); production
+      # bootstrap.sh provisions a read-only `agent_ro` user.
+      # AGENT_DB_PORT must be the IN-CONTAINER MySQL port (3306), not the
+      # host-side mapped port (8320 in this compose).
+      AGENT_DB_HOST: mysql
+      AGENT_DB_PORT: 3306
+      AGENT_DB_USER: openemr
+      AGENT_DB_PASS: openemr
+      AGENT_DB_NAME: openemr
+      # Fall back to fixture data if the live DB call errors — keeps the
+      # demo resilient when the dev stack hasn't been fully initialized.
+      USE_FIXTURE_DATA: "false"
+      # Qdrant (Stage-3a hybrid RAG vector path)
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      # HuggingFace model cache for sentence-transformers / Docling
+      HF_HOME: /app/.hf_cache
+      # Set true to mock LLM calls (saves API budget during dev)
+      USE_FIXTURE_LLM: ${USE_FIXTURE_LLM:-false}
+    ports:
+    - "${AGENT_PORT:-8000}:8000"
+    volumes:
+    # Bind-mount source so code edits land without rebuild
+    - ../../agent:/app/agent:rw
+    # Persist Docling / HF model cache across restarts
+    - hf_cache:/app/.hf_cache
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      start_period: 60s
+      interval: 30s
+      timeout: 5s
+      retries: 3
   # W2 Stage-3a: Qdrant vector DB for hybrid RAG guideline retrieval.
   # W2_ARCHITECTURE.md §6.1 (Qdrant choice), §6.3 (retrieval pipeline).
   # After container starts, run: python -m agent.corpus.ingest
@@ -212,3 +282,5 @@ volumes:
   couchdbvolume: {}
   mailpitvolume: {}
   qdrantvolume: {}
+  # W2 Stage-4a: HuggingFace / Docling model cache for the agent service.
+  hf_cache: {}

@@ -207,10 +207,17 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 requestId:     $requestId,
             );
         } catch (Throwable $e) {
-            // Log structure-only; rethrow is intentionally suppressed so a
-            // failed extraction never breaks the upload response for the user.
+            // Structural-only log: exception class + file:line.  The full
+            // exception object (message + stack trace + local vars) is
+            // intentionally NOT logged — DB errors can echo column values
+            // that include PHI, and the AUDIT.md C-6 no-PHI-in-logs rule
+            // is stricter than PSR-3's default exception serialization.
+            // Rethrow is suppressed so a failed extraction never breaks
+            // the upload response for the user.
             $this->logger->error('ClinicalCopilot: DocumentSavedSubscriber encountered an error', [
-                'exception' => $e,
+                'exception_class' => get_class($e),
+                'file'            => basename($e->getFile()),
+                'line'            => $e->getLine(),
             ]);
         }
     }
@@ -264,17 +271,59 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
      */
     protected function resolveFilePath(int $docId): ?string
     {
-        $doc = new OpenEMRDocument($docId);
-        if ($doc->is_deleted()) {
+        // Document::get_filesystem_filepath() is `protected` in OpenEMR core
+        // (visible to subclasses only), so calling it from this subscriber
+        // raises a PHP scope error.  Resolve the path directly via SQL on
+        // the `documents.url` column, which stores the canonical
+        // file:///absolute/path for filesystem-stored documents
+        // (storagemethod = 0).  CouchDB-stored docs (storagemethod != 0)
+        // are out of scope for tonight's MVP; that branch returns null.
+        $row = QueryUtils::fetchRecords(
+            "SELECT url, storagemethod FROM documents WHERE id = ? AND deleted = 0 LIMIT 1",
+            [$docId]
+        );
+        if (empty($row) || (int) ($row[0]['storagemethod'] ?? -1) !== 0) {
+            return null;
+        }
+        $url = (string) ($row[0]['url'] ?? '');
+        $path = str_starts_with($url, 'file://') ? substr($url, 7) : $url;
+        if ($path === '' || !file_exists($path)) {
             return null;
         }
 
-        $path = $doc->get_filesystem_filepath();
-        if (empty($path) || !file_exists($path)) {
+        // OpenEMR encrypts uploaded documents at rest via CryptoGen
+        // (aes-256-gcm, key managed in the database).  The bytes on disk
+        // are NOT raw PDF/PNG — they're ciphertext.  Without decryption,
+        // Docling reads garbage, fails magic-byte detection (%PDF / 89 PNG),
+        // and rejects the input with format=None.
+        //
+        // Document::decrypt_content() is the only public decryption seam;
+        // we read the ciphertext from disk and pass it through.  If decrypt
+        // throws (file not actually encrypted on this OpenEMR install),
+        // fall back to the raw bytes as-is.
+        //
+        // Write the plaintext to a fresh temp file and return that path.
+        // AgentClient reads from this path; the temp file is intentionally
+        // left for OS-level temp cleanup tonight (Thursday cleanup: register
+        // a finally-block unlink in the caller).
+        $rawBytes = @file_get_contents($path);
+        if ($rawBytes === false) {
             return null;
         }
 
-        return $path;
+        $document = new OpenEMRDocument($docId);
+        try {
+            $plainBytes = $document->decrypt_content($rawBytes);
+        } catch (\Throwable $e) {
+            $plainBytes = $rawBytes;
+        }
+
+        $tmpPath = tempnam(sys_get_temp_dir(), 'copilot_plain_');
+        if ($tmpPath === false || @file_put_contents($tmpPath, $plainBytes) === false) {
+            return null;
+        }
+
+        return $tmpPath;
     }
 
     /**

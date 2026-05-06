@@ -758,9 +758,14 @@
                     }
                 }
                 if (hostWin.console) {
+                    // PHI-safe: log only structural metadata (recordId is a
+                    // table:id reference, not record content). The `fields`
+                    // object holds drug names, diagnoses, lab values, and
+                    // for guideline records the full chunk body — never
+                    // log it to the browser console.
                     hostWin.console.log(
                         '[Co-Pilot] highlight: no match for', data.recordId,
-                        'attempt=', attempt, 'fields=', fields
+                        'attempt=', attempt, 'n_fields=', fields ? Object.keys(fields).length : 0
                     );
                 }
                 return;

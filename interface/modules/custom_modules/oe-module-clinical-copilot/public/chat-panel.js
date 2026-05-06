@@ -229,6 +229,44 @@
 
     var openPopover = null;
 
+    // Maximum characters shown for any single citation field in the
+    // popover.  Guideline chunks have ~500-word bodies and multi-line
+    // source attributions — without truncation the popover dwarfs the
+    // chat panel.  Click-through to the full source goes via source_url
+    // for guidelines, or the chart-iframe highlight for patient records.
+    var CITATION_FIELD_TRUNCATE = 280;
+
+    function truncate(text, max) {
+        var s = String(text == null ? '' : text);
+        if (s.length <= max) return s;
+        return s.slice(0, max - 1).trimEnd() + '…';
+    }
+
+    /**
+     * Pick which fields to surface for this citation, in this order.
+     * Guideline records (source_type === 'guideline') get a curated
+     * citation-shaped view: section + attribution + leading excerpt +
+     * link.  Patient records fall back to the old "all fields" view —
+     * those records are short by construction (one structured row).
+     */
+    function citationFieldOrder(fields) {
+        if (!fields || typeof fields !== 'object') return [];
+        if (fields.source_type === 'guideline') {
+            return [
+                ['section', fields.page_or_section || fields.section],
+                ['source', fields.source_attribution],
+                ['quote', fields.quote_or_value],
+                ['url', fields.source_url],
+            ].filter(function (pair) { return pair[1]; });
+        }
+        // patient_record + extracted_document: render everything, but
+        // skip noisy duplicates and apply per-field truncation.
+        var skip = { source_type: true, source_id: true, field_or_chunk_id: true };
+        return Object.keys(fields)
+            .filter(function (k) { return !skip[k]; })
+            .map(function (k) { return [k, fields[k]]; });
+    }
+
     function buildCitationPopover(recordId) {
         var record = lastRetrievedRecords[recordId];
         var popover = document.createElement('div');
@@ -248,13 +286,25 @@
         if (record.fields && typeof record.fields === 'object') {
             var grid = document.createElement('div');
             grid.className = 'copilot-citation__fields';
-            Object.keys(record.fields).forEach(function (key) {
+            var pairs = citationFieldOrder(record.fields);
+            pairs.forEach(function (pair) {
+                var key = pair[0];
+                var value = pair[1];
                 var labelEl = document.createElement('div');
                 labelEl.className = 'copilot-citation__field-label';
                 labelEl.textContent = key;
                 var valueEl = document.createElement('div');
                 valueEl.className = 'copilot-citation__field-value';
-                valueEl.textContent = String(record.fields[key]);
+                if (key === 'url' && typeof value === 'string' && /^https?:/i.test(value)) {
+                    var a = document.createElement('a');
+                    a.href = value;
+                    a.target = '_blank';
+                    a.rel = 'noopener noreferrer';
+                    a.textContent = truncate(value, CITATION_FIELD_TRUNCATE);
+                    valueEl.appendChild(a);
+                } else {
+                    valueEl.textContent = truncate(value, CITATION_FIELD_TRUNCATE);
+                }
                 grid.appendChild(labelEl);
                 grid.appendChild(valueEl);
             });

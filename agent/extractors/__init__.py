@@ -80,6 +80,7 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
     """
     try:
         from docling.document_converter import DocumentConverter
+        from docling.datamodel.base_models import InputFormat
     except ImportError as exc:
         raise RuntimeError(
             "Docling is not installed. Add 'docling>=2.0.0' to requirements.txt "
@@ -87,7 +88,15 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
             "Mistral OCR API fallback if install is blocked."
         ) from exc
 
-    converter = DocumentConverter()
+    # Stage-4a: explicitly enable IMAGE input alongside PDF so PNG/JPG intake
+    # forms and lab scans produced by phone-camera uploads also flow through
+    # the layout pipeline.  Docling's RapidOCR engine handles images natively
+    # (already pulled as a transitive dep at install time).  W2_ARCHITECTURE.md
+    # §2.1 doesn't restrict the doc type beyond "lab PDF / intake form" — the
+    # MIME type is incidental.
+    converter = DocumentConverter(
+        allowed_formats=[InputFormat.PDF, InputFormat.IMAGE],
+    )
     result = converter.convert(str(pdf_path))
     doc = result.document
 
@@ -98,9 +107,32 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
     # Docling's export_to_dict() gives a stable representation we can
     # walk without depending on internal object structure.
     for item, level in doc.iterate_items():
-        # Only process items that have text content and bounding box info.
-        # Docling items expose .text and .prov (provenance list with bbox).
-        text = getattr(item, "text", None)
+        # Determine label early — used for both block_type AND table-extraction
+        # routing below.
+        item_label = str(getattr(item, "label", "text")).lower()
+
+        # Tables in Docling are TableItem objects.  Their content lives in
+        # item.data (TableData with table_cells), NOT in a .text attribute.
+        # Calling getattr(item, "text") on a TableItem returns "" / None,
+        # so without explicit handling all table content (medications,
+        # allergies, family history on intake forms; lab-result rows on
+        # lab PDFs) is silently dropped.  Render to markdown and treat
+        # the whole table as a single block — keeps row context together,
+        # which is what Haiku/Sonnet needs to extract item-level rows.
+        if "table" in item_label:
+            try:
+                text = item.export_to_markdown(doc=doc)
+            except TypeError:
+                # Older Docling signatures may not require `doc=`.
+                try:
+                    text = item.export_to_markdown()
+                except Exception:
+                    text = ""
+            except Exception:
+                text = ""
+        else:
+            text = getattr(item, "text", None)
+
         prov_list = getattr(item, "prov", [])
 
         if not text or not prov_list:
@@ -129,8 +161,8 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
         if x1 <= x0 or y1 <= y0:
             continue
 
-        # Determine block_type from Docling item label.
-        item_label = str(getattr(item, "label", "text")).lower()
+        # Determine block_type from Docling item label (item_label was
+        # computed at the top of the loop body for table-extraction routing).
         if "table" in item_label:
             block_type = "table"
         elif "figure" in item_label or "picture" in item_label:
