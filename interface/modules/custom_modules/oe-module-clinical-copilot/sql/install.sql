@@ -47,3 +47,41 @@ CREATE TABLE IF NOT EXISTS `co_pilot_extractions` (
     INDEX `idx_doc_ref`  (`doc_ref_id`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4;
+
+-- -------------------------------------------------------
+-- 3.  FHIR round-trip traceback table
+--     One row per derived OpenEMR record created from an
+--     extraction.  Powers two requirements from W2 PRD §43:
+--       (a) idempotency: re-processing a document does not
+--           duplicate clinical-table rows
+--       (b) traceability: every derived row in OpenEMR's
+--           clinical tables (procedure_result, lists,
+--           prescriptions) can be traced back to the source
+--           co_pilot_extractions row, and from there to the
+--           source documents.id
+--     The UNIQUE constraint enforces the no-duplicate guarantee:
+--     (extraction_id, target_table, source_block_id) tuples are
+--     unique, so a retry of the same (doc_ref_id, doc_type)
+--     after re-extraction skips rows that already round-tripped.
+-- -------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS `co_pilot_fhir_links` (
+    `id`                       INT UNSIGNED    NOT NULL AUTO_INCREMENT,
+    `co_pilot_extraction_id`   INT UNSIGNED    NOT NULL
+        COMMENT 'FK to co_pilot_extractions.id',
+    `target_table`             VARCHAR(48)     NOT NULL
+        COMMENT 'OpenEMR table the row was inserted into (procedure_order, procedure_result, lists, prescriptions)',
+    `target_record_id`         BIGINT UNSIGNED NOT NULL
+        COMMENT 'Primary key of the inserted row in target_table',
+    `source_block_id`          VARCHAR(64)     DEFAULT NULL
+        COMMENT 'Docling block_id from the extraction this row was derived from (null for parent rows like procedure_order)',
+    `resource_kind`            VARCHAR(32)     NOT NULL
+        COMMENT '"observation" | "allergy" | "medication" | "procedure_order_parent"',
+    `created_at`               DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uniq_extraction_target_block`
+        (`co_pilot_extraction_id`, `target_table`, `source_block_id`),
+    INDEX `idx_extraction` (`co_pilot_extraction_id`),
+    INDEX `idx_target`     (`target_table`, `target_record_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4;
