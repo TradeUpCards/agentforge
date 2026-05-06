@@ -47,6 +47,7 @@ use OpenEMR\Common\Logging\SystemLogger;
 use OpenEMR\Modules\ClinicalCopilot\Events\DocumentCreatedEvent;
 use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
 use OpenEMR\Modules\ClinicalCopilot\Service\PersonaMap;
+use OpenEMR\Modules\ClinicalCopilot\Service\RoundtripService;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Throwable;
@@ -66,11 +67,15 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
 
     private readonly LoggerInterface $logger;
 
+    private readonly RoundtripService $roundtripService;
+
     public function __construct(
         private readonly AgentClient $agentClient,
         ?LoggerInterface $logger = null,
+        ?RoundtripService $roundtripService = null,
     ) {
         $this->logger = $logger ?? new SystemLogger();
+        $this->roundtripService = $roundtripService ?? new RoundtripService($this->logger);
     }
 
     public static function getSubscribedEvents(): array
@@ -196,7 +201,7 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
             ]);
 
             // 7. Persist result.
-            $this->persistExtractionRow(
+            $extractionId = $this->persistExtractionRow(
                 pid:           $sentinelPid,
                 docRefId:      $docRefId,
                 docType:       $docType,
@@ -206,6 +211,32 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 confidenceAvg: $confidenceAvg,
                 requestId:     $requestId,
             );
+
+            // 8. FHIR round-trip — only on successful extraction.  Persists
+            // derived facts into OpenEMR's clinical tables (procedure_*,
+            // lists, prescriptions) so they appear in the chart UI and
+            // are queryable via the FHIR API.  Per W2 PRD §1 + §43.
+            //
+            // NOTE on pid: the round-trip uses the REAL OpenEMR pid (the
+            // chart owner), not the sentinel pid the agent service uses.
+            // Clinical-table foreign keys must reference the actual
+            // patient row.  The sentinel pid namespace exists only for
+            // the agent's own audit trail.
+            if (
+                $agentStatus === 'ok'
+                && $extractionJson !== null
+                && $extractionId > 0
+            ) {
+                $extractionPayload = json_decode($extractionJson, true);
+                if (is_array($extractionPayload)) {
+                    $this->roundtripService->roundtrip(
+                        extractionId: $extractionId,
+                        patientId:    $pid,
+                        docType:      $docType,
+                        extraction:   $extractionPayload,
+                    );
+                }
+            }
         } catch (Throwable $e) {
             // Structural-only log: exception class + file:line.  The full
             // exception object (message + stack trace + local vars) is
@@ -341,8 +372,8 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
         ?int $nBlocks,
         ?float $confidenceAvg,
         ?string $requestId,
-    ): void {
-        QueryUtils::sqlInsert(
+    ): int {
+        return (int) QueryUtils::sqlInsert(
             'INSERT INTO `co_pilot_extractions`
                 (`patient_id`, `doc_ref_id`, `doc_type`, `status`,
                  `extraction_json`, `n_blocks`, `extraction_confidence_avg`,

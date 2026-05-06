@@ -96,13 +96,18 @@ final class TestableDocumentSavedSubscriber extends DocumentSavedSubscriber
         ?int $nBlocks,
         ?float $confidenceAvg,
         ?string $requestId,
-    ): void {
+    ): int {
         $this->persistedRows[] = [
             'pid'       => $pid,
             'docRefId'  => $docRefId,
             'docType'   => $docType,
             'status'    => $status,
         ];
+        // Return a synthetic id so the round-trip dispatch path in the
+        // production class can run without throwing on `int $extractionId`.
+        // Tests that assert agent invocation never reach the round-trip
+        // call (the test stub's RoundtripService is a no-op fake).
+        return count($this->persistedRows);
     }
 }
 
