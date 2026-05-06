@@ -47,6 +47,8 @@ from typing import Any, Literal, Union
 
 from agent._phi_scrubber import mask_observability_patterns
 from agent.document_schemas import BBox, DoclingBlock, DoclingDoc, IntakeForm, LabReport
+from agent.extractors.cost import compute_cost_usd
+from agent.extractors.template_id import resolve_template_id
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +271,7 @@ def _run_stage1_layout(
         )
 
     if not pdf_path.exists():
-        raise RuntimeError(f"PDF not found at {pdf_path}")
+        raise RuntimeError("PDF not found at the specified path")
 
     docling_version = _get_docling_version()
     page_count = _get_page_count(pdf_path)
@@ -312,14 +314,23 @@ async def _run_haiku_extraction(
     doc_type: str,
     patient_id: int,
     doc_ref_id: str,
+    filename: str | None = None,
 ) -> LabReport | IntakeForm:
     """Call Haiku for schema extraction and parse the result.
 
     Langfuse instrumentation:
       - Span name: haiku_schema_extraction
-      - Tags: token/cost/latency, model_name, doc_type, n_blocks
+      - Tags: token/cost/latency, model_name, doc_type, n_blocks, template_id
       - patient_id_in_sentinel_range boolean (never the raw value)
-      - NEVER: raw doc text, extracted field values, patient_id integer
+      - NEVER: raw doc text, extracted field values, patient_id integer, raw filename
+
+    Args:
+        doc:       DoclingDoc from Stage 1.
+        doc_type:  "lab_pdf" or "intake_form".
+        patient_id: Must be in sentinel range.
+        doc_ref_id: FHIR DocumentReference ID.
+        filename:  Original upload filename — used ONLY to resolve template_id.
+                   Never emitted to spans or logs directly.
 
     Raises:
         RuntimeError:                Haiku returned non-JSON or unexpected shape.
@@ -327,6 +338,7 @@ async def _run_haiku_extraction(
         ValueError:                  Invalid block_id or confidence OOB.
     """
     from agent.extractors.haiku_extraction import (
+        ExtractionStats,
         build_intake_form_messages,
         build_intake_form_system,
         build_lab_report_messages,
@@ -356,6 +368,11 @@ async def _run_haiku_extraction(
 
     llm_client = build_llm_client()
 
+    # Resolve template_id from filename BEFORE building span_meta.
+    # Only the resolved label (from a closed vocabulary) enters the span —
+    # the raw filename is never emitted.
+    template_id = resolve_template_id(filename)
+
     # Langfuse span metadata: structural only, no PHI.
     # Stage-3b: span opened below with lf.start_span("haiku_schema_extraction").
     span_meta: dict[str, Any] = {
@@ -364,6 +381,10 @@ async def _run_haiku_extraction(
         "page_count": doc.page_count,
         "model": _HAIKU_MODEL,
         "patient_id_in_sentinel_range": _SENTINEL_MIN <= patient_id <= _SENTINEL_MAX,
+        "template_id": template_id,
+        "prompt_variant": "default",
+        "attempt_n": 1,
+        "triggered_by": "initial",
     }
 
     latency_ms = 0
@@ -381,6 +402,8 @@ async def _run_haiku_extraction(
     except Exception:
         pass
 
+    _span_ended = False
+
     try:
         response = await llm_client.create(
             model=_HAIKU_MODEL,
@@ -393,12 +416,13 @@ async def _run_haiku_extraction(
         latency_ms = int((time.monotonic() - t0) * 1000)
         # Scrub exception message: SDK errors may echo request-body fragments.
         scrubbed_msg = mask_observability_patterns(str(sdk_exc))
-        if haiku_span_obj is not None:
+        if haiku_span_obj is not None and not _span_ended:
             try:
                 haiku_span_obj.update(
                     metadata={**span_meta, "latency_ms": latency_ms, "error": "sdk_error"},
                 )
                 haiku_span_obj.end()
+                _span_ended = True
             except Exception:
                 pass
         raise RuntimeError(
@@ -419,26 +443,13 @@ async def _run_haiku_extraction(
         inner = lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:]
         response_text = "\n".join(inner).strip()
 
-    # Emit token/cache usage to Langfuse span — no PHI, structural only.
+    # Capture usage here — used for both cost computation and span update.
     usage = response.usage
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
     cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    if haiku_span_obj is not None:
-        try:
-            haiku_span_obj.update(
-                metadata={
-                    **span_meta,
-                    "latency_ms": latency_ms,
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "cache_read_input_tokens": cache_read,
-                    "cache_creation_input_tokens": cache_create,
-                    "stop_reason": response.stop_reason,
-                },
-            )
-            haiku_span_obj.end()
-        except Exception:
-            pass
+
+    # Compute cost before the parse block so it's available on all paths.
+    cost_usd = compute_cost_usd(_HAIKU_MODEL, usage.input_tokens, usage.output_tokens)
 
     # Parse the JSON response into the appropriate schema.
     # Fix #1: json.JSONDecodeError carries the raw response text in its .doc
@@ -449,7 +460,7 @@ async def _run_haiku_extraction(
     # structured and value-free, but we scrub defensively before re-raising.
     try:
         if doc_type == "lab_pdf":
-            return parse_lab_report(
+            parsed_result, extraction_stats = parse_lab_report(
                 haiku_json_text=response_text,
                 doc=doc,
                 patient_id=patient_id,
@@ -457,7 +468,7 @@ async def _run_haiku_extraction(
                 extraction_model=_HAIKU_MODEL,
             )
         else:
-            return parse_intake_form(
+            parsed_result, extraction_stats = parse_intake_form(
                 haiku_json_text=response_text,
                 doc=doc,
                 patient_id=patient_id,
@@ -466,6 +477,15 @@ async def _run_haiku_extraction(
             )
     except json.JSONDecodeError as exc:
         # exc.doc holds the raw response text — suppress it entirely.
+        if haiku_span_obj is not None and not _span_ended:
+            try:
+                haiku_span_obj.update(
+                    metadata={**span_meta, "error": "json_decode_error"}
+                )
+                haiku_span_obj.end()
+                _span_ended = True
+            except Exception:
+                pass
         raise RuntimeError(
             f"Haiku response was not valid JSON for doc_type={doc_type} "
             f"(decode error at line {exc.lineno}, col {exc.colno}). "
@@ -474,9 +494,44 @@ async def _run_haiku_extraction(
     except (ValueError, KeyError) as exc:
         # Parser raises are structured (no raw field values) but scrub defensively.
         scrubbed = mask_observability_patterns(str(exc))
+        if haiku_span_obj is not None and not _span_ended:
+            try:
+                haiku_span_obj.update(
+                    metadata={**span_meta, "error": "grounding_or_parse_failure"}
+                )
+                haiku_span_obj.end()
+                _span_ended = True
+            except Exception:
+                pass
         raise RuntimeError(
             f"Haiku output failed schema validation for doc_type={doc_type}: {scrubbed}"
         ) from None
+
+    # Success path: emit all 13 P1 attributes to span and close it.
+    if haiku_span_obj is not None and not _span_ended:
+        try:
+            haiku_span_obj.update(
+                metadata={
+                    **span_meta,
+                    "latency_ms": latency_ms,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_create,
+                    "stop_reason": response.stop_reason,
+                    "cost_usd": cost_usd,
+                    "total_fields": extraction_stats.total_fields,
+                    "stripped_fields": extraction_stats.stripped_fields,
+                    "strip_rate": round(extraction_stats.strip_rate, 4),
+                    "verifier_reason_counts": extraction_stats.verifier_reason_counts,
+                },
+            )
+            haiku_span_obj.end()
+            _span_ended = True
+        except Exception:
+            pass
+
+    return parsed_result
 
 
 def attach_and_extract(
@@ -486,6 +541,7 @@ def attach_and_extract(
     pdf_path: Path | None = None,
     *,
     stage1_only: bool = False,
+    filename: str | None = None,
 ) -> Union[LabReport, IntakeForm, DoclingDoc]:
     """Sync entry point: Stage 1 + optional Stage 2.
 
@@ -513,6 +569,9 @@ def attach_and_extract(
                       Docling output without invoking an LLM. Keyword-only.
                       # TODO(stage-3): evaluate removal once smoke tests are
                       # replaced by integration tests under the supervisor graph.
+        filename:     Original upload filename. Used ONLY to resolve template_id
+                      for the Langfuse span — never logged or traced directly.
+                      Keyword-only.
 
     Returns:
         LabReport | IntakeForm | DoclingDoc depending on doc_type and
@@ -540,6 +599,7 @@ def attach_and_extract(
                 doc_type=doc_type,
                 patient_id=patient_id,
                 doc_ref_id=doc_ref_id,
+                filename=filename,
             )
         )
         n_fields = (
@@ -572,6 +632,7 @@ async def attach_and_extract_async(
     pdf_path: Path | None = None,
     *,
     stage1_only: bool = False,
+    filename: str | None = None,
 ) -> Union[LabReport, IntakeForm, DoclingDoc]:
     """Async entry point: Stage 1 + optional Stage 2.
 
@@ -579,6 +640,8 @@ async def attach_and_extract_async(
     LangGraph nodes) to avoid creating a new event loop via asyncio.run().
 
     Same behavior and args as attach_and_extract() — see its docstring.
+    The filename keyword arg is forwarded to _run_haiku_extraction for
+    template_id resolution; never emitted to spans or logs directly.
     """
     docling_doc = _run_stage1_layout(patient_id, doc_ref_id, doc_type, pdf_path)
 
@@ -596,6 +659,7 @@ async def attach_and_extract_async(
             doc_type=doc_type,
             patient_id=patient_id,
             doc_ref_id=doc_ref_id,
+            filename=filename,
         )
         n_fields = (
             len(result.results)
