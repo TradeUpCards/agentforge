@@ -65,6 +65,12 @@ LANGFUSE_PUBLIC_KEY=
 LANGFUSE_SECRET_KEY=
 LANGFUSE_HOST=https://cloud.langfuse.com
 
+# Reranker (optional). With key set, hybrid RAG uses Cohere Rerank API.
+# Without it, the agent falls back to a local BAAI cross-encoder
+# (sentence-transformers, downloaded into hf_cache volume on first run).
+# CI runs in BAAI fallback mode, so leaving this empty is supported.
+COHERE_API_KEY=
+
 # Data mode in production = real DB.
 USE_FIXTURE_DATA=false
 USE_FIXTURE_LLM=false
@@ -216,9 +222,37 @@ services:
       # .env once real clinician usage shape is known.
       AGENT_RATE_LIMIT_RPM: \${AGENT_RATE_LIMIT_RPM}
       AGENT_TOKEN_BUDGET_PER_HOUR: \${AGENT_TOKEN_BUDGET_PER_HOUR}
+
+      # W2 Stage-3a: hybrid RAG vector path. Qdrant runs as a sibling
+      # service on the internal network (not publicly exposed).
+      # Reranker uses Cohere if COHERE_API_KEY is set; else falls back to
+      # BAAI cross-encoder (downloaded into HF_HOME volume on first run).
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      COHERE_API_KEY: \${COHERE_API_KEY}
+    volumes:
+      # HuggingFace / sentence-transformers / BAAI reranker model cache.
+      # Persisted so the ~80 MB model download survives agent restarts.
+      - hf_cache:/app/.hf_cache
     depends_on:
       mysql:
         condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  # W2 Stage-3a: Qdrant vector DB for hybrid (BM25 + dense + RRF) RAG.
+  # Internal-network only — agent reaches it at http://qdrant:6333.
+  # No healthcheck: qdrant ships a distroless image (no shell/wget) and
+  # boots in ~3-5s. The agent connects lazily on first query, and the
+  # post-bootstrap corpus ingestion step retries until qdrant is ready.
+  qdrant:
+    restart: always
+    image: qdrant/qdrant:v1.10.0
+    expose:
+      - "6333"
+      - "6334"
+    volumes:
+      - qdrantvolume:/qdrant/storage
 
   caddy:
     image: caddy:2-alpine
@@ -247,6 +281,9 @@ volumes:
   nodemodules: {}
   vendordir: {}
   couchdbvolume: {}
+  # W2: Qdrant vector store + agent HF/BAAI model cache.
+  qdrantvolume: {}
+  hf_cache: {}
 COMPOSE
 
 cat > Caddyfile <<'CADDY'
@@ -340,6 +377,28 @@ docker compose exec -T mysql mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
 
 # Restart the agent so it picks up the now-existing DB users + table.
 docker compose restart agent
+
+# Wait for the agent to come back healthy before running corpus ingestion.
+# Without this, `docker compose exec agent` can race the restart.
+echo "==> Waiting for agent service to be healthy after restart..."
+for i in $(seq 1 30); do
+  if docker compose exec -T agent python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)" 2>/dev/null; then
+    break
+  fi
+  sleep 5
+done
+
+# W2: ingest the guideline corpus into Qdrant. Idempotent — the ingest
+# script drops + recreates the collection, so re-running on each bootstrap
+# guarantees the index matches the current corpus on disk.
+# First run downloads the sentence-transformers embedding model
+# (all-MiniLM-L6-v2, ~80 MB) and BAAI reranker into the hf_cache volume,
+# so this step is slow on first boot (3-5 min) and fast thereafter.
+echo "==> Ingesting guideline corpus into Qdrant (first run downloads model, ~3-5 min)..."
+docker compose exec -T agent python -m agent.corpus.ingest || {
+  echo "==> WARNING: corpus ingestion failed. Run manually after stack is up:"
+  echo "      cd $DEPLOY_DIR && docker compose exec agent python -m agent.corpus.ingest"
+}
 
 echo ""
 echo "==> Stack is up. First boot takes 5-8 min while OpenEMR auto-installs."
