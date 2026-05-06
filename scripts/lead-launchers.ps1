@@ -70,55 +70,77 @@ function _Resolve-WorktreePath {
 }
 
 # ---------------------------------------------------------------------------
-# .gauntlet junction (cross-worktree coordination)
+# Cross-worktree directory junctions
 # ---------------------------------------------------------------------------
-# .gauntlet/ is gitignored (cohort-property PRDs, personal stories, handoffs,
-# kickoff prompts, audits). Because git worktrees only inherit *tracked*
-# content, a fresh worktree has no .gauntlet/ — but cross-lead coordination
-# files (handoffs, in-flight, kickoff) live there and must be visible from
-# every worktree. Solution: a directory junction from
-# <worktree>\.gauntlet → <main checkout>\.gauntlet. Single source of truth,
-# zero exposure to public mirrors, no manual sync.
+# Two repo-root directories are gitignored AND need to be visible from every
+# worktree:
 #
-# Idempotent: detects existing junction via a sentinel file and is safe to
-# re-run on every Start-Lead invocation.
+#   .gauntlet\  cohort-property PRDs, personal stories, handoffs, kickoff
+#               prompts, audits. Cross-lead coordination state lives here.
+#   .claude\    agents\<name>.md (drives the agent badge in Cursor's
+#               terminal), skills\<name>\SKILL.md (drives /aria, /bram,
+#               /cleo and other slash commands), settings.json, hooks.
 #
-# WARNING: before `git worktree remove <worktree>`, remove the junction
-# first to avoid any risk of recursing into the canonical .gauntlet:
+# Because git worktrees only inherit *tracked* content, a fresh worktree
+# has neither directory. Solution: a directory junction from
+# <worktree>\<dir> -> <main checkout>\<dir>. Single source of truth on
+# disk; edits in any worktree are immediately visible everywhere; nothing
+# leaks to public mirrors; no manual sync.
+#
+# WARNING: before `git worktree remove <worktree>`, remove BOTH junctions
+# first to avoid any risk of recursing into the canonical content:
 #   cmd /c rmdir <worktree>\.gauntlet
+#   cmd /c rmdir <worktree>\.claude
 # (non-recursive rmdir on a junction removes only the junction, not the
 # target — but `git worktree remove` may still recurse, so unjunction first.)
 
-function _Ensure-GauntletJunction {
-    param([Parameter(Mandatory=$true)][string]$WorktreePath)
+function _Ensure-Junction {
+    param(
+        [Parameter(Mandatory=$true)][string]$Target,
+        [Parameter(Mandatory=$true)][string]$Source,
+        [Parameter(Mandatory=$true)][string]$Sentinel
+    )
 
-    $target = Join-Path $WorktreePath ".gauntlet"
-    $source = Join-Path $AgentForgeRoot ".gauntlet"
+    # Sentinel-file check: if a known file is readable through $Target,
+    # the junction is already in place.
+    $sentinelPath = Join-Path $Target $Sentinel
+    if (Test-Path $sentinelPath) { return }
 
-    # Sentinel-file check: if a known coordination file is readable through
-    # $target, the junction is already in place.
-    $sentinel = Join-Path $target "week2\in-flight.md"
-    if (Test-Path $sentinel) { return }
-
-    # Empty .gauntlet dir? Remove so junction can take its place.
-    if (Test-Path $target) {
-        $isEmpty = -not (Get-ChildItem -Path $target -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+    # Empty dir? Remove so junction can take its place.
+    if (Test-Path $Target) {
+        $isEmpty = -not (Get-ChildItem -Path $Target -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($isEmpty) {
-            Remove-Item $target -Force -ErrorAction SilentlyContinue
+            Remove-Item $Target -Force -ErrorAction SilentlyContinue
         } else {
-            Write-Warning "Cannot create .gauntlet junction at ${target} - path exists with content."
-            Write-Warning "Resolve manually: ensure ${target} is empty or a junction to ${source}."
+            Write-Warning "Cannot create junction at ${Target} - path exists with content."
+            Write-Warning "Resolve manually: ensure ${Target} is empty or a junction to ${Source}."
             return
         }
     }
 
     # Create directory junction (no admin needed). cmd /c is the simplest path.
-    & cmd /c mklink /J "`"$target`"" "`"$source`"" | Out-Null
+    & cmd /c mklink /J "`"$Target`"" "`"$Source`"" | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to junction ${target} -> ${source} via mklink /J (exit $LASTEXITCODE)"
+        Write-Error "Failed to junction ${Target} -> ${Source} via mklink /J (exit $LASTEXITCODE)"
         return
     }
-    Write-Host "Junctioned ${target} -> ${source}" -ForegroundColor Cyan
+    Write-Host "Junctioned ${Target} -> ${Source}" -ForegroundColor Cyan
+}
+
+function _Ensure-GauntletJunction {
+    param([Parameter(Mandatory=$true)][string]$WorktreePath)
+    _Ensure-Junction `
+        -Target   (Join-Path $WorktreePath ".gauntlet") `
+        -Source   (Join-Path $AgentForgeRoot ".gauntlet") `
+        -Sentinel "week2\in-flight.md"
+}
+
+function _Ensure-ClaudeJunction {
+    param([Parameter(Mandatory=$true)][string]$WorktreePath)
+    _Ensure-Junction `
+        -Target   (Join-Path $WorktreePath ".claude") `
+        -Source   (Join-Path $AgentForgeRoot ".claude") `
+        -Sentinel "agents\gauntlet-team-lead.md"
 }
 
 # ---------------------------------------------------------------------------
@@ -186,7 +208,55 @@ function _Set-TerminalTitle {
 # ---------------------------------------------------------------------------
 
 function Start-Lead {
-    param([Parameter(Mandatory=$true)][string]$Name)
+    <#
+    .SYNOPSIS
+    Launch a Week-2 lead session in its dedicated worktree.
+
+    .DESCRIPTION
+    Creates the worktree if missing, junctions .gauntlet/ and .claude/ from
+    the main checkout, registers the worktree with the Cursor multi-root
+    workspace, titles the terminal tab, and launches Claude with the
+    lead-specific --agent flag.
+
+    Default behavior is a fresh session seeded with the lead's kickoff
+    prompt. Use -Continue to resume the most recent session, or -Resume to
+    open Claude's session picker.
+
+    .PARAMETER Name
+    Lead identifier (aria, bram, cleo, ...).
+
+    .PARAMETER Continue
+    Resume the most recent conversation in the lead's worktree.
+
+    .PARAMETER Resume
+    Open Claude's resume picker. Use -Search to pre-filter the picker.
+
+    .PARAMETER Search
+    Optional search term passed to --resume to filter the picker.
+
+    .PARAMETER Fork
+    When resuming, fork to a new session ID so the original stays intact.
+    Only meaningful with -Continue or -Resume.
+
+    .EXAMPLE
+    Start-Bram                         # fresh, kickoff loaded
+    Start-Bram -Continue               # resume most recent session
+    Start-Bram -Resume                 # open picker
+    Start-Bram -Resume -Search "eval"  # picker filtered to "eval"
+    Start-Bram -Continue -Fork         # resume + fork (preserve old)
+    #>
+    param(
+        [Parameter(Mandatory=$true, Position=0)][string]$Name,
+        [switch]$Continue,
+        [switch]$Resume,
+        [string]$Search = "",
+        [switch]$Fork
+    )
+
+    if ($Continue -and $Resume) {
+        Write-Error "Use only one of -Continue or -Resume."
+        return
+    }
 
     $promptPath = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff\$Name.md"
     if (-not (Test-Path $promptPath)) {
@@ -221,6 +291,13 @@ function Start-Lead {
     # in case the worktree was created manually without the launcher.
     _Ensure-GauntletJunction -WorktreePath $worktree
 
+    # Ensure .claude/ junction so the per-lead agent file
+    # (.claude\agents\<name>.md) and slash-command skills
+    # (.claude\skills\<name>\SKILL.md) are findable from inside the
+    # worktree. Without this, --agent <name> below would fail or fall
+    # back to the wrong identity.
+    _Ensure-ClaudeJunction -WorktreePath $worktree
+
     # Add to Cursor workspace (idempotent).
     $workspacePath = _Get-WorkspaceFile
     _Add-WorkspaceFolder -WorkspacePath $workspacePath -FolderPath $worktree
@@ -229,11 +306,53 @@ function Start-Lead {
     $titleCase = (Get-Culture).TextInfo.ToTitleCase($Name.ToLower())
     _Set-TerminalTitle -Title $titleCase
 
+    # The --agent flag value is what Cursor's terminal renders as the
+    # session badge in the top-right (e.g. "bram" instead of
+    # "gauntlet-team-lead"). Each lead has a thin agent file at
+    # .claude\agents\<name>.md that inherits gauntlet-team-lead's hard
+    # rules and overrides only the identity line. If the lead-specific
+    # file is missing, fall back to gauntlet-team-lead so the launcher
+    # still works for ad-hoc lead names.
+    $agentId = $Name
+    $agentFile = Join-Path $AgentForgeRoot ".claude\agents\$Name.md"
+    if (-not (Test-Path $agentFile)) {
+        Write-Warning "No agent file at .claude\agents\$Name.md - falling back to gauntlet-team-lead."
+        $agentId = "gauntlet-team-lead"
+    }
+
+    # Build claude args. --teammate-mode in-process is constant; --agent picks
+    # the lead identity; resume flags (if any) replace the kickoff-prompt
+    # positional argument because resuming an existing conversation should
+    # not re-inject the kickoff system message.
+    $claudeArgs = @("--agent", $agentId, "--teammate-mode", "in-process")
+    if ($Fork) { $claudeArgs += "--fork-session" }
+
     $prompt = Get-Content -Raw $promptPath
     Push-Location $worktree
     try {
-        Write-Host "Launching Claude as $titleCase in $worktree (branch: $branch)..." -ForegroundColor Green
-        claude --agent gauntlet-team-lead --teammate-mode in-process $prompt
+        if ($Continue) {
+            $claudeArgs += "--continue"
+            $modeDesc = "continue"
+            if ($Fork) { $modeDesc += " +fork" }
+            Write-Host "Launching Claude as $titleCase in $worktree (branch: $branch, agent: $agentId, mode: $modeDesc)..." -ForegroundColor Green
+            & claude @claudeArgs
+        }
+        elseif ($Resume) {
+            if ($Search) {
+                $claudeArgs += @("--resume", $Search)
+                $modeDesc = "resume picker filter='$Search'"
+            } else {
+                $claudeArgs += "--resume"
+                $modeDesc = "resume picker"
+            }
+            if ($Fork) { $modeDesc += " +fork" }
+            Write-Host "Launching Claude as $titleCase in $worktree (branch: $branch, agent: $agentId, mode: $modeDesc)..." -ForegroundColor Green
+            & claude @claudeArgs
+        }
+        else {
+            Write-Host "Launching Claude as $titleCase in $worktree (branch: $branch, agent: $agentId, mode: fresh)..." -ForegroundColor Green
+            & claude @claudeArgs $prompt
+        }
     } finally {
         Pop-Location
     }
@@ -266,9 +385,30 @@ function Stop-Lead {
 # Convenience wrappers
 # ---------------------------------------------------------------------------
 
-function Start-Aria { Start-Lead -Name "aria" }
-function Start-Bram { Start-Lead -Name "bram" }
-function Start-Cleo { Start-Lead -Name "cleo" }
+function Get-Leads {
+    $kickoffDir = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff"
+    if (-not (Test-Path $kickoffDir)) {
+        Write-Error "No kickoff directory at $kickoffDir"
+        return
+    }
+    Get-ChildItem -Path $kickoffDir -Filter "*.md" -File | ForEach-Object {
+        $branch      = _Get-KickoffField -Field "Branch"   -PromptPath $_.FullName
+        $worktreeRaw = _Get-KickoffField -Field "Worktree" -PromptPath $_.FullName
+        $worktree    = if ($worktreeRaw) { _Resolve-WorktreePath -Raw $worktreeRaw } else { $null }
+        [PSCustomObject]@{
+            Lead     = $_.BaseName
+            Branch   = $branch
+            Worktree = $worktreeRaw
+            Exists   = if ($worktree) { Test-Path $worktree } else { $false }
+        }
+    } | Format-Table -AutoSize
+}
+
+# @args splat forwards switch parameters (-Continue, -Resume, -Search, -Fork)
+# from convenience wrappers through to Start-Lead.
+function Start-Aria { Start-Lead -Name "aria" @args }
+function Start-Bram { Start-Lead -Name "bram" @args }
+function Start-Cleo { Start-Lead -Name "cleo" @args }
 
 function Stop-Aria { Stop-Lead -Name "aria" }
 function Stop-Bram { Stop-Lead -Name "bram" }

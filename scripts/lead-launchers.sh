@@ -75,49 +75,63 @@ _resolve_worktree_path() {
 }
 
 # ---------------------------------------------------------------------------
-# .gauntlet junction (cross-worktree coordination)
+# Cross-worktree directory junctions
 # ---------------------------------------------------------------------------
-# .gauntlet/ is gitignored (cohort-property PRDs, personal stories, handoffs,
-# kickoff prompts, audits). Because git worktrees only inherit *tracked*
-# content, a fresh worktree has no .gauntlet/ — but cross-lead coordination
-# files (handoffs, in-flight, kickoff) live there and must be visible from
-# every worktree. Solution: a directory junction (Windows) / symlink (Unix)
-# from <worktree>/.gauntlet → <main checkout>/.gauntlet. Single source of
-# truth, zero exposure to public mirrors, no manual sync.
+# Two repo-root directories are gitignored AND need to be visible from every
+# worktree:
 #
-# Idempotent: detects existing junction via a sentinel file and is safe to
-# re-run on every start_lead invocation.
+#   .gauntlet/  cohort-property PRDs, personal stories, handoffs, kickoff
+#               prompts, audits. Cross-lead coordination state lives here.
+#   .claude/    agents/<name>.md (drives the agent badge in Cursor's
+#               terminal), skills/<name>/SKILL.md (drives /aria, /bram,
+#               /cleo and other slash commands), settings.json, hooks.
 #
-# WARNING: before `git worktree remove <worktree>`, remove the junction
-# first to avoid any risk of recursing into the canonical .gauntlet:
-#   rm <worktree>/.gauntlet     # Unix
-#   cmd //c rmdir <worktree>\.gauntlet   # Windows (non-recursive removes
-#                                         # the junction, not the target)
+# Because git worktrees only inherit *tracked* content, a fresh worktree
+# has neither directory. Solution: a directory junction (Windows) /
+# symlink (Unix) from <worktree>/<dir> → <main checkout>/<dir>. Single
+# source of truth on disk; edits in any worktree are immediately visible
+# everywhere; nothing leaks to public mirrors; no manual sync.
+#
+# WARNING: before `git worktree remove <worktree>`, remove BOTH junctions
+# first to avoid any risk of recursing into the canonical content:
+#   rm <worktree>/.gauntlet <worktree>/.claude              # Unix
+#   cmd //c rmdir <worktree>\.gauntlet                      # Windows
+#   cmd //c rmdir <worktree>\.claude                        # (non-
+#       recursive removes the junction, not the target)
 
-_ensure_gauntlet_junction() {
-    local worktree="$1"
-    local target="$worktree/.gauntlet"
-    local source="$AGENTFORGE_ROOT/.gauntlet"
+# _ensure_junction <target> <source> <sentinel-relpath>
+#   Creates a directory junction (Windows) / symlink (Unix) at $target
+#   pointing to $source if not already in place. Detects existing
+#   junction by checking for $target/$sentinel-relpath. Idempotent.
+_ensure_junction() {
+    local target="$1"
+    local source="$2"
+    local sentinel="$3"
 
-    # Sentinel-file check: if a known coordination file is readable through
-    # $target, the junction (or symlink) is already in place. Works for
-    # both Windows junctions and Unix symlinks.
-    if [ -f "$target/week2/in-flight.md" ]; then
+    # Sentinel-file check: if a known file is readable through $target,
+    # the junction (or symlink) is already in place. Works for both
+    # Windows junctions and Unix symlinks.
+    if [ -f "$target/$sentinel" ]; then
         return 0
     fi
 
-    # Empty .gauntlet dir? Remove so junction can take its place.
+    # Empty dir? Remove so junction can take its place.
     if [ -d "$target" ] && [ -z "$(ls -A "$target" 2>/dev/null)" ]; then
         rmdir "$target" 2>/dev/null
     fi
 
     if [ -e "$target" ]; then
-        echo "Cannot create .gauntlet junction at $target — path exists with content." >&2
+        echo "Cannot create junction at $target — path exists with content." >&2
         echo "  Resolve manually: ensure $target is empty or a junction to $source." >&2
         return 1
     fi
 
-    # Windows (Git Bash / MSYS): use cmd.exe + mklink /J (no admin needed).
+    # Windows (Git Bash / MSYS): use cmd.exe + mklink /J via a temp .bat file.
+    # The direct `cmd //c "mklink /J ..."` invocation has been observed to drop
+    # its argument under Git Bash inside Cursor's integrated terminal, leaving
+    # cmd.exe interactive and hanging the launcher (Ctrl+C does not break out).
+    # Routing through a temp .bat eliminates all bash↔cmd quoting and path-
+    # conversion ambiguity. mklink /J does not require admin.
     if command -v cmd.exe >/dev/null 2>&1 || [ -n "$WINDIR" ]; then
         local target_win source_win
         if command -v cygpath >/dev/null 2>&1; then
@@ -127,10 +141,23 @@ _ensure_gauntlet_junction() {
             target_win="$(printf '%s' "$target" | sed 's|/|\\|g')"
             source_win="$(printf '%s' "$source" | sed 's|/|\\|g')"
         fi
-        if MSYS_NO_PATHCONV=1 cmd //c "mklink /J \"$target_win\" \"$source_win\"" >/dev/null; then
+
+        local batfile batfile_win
+        batfile="$(mktemp).bat"
+        # cmd.exe expects CRLF line endings in .bat files.
+        printf 'mklink /J "%s" "%s"\r\n' "$target_win" "$source_win" > "$batfile"
+        if command -v cygpath >/dev/null 2>&1; then
+            batfile_win="$(cygpath -w "$batfile")"
+        else
+            batfile_win="$batfile"
+        fi
+
+        if cmd.exe /c "$batfile_win" >/dev/null 2>&1; then
+            rm -f "$batfile"
             echo "Junctioned $target -> $source"
             return 0
         fi
+        rm -f "$batfile"
         echo "Failed to junction $target -> $source via mklink /J" >&2
         return 1
     fi
@@ -142,6 +169,22 @@ _ensure_gauntlet_junction() {
     fi
     echo "Failed to symlink $target -> $source" >&2
     return 1
+}
+
+_ensure_gauntlet_junction() {
+    local worktree="$1"
+    _ensure_junction \
+        "$worktree/.gauntlet" \
+        "$AGENTFORGE_ROOT/.gauntlet" \
+        "week2/in-flight.md"
+}
+
+_ensure_claude_junction() {
+    local worktree="$1"
+    _ensure_junction \
+        "$worktree/.claude" \
+        "$AGENTFORGE_ROOT/.claude" \
+        "agents/gauntlet-team-lead.md"
 }
 
 # ---------------------------------------------------------------------------
@@ -240,9 +283,55 @@ _set_terminal_title() {
 _start_lead() {
     local name="$1"
     if [ -z "$name" ]; then
-        echo "Usage: start_lead <name>" >&2
+        cat >&2 <<EOF
+Usage: start_lead <name> [-c|--continue | -r|--resume [search]] [--fork]
+
+  <name>           Lead identifier (aria, bram, cleo, ...).
+  -c, --continue   Resume most recent conversation in this worktree.
+  -r, --resume     Open Claude's resume picker (optionally with a search term
+                   to filter previous sessions).
+  --fork           When resuming, fork to a new session ID so the original
+                   stays intact. Only meaningful with --continue / --resume.
+
+Default (no flags): fresh session seeded with the lead's kickoff prompt.
+EOF
         return 2
     fi
+    shift
+
+    # Parse optional resume flags. Defaults: fresh launch with kickoff prompt.
+    local resume_mode=""        # "" | "continue" | "resume"
+    local resume_search=""
+    local fork_flag=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -c|--continue)
+                resume_mode="continue"
+                shift
+                ;;
+            -r|--resume)
+                resume_mode="resume"
+                shift
+                # Optional search term — consume only if next arg isn't a flag.
+                if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+                    resume_search="$1"
+                    shift
+                fi
+                ;;
+            --fork|--fork-session)
+                fork_flag="--fork-session"
+                shift
+                ;;
+            -h|--help)
+                _start_lead   # re-trigger usage by calling with no args
+                return 0
+                ;;
+            *)
+                echo "start_lead: unknown option: $1" >&2
+                return 2
+                ;;
+        esac
+    done
 
     local prompt_path="$AGENTFORGE_ROOT/.gauntlet/week2/kickoff/$name.md"
     if [ ! -f "$prompt_path" ]; then
@@ -274,6 +363,13 @@ _start_lead() {
     # in case the worktree was created manually without the launcher.
     _ensure_gauntlet_junction "$worktree" || return $?
 
+    # Ensure .claude/ junction so the per-lead agent file
+    # (.claude/agents/<name>.md) and slash-command skills
+    # (.claude/skills/<name>/SKILL.md) are findable from inside the
+    # worktree. Without this, --agent <name> below would fail or fall
+    # back to the wrong identity.
+    _ensure_claude_junction "$worktree" || return $?
+
     # Add to Cursor workspace (idempotent).
     _add_workspace_folder "$worktree"
 
@@ -285,8 +381,58 @@ _start_lead() {
     local prompt
     prompt="$(cat "$prompt_path")"
 
-    echo "Launching Claude as $title_case in $worktree (branch: $branch)..."
-    (cd "$worktree" && claude --agent gauntlet-team-lead --teammate-mode in-process "$prompt")
+    # Tell VS Code / Cursor the cwd so ${cwdFolder} in tabs.title reflects the
+    # worktree (e.g. "AgentForge-hitl") instead of wherever the user opened the
+    # terminal. Shell integration normally emits OSC 633;P;Cwd= on every prompt,
+    # but we're about to launch claude directly without a prompt fire — so emit
+    # it manually here. Use cygpath -w when available so the path matches the
+    # format Cursor expects on Windows.
+    local worktree_for_cwd="$worktree"
+    if command -v cygpath >/dev/null 2>&1; then
+        worktree_for_cwd="$(cygpath -w "$worktree")"
+    fi
+    printf '\033]633;P;Cwd=%s\007' "$worktree_for_cwd"
+
+    # The --agent flag value is what Cursor's terminal renders as the
+    # session badge in the top-right (e.g. "bram" instead of
+    # "gauntlet-team-lead"). Each lead has a thin agent file at
+    # .claude/agents/<name>.md that inherits gauntlet-team-lead's hard
+    # rules and overrides only the identity line. If the lead-specific
+    # file is missing, fall back to gauntlet-team-lead so the launcher
+    # still works for ad-hoc lead names.
+    local agent_id="$name"
+    if [ ! -f "$AGENTFORGE_ROOT/.claude/agents/$name.md" ]; then
+        echo "No agent file at .claude/agents/$name.md — falling back to gauntlet-team-lead." >&2
+        agent_id="gauntlet-team-lead"
+    fi
+
+    # Build claude args. --teammate-mode in-process is constant; --agent picks
+    # the lead identity; resume flags (if any) replace the kickoff-prompt
+    # positional argument because resuming an existing conversation should
+    # not re-inject the kickoff system message.
+    local -a claude_args=(--agent "$agent_id" --teammate-mode in-process)
+    [ -n "$fork_flag" ] && claude_args+=("$fork_flag")
+
+    case "$resume_mode" in
+        continue)
+            claude_args+=(--continue)
+            echo "Launching Claude as $title_case in $worktree (branch: $branch, agent: $agent_id, mode: continue${fork_flag:+ +fork})..."
+            (cd "$worktree" && claude "${claude_args[@]}")
+            ;;
+        resume)
+            if [ -n "$resume_search" ]; then
+                claude_args+=(--resume "$resume_search")
+            else
+                claude_args+=(--resume)
+            fi
+            echo "Launching Claude as $title_case in $worktree (branch: $branch, agent: $agent_id, mode: resume picker${resume_search:+ filter='$resume_search'}${fork_flag:+ +fork})..."
+            (cd "$worktree" && claude "${claude_args[@]}")
+            ;;
+        *)
+            echo "Launching Claude as $title_case in $worktree (branch: $branch, agent: $agent_id, mode: fresh)..."
+            (cd "$worktree" && claude "${claude_args[@]}" "$prompt")
+            ;;
+    esac
 }
 
 _stop_lead() {
@@ -317,22 +463,141 @@ _stop_lead() {
     echo "Stopped tracking $title_case. Worktree at $worktree is untouched — run start_$name to resume."
 }
 
+_relative_age() {
+    # Convert a unix timestamp into a human-friendly relative age string.
+    local mtime="$1"
+    [ -z "$mtime" ] && return
+    local now diff
+    now="$(date +%s)"
+    diff=$(( now - mtime ))
+    if [ $diff -lt 60 ]; then
+        echo "${diff}s ago"
+    elif [ $diff -lt 3600 ]; then
+        echo "$(( diff / 60 ))m ago"
+    elif [ $diff -lt 86400 ]; then
+        echo "$(( diff / 3600 ))h ago"
+    else
+        echo "$(( diff / 86400 ))d ago"
+    fi
+}
+
+_inflight_block() {
+    # Extract the "### <Lead> ..." subsection from in-flight.md, up to the
+    # next "### " heading or section break. Returns nothing if the lead
+    # has no In Flight entry.
+    local lead_title="$1"
+    local file="$AGENTFORGE_ROOT/.gauntlet/week2/in-flight.md"
+    [ -f "$file" ] || return 1
+    awk -v lead="$lead_title" '
+        /^### / {
+            if ($2 == lead) { in_section = 1; next }
+            else if (in_section) { exit }
+        }
+        /^## / && in_section { exit }
+        /^---$/ && in_section { exit }
+        in_section { print }
+    ' "$file"
+}
+
+_inflight_field() {
+    # Pull a single bullet field (e.g. "Status", "Files locked", "Next
+    # checkpoint") out of the lead's in-flight block.
+    local lead_title="$1"
+    local field="$2"
+    _inflight_block "$lead_title" \
+        | sed -n "s/^- \*\*${field}:\*\* *\(.*\)/\1/p" \
+        | head -1
+}
+
+_list_leads() {
+    local kickoff_dir="$AGENTFORGE_ROOT/.gauntlet/week2/kickoff"
+    if [ ! -d "$kickoff_dir" ]; then
+        echo "No kickoff directory at $kickoff_dir" >&2
+        return 1
+    fi
+
+    local first=1
+    for f in "$kickoff_dir"/*.md; do
+        [ -f "$f" ] || continue
+        [ $first -eq 0 ] && echo
+        first=0
+
+        local name title_case workstream branch worktree_raw worktree
+        name="$(basename "$f" .md)"
+        title_case="$(printf '%s' "$name" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')"
+        workstream="$(_kickoff_field "Workstream" "$f")"
+        branch="$(_kickoff_field "Branch" "$f")"
+        worktree_raw="$(_kickoff_field "Worktree" "$f")"
+        worktree="$(_resolve_worktree_path "$worktree_raw")"
+
+        if [ -n "$workstream" ]; then
+            printf '%s — %s\n' "$title_case" "$workstream"
+        else
+            printf '%s\n' "$title_case"
+        fi
+
+        printf '  branch:    %s\n' "${branch:-<missing>}"
+
+        local worktree_status
+        if [ -d "$worktree" ]; then
+            worktree_status="active"
+        else
+            worktree_status="not yet created"
+        fi
+        printf '  worktree:  %s  (%s)\n' "${worktree_raw:-<missing>}" "$worktree_status"
+
+        # Last commit on the lead's branch — proxy for "currently working on what".
+        if [ -n "$branch" ] && git -C "$AGENTFORGE_ROOT" rev-parse --verify "$branch" >/dev/null 2>&1; then
+            local last_commit
+            last_commit="$(git -C "$AGENTFORGE_ROOT" log -1 --format='%s — %cr' "$branch" 2>/dev/null)"
+            [ -n "$last_commit" ] && printf '  last:      %s\n' "$last_commit"
+        fi
+
+        # Handoff age — proxy for "when did this lead last save state".
+        local handoff="$AGENTFORGE_ROOT/.gauntlet/week2/handoffs/$name-handoff.md"
+        if [ -f "$handoff" ]; then
+            local mtime age
+            mtime="$(stat -c '%Y' "$handoff" 2>/dev/null)"
+            age="$(_relative_age "$mtime")"
+            printf '  handoff:   updated %s\n' "${age:-(see file)}"
+        else
+            printf '  handoff:   not yet written\n'
+        fi
+
+        # In-flight state — what the lead said they're doing right now.
+        local status files_locked next_checkpoint
+        status="$(_inflight_field "$title_case" "Status")"
+        files_locked="$(_inflight_field "$title_case" "Files locked")"
+        next_checkpoint="$(_inflight_field "$title_case" "Next checkpoint")"
+        if [ -n "$status" ] || [ -n "$files_locked" ] || [ -n "$next_checkpoint" ]; then
+            [ -n "$status" ]          && printf '  status:    %s\n' "$status"
+            [ -n "$files_locked" ]    && printf '  locked:    %s\n' "$files_locked"
+            [ -n "$next_checkpoint" ] && printf '  next:      %s\n' "$next_checkpoint"
+        else
+            printf '  in-flight: no entry in in-flight.md (lead has not updated)\n'
+        fi
+    done
+}
+
+list_leads() { _list_leads "$@"; }
+list-leads() { _list_leads "$@"; }
+
 start_lead() { _start_lead "$@"; }
 stop_lead()  { _stop_lead "$@"; }
 
-# snake_case (bash convention)
-start_aria() { _start_lead "aria"; }
-start_bram() { _start_lead "bram"; }
-start_cleo() { _start_lead "cleo"; }
+# snake_case (bash convention) — "$@" forwards resume flags (-c, -r, --fork)
+start_aria() { _start_lead "aria" "$@"; }
+start_bram() { _start_lead "bram" "$@"; }
+start_cleo() { _start_lead "cleo" "$@"; }
 
 stop_aria() { _stop_lead "aria"; }
 stop_bram() { _stop_lead "bram"; }
 stop_cleo() { _stop_lead "cleo"; }
 
 # hyphenated aliases (matches PowerShell muscle memory)
-start-aria() { _start_lead "aria"; }
-start-bram() { _start_lead "bram"; }
-start-cleo() { _start_lead "cleo"; }
+start-aria() { _start_lead "aria" "$@"; }
+start-bram() { _start_lead "bram" "$@"; }
+start-cleo() { _start_lead "cleo" "$@"; }
 
 stop-aria() { _stop_lead "aria"; }
 stop-bram() { _stop_lead "bram"; }
