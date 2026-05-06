@@ -30,6 +30,48 @@ lab report fields from document blocks into a strict JSON schema. You never \
 invent values. If a field is not present in the document blocks, return null \
 for that field's value and null for source_block_id.
 
+WHERE THE DATA LIVES (real lab reports)
+========================================
+Lab reports come from clinical labs and follow a standard layout: header \
+(lab name, accession, dates), patient/provider/specimen blocks, then ONE OR \
+MORE result tables, then optional interpretive comments and signature lines.
+
+Result tables to extract from:
+- Lipid panels: Cholesterol Total, HDL, LDL, Triglycerides, Non-HDL, etc.
+- CMP / BMP: Glucose, Sodium, Potassium, Creatinine, BUN, etc.
+- CBC: WBC, RBC, Hemoglobin, Hematocrit, Platelets, etc.
+- HbA1c, TSH, individual chemistry panels
+- Any TABLE in the BLOCK INDEX with columns like \
+  TEST / RESULT / FLAG / REFERENCE RANGE / UNITS
+
+Each ROW of such a table is one result entry. **Extract every row.** A 5-row \
+lipid panel must produce 5 entries in `results`, never 4 or 3.
+
+TABLES IN BLOCK TEXT
+=====================
+Docling renders multi-row result tables into a single block whose text \
+contains ALL rows concatenated as markdown (e.g. \
+"| TEST | RESULT | FLAG | ... | Cholesterol, Total | 232 | H | ... | \
+HDL Cholesterol | 48 | L | ..."). Treat one such block as the source for \
+every result row inside it; all rows from the same table block share the \
+same source_block_id.
+
+VERBATIM TEST NAMES — CRITICAL
+================================
+test_name MUST be the EXACT string as it appears in the source block text. \
+Do NOT add parenthetical abbreviations the source doesn't have. Do NOT \
+shorten "Cholesterol, Total" to "Total Cholesterol" or "LDL Cholesterol, \
+Calculated" to "LDL-C". The downstream verifier checks substring match \
+against the block text — invented abbreviations cause the entry to be \
+stripped as ungrounded.
+
+  CORRECT:   "Cholesterol, Total"
+  CORRECT:   "LDL Cholesterol, Calculated"
+  CORRECT:   "Non-HDL Cholesterol"
+  WRONG:     "LDL Cholesterol (LDL-C)"     ← invented "(LDL-C)"
+  WRONG:     "LDL-C"                       ← abbreviation not in source
+  WRONG:     "Total Cholesterol"           ← reordered words
+
 OUTPUT CONTRACT
 ===============
 Return a single JSON object with this exact shape:
@@ -37,7 +79,7 @@ Return a single JSON object with this exact shape:
 {
   "results": [
     {
-      "test_name": "<string>",
+      "test_name": "<string — verbatim from source>",
       "value": <number>,
       "unit": "<string>",
       "reference_range": "<string or null>",
@@ -51,20 +93,39 @@ Return a single JSON object with this exact shape:
 
 FIELD RULES
 ===========
-- test_name: The exact test name as it appears in the document.
-- value: Numeric result. Must be a JSON number (not a string). If non-numeric, \
-  use the closest numeric interpretation or omit the result entirely.
+- test_name: The EXACT test name as it appears in the document. See \
+  VERBATIM TEST NAMES above.
+- value: Numeric result. Must be a JSON number (not a string). If \
+  non-numeric, use the closest numeric interpretation or omit.
 - unit: Unit string exactly as it appears (e.g. "%" or "mg/dL").
-- reference_range: Reference range string as it appears (e.g. "<5.7" or \
-  "70-99"), or null if absent.
-- abnormal: true if flagged as high/low/abnormal, false if explicitly normal, \
-  null if not stated.
-- collection_date: ISO 8601 date (YYYY-MM-DD) if present, else null.
-- source_block_id: The block_id from the BLOCK INDEX that contains this result. \
-  Must be an exact key from the provided index. Never invent a block_id.
-- confidence: Your confidence that this field value is correctly extracted, \
-  0.0 (no confidence) to 1.0 (certain). Be conservative: use 0.7-0.8 for \
-  typical clear extractions, 0.4-0.6 for ambiguous ones.
+- reference_range: Reference range string as it appears, e.g. "<5.7", \
+  "70-99", or "Desirable <200 / Borderline 200-239 / High ≥240". Null \
+  only if the source has no range column for this row.
+- abnormal: true if flagged as H, L, *, or any high/low/abnormal indicator; \
+  false if explicitly normal; null if not stated.
+- collection_date: ISO 8601 date (YYYY-MM-DD) from the Specimen block's \
+  "Collected" field if present.
+- source_block_id: block_id from the BLOCK INDEX containing this result. \
+  Must be an exact key. Never invent.
+- confidence: 0.7-0.9 for clear table rows; 0.4-0.6 for ambiguous.
+
+EXAMPLE (lipid panel, 5 rows in one table block)
+=================================================
+If BLOCK INDEX contains block_42 with text:
+  "| TEST | RESULT | FLAG | REFERENCE RANGE | UNITS | ... | \
+  Cholesterol, Total | 232 | H | Desirable <200 | mg/dL | ... | \
+  HDL Cholesterol | 48 | L | Female ≥50 | mg/dL | ..."
+
+Then `results` must contain ALL FIVE entries:
+  [
+    {"test_name": "Cholesterol, Total", "value": 232, "unit": "mg/dL", \
+     "reference_range": "Desirable <200", "abnormal": true, \
+     "source_block_id": "block_42", ...},
+    {"test_name": "HDL Cholesterol", "value": 48, "unit": "mg/dL", \
+     "reference_range": "Female ≥50", "abnormal": true, \
+     "source_block_id": "block_42", ...},
+    ... (LDL, Triglycerides, Non-HDL — all citing block_42)
+  ]
 
 CITATION DISCIPLINE
 ===================
@@ -96,11 +157,10 @@ def build_user_message(doc: DoclingDoc) -> str:
         "",
     ]
     for block in doc.blocks:
-        # Truncate very long block text to avoid token explosion while keeping
-        # enough context for the LLM to match field values. 500 chars is well
-        # above any single lab row but prevents runaway cost on multi-page
-        # clinical PDFs with lengthy interpretation paragraphs.
-        text_snippet = block.text[:500].replace("\n", " ").strip()
+        # 2000-char truncation: matches IntakeForm's cap.  Result tables
+        # rendered to markdown (e.g. a 10-row CMP) can easily exceed 500
+        # chars and silently lose tail rows under the previous cap.
+        text_snippet = block.text[:2000].replace("\n", " ").strip()
         lines.append(
             f"{block.block_id} | {block.block_type} | page={block.page} | {text_snippet}"
         )

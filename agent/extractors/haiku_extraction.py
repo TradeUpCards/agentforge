@@ -55,7 +55,7 @@ _SENTINEL_MAX = 999_199
 # Extraction-verifier threshold (W2_ARCHITECTURE.md §2.4)
 # ---------------------------------------------------------------------------
 
-_GROUNDING_FAILURE_THRESHOLD = 0.30  # >30% failing fields → refuse
+_GROUNDING_FAILURE_THRESHOLD = 0.30  # >30% failing fields → refuse (W2_ARCHITECTURE.md §2.4)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +155,14 @@ def _check_grounding_rate(
         },
     )
     if rate > _GROUNDING_FAILURE_THRESHOLD:
+        logger.warning(
+            "extraction_verifier: GROUNDING FAILED context=%s failed=%d/%d rate=%.2f threshold=%.2f",
+            context,
+            failed_fields,
+            total_fields,
+            rate,
+            _GROUNDING_FAILURE_THRESHOLD,
+        )
         raise ExtractionLowGrounding(
             f"extraction_low_grounding: {failed_fields}/{total_fields} fields "
             f"failed grounding check in {context} "
@@ -441,6 +449,20 @@ def parse_intake_form(
 
     raw: dict[str, Any] = json.loads(haiku_json_text)
     block_index = _build_block_index(doc)
+
+    # Diagnostic: structural counts only (no field values) — helps identify
+    # whether sparse extractions are upstream (Haiku/prompt) or downstream
+    # (parser/verifier).  No PHI: arrays' lengths + booleans only.
+    logger.info(
+        "parse_intake_form: raw counts n_blocks=%d demographics_present=%s "
+        "chief_concern_present=%s n_medications=%d n_allergies=%d n_family_history=%d",
+        len(doc.blocks),
+        bool(raw.get("demographics")),
+        bool(raw.get("chief_concern")),
+        len(raw.get("current_medications", [])),
+        len(raw.get("allergies", [])),
+        len(raw.get("family_history", [])),
+    )
 
     total_verifier_fields = 0
     failed_verifier_fields = 0
