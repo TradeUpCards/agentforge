@@ -174,3 +174,41 @@ def build_user_message(doc: DoclingDoc) -> str:
         "Use only block_ids from the BLOCK INDEX above.",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Verbatim-only amendment (PRD §6.3 — auto-retry attempt 2+)
+# ---------------------------------------------------------------------------
+
+# This string is pure template text — zero patient context.
+# It is appended to the standard user message on verbatim_only attempts to
+# tighten the extraction constraint and reduce LLM paraphrasing that causes
+# substring-grounding failures.  The SYSTEM_PROMPT (cacheable prefix) is
+# untouched by this amendment, preserving prompt-cache hits on the first
+# call in the retry ladder.
+_VERBATIM_AMENDMENT: str = (
+    "\nVERBATIM ONLY. Field values must be exact substrings of the cited block. "
+    "Do not paraphrase, expand abbreviations, infer units, or add parenthetical "
+    "disambiguators. If a value is ambiguous, set the field to null and emit "
+    "`source_block_id=null` rather than guess."
+)
+
+
+def build_user_message_verbatim(doc: DoclingDoc) -> str:
+    """Return the standard user message with the verbatim-only amendment appended.
+
+    Used by _run_haiku_extraction when prompt_variant='verbatim_only' (PRD §6.3).
+    The base build_user_message() return value is extended with a one-paragraph
+    constraint reminder that instructs the model to use exact substrings only.
+
+    The amendment text (_VERBATIM_AMENDMENT) contains zero patient context —
+    it is entirely template language.  The system block (SYSTEM_PROMPT) is
+    unchanged, so prompt-cache hits still occur for the system prefix.
+
+    Args:
+        doc: DoclingDoc from Stage 1; same input as build_user_message.
+
+    Returns:
+        str: build_user_message(doc) + newline + _VERBATIM_AMENDMENT.
+    """
+    return build_user_message(doc) + _VERBATIM_AMENDMENT

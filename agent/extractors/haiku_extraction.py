@@ -255,7 +255,11 @@ def _validate_confidence(confidence: float, label: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def build_lab_report_messages(doc: DoclingDoc) -> list[dict[str, Any]]:
+def build_lab_report_messages(
+    doc: DoclingDoc,
+    *,
+    verbatim: bool = False,
+) -> list[dict[str, Any]]:
     """Build the Anthropic messages list for LabReport extraction.
 
     The system block is the stable cacheable prefix (schema spec). Caller
@@ -267,8 +271,17 @@ def build_lab_report_messages(doc: DoclingDoc) -> list[dict[str, Any]]:
 
     No PHI in this function's return value goes to Langfuse —
     only token counts are observable. Block text stays in the messages.
+
+    Args:
+        doc:      DoclingDoc from Stage 1.
+        verbatim: When True, routes to build_user_message_verbatim() which
+                  appends the verbatim-only amendment (PRD §6.3).  Default
+                  False preserves all existing call sites unchanged.
     """
-    user_content = lab_report_extraction.build_user_message(doc)
+    if verbatim:
+        user_content = lab_report_extraction.build_user_message_verbatim(doc)
+    else:
+        user_content = lab_report_extraction.build_user_message(doc)
     return [
         {
             "role": "user",
@@ -277,13 +290,26 @@ def build_lab_report_messages(doc: DoclingDoc) -> list[dict[str, Any]]:
     ]
 
 
-def build_intake_form_messages(doc: DoclingDoc) -> list[dict[str, Any]]:
+def build_intake_form_messages(
+    doc: DoclingDoc,
+    *,
+    verbatim: bool = False,
+) -> list[dict[str, Any]]:
     """Build the Anthropic messages list for IntakeForm extraction.
 
     Same pattern as build_lab_report_messages — stable system block is
     in the prompt template; variable user block is doc-specific.
+
+    Args:
+        doc:      DoclingDoc from Stage 1.
+        verbatim: When True, routes to build_user_message_verbatim() which
+                  appends the verbatim-only amendment (PRD §6.3).  Default
+                  False preserves all existing call sites unchanged.
     """
-    user_content = intake_form_extraction.build_user_message(doc)
+    if verbatim:
+        user_content = intake_form_extraction.build_user_message_verbatim(doc)
+    else:
+        user_content = intake_form_extraction.build_user_message(doc)
     return [
         {
             "role": "user",

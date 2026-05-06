@@ -12,7 +12,7 @@
  *   3. testNonDemoPersonaIsSkipped         — fires for a demo category but a
  *      pid not in PersonaMap → agent is NOT called (structural log only).
  *
- * DB calls (resolveCategoryName, extractionExists, persistExtractionRow) and
+ * DB calls (resolveCategoryName, activeOkExtractionExists, persistExtractionRow) and
  * the filesystem read (resolveFilePath) are overridden in a test subclass so
  * the tests run without a live database or real documents.
  *
@@ -63,7 +63,7 @@ final class TestableDocumentSavedSubscriber extends DocumentSavedSubscriber
     /** @var string|null  Category name returned by resolveCategoryName(). */
     public ?string $categoryNameToReturn = null;
 
-    /** @var bool  Whether extractionExists() pretends the row exists. */
+    /** @var bool  Whether activeOkExtractionExists() pretends the row exists. */
     public bool $extractionAlreadyExists = false;
 
     /** @var string|null  Path returned by resolveFilePath(). */
@@ -77,7 +77,7 @@ final class TestableDocumentSavedSubscriber extends DocumentSavedSubscriber
         return $this->categoryNameToReturn;
     }
 
-    protected function extractionExists(string $docRefId, string $docType): bool
+    protected function activeOkExtractionExists(string $docRefId, string $docType): bool
     {
         return $this->extractionAlreadyExists;
     }
@@ -96,6 +96,15 @@ final class TestableDocumentSavedSubscriber extends DocumentSavedSubscriber
         ?int $nBlocks,
         ?float $confidenceAvg,
         ?string $requestId,
+        ?string $templateId     = null,
+        ?string $model          = null,
+        string  $promptVariant  = 'default',
+        int     $attemptN       = 1,
+        string  $triggeredBy    = 'initial',
+        ?float  $costUsd        = null,
+        ?int    $latencyMs      = null,
+        ?int    $totalFields    = null,
+        ?int    $strippedFields = null,
     ): int {
         $this->persistedRows[] = [
             'pid'       => $pid,
