@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+/*
+ * Tailwind v4 uses CSS-first config. Customizations go via @theme directives,
+ * not a tailwind.config.ts file. We keep this minimal — the design system is
+ * Tailwind defaults + a clinical-neutral palette.
+ */
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
