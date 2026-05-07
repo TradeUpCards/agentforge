@@ -73,19 +73,16 @@ agent-eval:
   # Skip if the change doesn't touch agent code, the pre-commit hook,
   # or this CI file itself. Saves CI minutes on doc-only changes.
   #
-  # `when: manual` — pipeline appears on the MR but does NOT auto-run
-  # (see runner note at top of this file). A reviewer can click "Run
-  # pipeline" if a Runner is registered. Without this, the job would
-  # show as "pending / stuck" indefinitely on every MR — visually
-  # worse than "manual" because reviewers read it as broken.
+  # As of 2026-05-07 a project-scoped GitLab Runner is registered
+  # (`agentforge-droplet`, Docker executor, image python:3.11) so the
+  # job auto-runs on every MR + push to master/feature branches per
+  # the workflow rules above. The job is fail-closed — a non-zero
+  # exit from `run_eval_gate.py` blocks the pipeline and the MR.
   rules:
     - changes:
         - agent/**/*
         - scripts/git-hooks/pre-commit
         - .gitlab-ci.yml
-      when: manual
-      # Don't fail the pipeline if the manual job isn't run.
-      allow_failure: true
   variables:
     # Both fixture flags ON — keeps the run deterministic + free.
     USE_FIXTURE_LLM: "true"
