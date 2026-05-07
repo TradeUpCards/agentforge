@@ -102,6 +102,13 @@ final class ExtractedFieldsWriterTest extends TestCase
 
     /**
      * writeStripped INSERT must store status = 'stripped'.
+     *
+     * The source file literally contains the characters \'stripped\' because
+     * the SQL is held in a single-quoted PHP string literal, so the inner
+     * quotes are backslash-escaped on disk.  The assertion looks for the
+     * escaped form to match the on-disk bytes.  An alternative would be to
+     * switch the SQL holder to a double-quoted string in the source, but the
+     * single-quoted form is conventional in this codebase.
      */
     public function testWriteStrippedInsertUsesStrippedStatus(): void
     {
@@ -114,7 +121,7 @@ final class ExtractedFieldsWriterTest extends TestCase
         $firstInsertBlock = substr($this->source, $insertPos, $secondInsertPos - $insertPos);
 
         $this->assertStringContainsString(
-            "'stripped'",
+            "\\'stripped\\'",
             $firstInsertBlock,
             "writeStripped INSERT must hard-code status = 'stripped'.",
         );
@@ -122,6 +129,8 @@ final class ExtractedFieldsWriterTest extends TestCase
 
     /**
      * writeVerified INSERT must store status = 'verified'.
+     *
+     * Same single-quoted-string escaping caveat as above.
      */
     public function testWriteVerifiedInsertUsesVerifiedStatus(): void
     {
@@ -135,7 +144,7 @@ final class ExtractedFieldsWriterTest extends TestCase
         $verifiedBlock = substr($this->source, (int) $secondInsertPos, 400);
 
         $this->assertStringContainsString(
-            "'verified'",
+            "\\'verified\\'",
             $verifiedBlock,
             "writeVerified INSERT must hard-code status = 'verified'.",
         );

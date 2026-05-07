@@ -38,7 +38,10 @@ use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\SystemLogger;
 use Psr\Log\LoggerInterface;
 
-final class DocumentPathResolver
+// Not declared `final` so the unit-test seam (PHPUnit createMock) can
+// double the class without needing to extract a separate interface.
+// All callers depend on the public API, not on subclass behaviour.
+class DocumentPathResolver
 {
     private readonly LoggerInterface $logger;
 

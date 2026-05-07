@@ -274,9 +274,24 @@ final class CoPilotControllerReprocessTest extends TestCase
 
     public function testDispatchReprocessDefaultsTriggeredByManualRetry(): void
     {
+        // Capture the full dispatchReprocess() body — the agent-response
+        // unpacking (where the triggered_by default lives) sits ~140 lines
+        // into the method, well past a 3000-char window.  Use the next
+        // method declaration as the body terminator.
         $dispatchPos = strpos($this->controllerSource, 'private function dispatchReprocess()');
         self::assertNotFalse($dispatchPos);
-        $dispatchBlock = substr($this->controllerSource, (int) $dispatchPos, 3000);
+
+        // Find the next `private function` or `public function` after dispatchReprocess
+        // to bound the body.  Fall back to end-of-file if none exists.
+        $nextMethodPos = strpos($this->controllerSource, "\n    private function ", (int) $dispatchPos + 1);
+        if ($nextMethodPos === false) {
+            $nextMethodPos = strpos($this->controllerSource, "\n    public function ", (int) $dispatchPos + 1);
+        }
+        $blockLength = $nextMethodPos !== false
+            ? $nextMethodPos - (int) $dispatchPos
+            : strlen($this->controllerSource) - (int) $dispatchPos;
+
+        $dispatchBlock = substr($this->controllerSource, (int) $dispatchPos, (int) $blockLength);
 
         $this->assertStringContainsString(
             "'manual_retry'",
@@ -313,11 +328,16 @@ final class CoPilotControllerReprocessTest extends TestCase
         preg_match_all('/\$this->logger->(error|warning)\([^;]+\);/s', $this->controllerSource, $matches);
         $logCalls = $matches[0] ?? [];
 
+        // The literal text "patient_id" can legitimately appear inside the
+        // log MESSAGE string (e.g., "patient_id mismatch — possible horizontal
+        // escalation").  What MUST NOT appear is a context-array key
+        // ('patient_id' => ...) carrying the raw value, or any of the actual
+        // pid variables ($sessionPid / $storedPid / $patientId / $pid).
         foreach ($logCalls as $logCall) {
             $this->assertStringNotContainsString(
-                'patient_id',
+                "'patient_id' =>",
                 $logCall,
-                "Logger call must not include raw patient_id: {$logCall}",
+                "Logger context array must not include raw patient_id: {$logCall}",
             );
             $this->assertStringNotContainsString(
                 '$sessionPid',
@@ -328,6 +348,11 @@ final class CoPilotControllerReprocessTest extends TestCase
                 '$storedPid',
                 $logCall,
                 "Logger call must not include \$storedPid: {$logCall}",
+            );
+            $this->assertStringNotContainsString(
+                '$patientId',
+                $logCall,
+                "Logger call must not include \$patientId: {$logCall}",
             );
         }
     }

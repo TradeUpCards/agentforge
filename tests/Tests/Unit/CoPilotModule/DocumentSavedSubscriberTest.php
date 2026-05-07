@@ -198,7 +198,11 @@ final class DocumentSavedSubscriberTest extends TestCase
         $source = file_get_contents($sourcePath);
         self::assertIsString($source);
 
-        $count = substr_count($source, 'markPriorAttemptsInactive(');
+        // Count call-site occurrences only (qualified by the service prefix).
+        // Plain substr_count('markPriorAttemptsInactive(') would count
+        // docblock and inline-comment mentions too; the qualified form
+        // matches only the actual method invocation in code.
+        $count = substr_count($source, '$this->roundtripService->markPriorAttemptsInactive(');
 
         $this->assertSame(
             1,
