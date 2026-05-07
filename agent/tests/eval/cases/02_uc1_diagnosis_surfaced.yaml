@@ -12,6 +12,7 @@ fixture_data_required: true  # Asserts diabetes mention — Maria fixture only.
 tool_mix:
   - get_problem_list
 failure_mode: problem_omission
+rubric: [factually_consistent]
 messages:
   - role: user
     content: "Generate a pre-visit brief for this patient."

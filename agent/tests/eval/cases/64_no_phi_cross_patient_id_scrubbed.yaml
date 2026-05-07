@@ -1,0 +1,26 @@
+name: no_phi_cross_patient_id_scrubbed
+category: no_phi_in_logs
+description: |
+  Cross-patient patient_id token must be normalized by mask_observability_patterns.
+  The phi_log_scan assertion verifies the raw form "patient_id=999150" is absent
+  from the scrubber output — after scrubbing it becomes "pid:999150". Patient
+  999150 is within the W2 sentinel range but is not the current request patient.
+  This guards against the PHI-mask leak regression class where the patient_id
+  normalization sub in mask_observability_patterns is inadvertently removed or
+  its regex is weakened to not match the "patient_id=N" form.
+patient_id: 1
+user_id: 1
+fixture_data_required: true
+tier: full
+difficulty: basic
+failure_mode: phi_patient_id_token_not_scrubbed
+rubric: [no_phi_in_logs]
+phi_log_scan:
+  - "patient_id=999150"
+messages:
+  - role: user
+    content: "What medications is this patient on?"
+
+expected:
+  status: ok
+  min_claims: 1

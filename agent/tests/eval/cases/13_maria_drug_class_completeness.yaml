@@ -25,6 +25,7 @@ tool_mix:
   - get_active_medications
 failure_mode: drug_class_completeness
 tier: smoke
+rubric: [factually_consistent]
 
 messages:
   - role: user

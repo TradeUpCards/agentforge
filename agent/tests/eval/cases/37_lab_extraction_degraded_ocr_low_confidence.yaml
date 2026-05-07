@@ -1,0 +1,23 @@
+name: lab_extraction_degraded_ocr_low_confidence
+category: lab_extraction
+description: |
+  Imperfect scan — OCR confidence below 0.5 (extraction_confidence_avg = 0.38).
+  Patient 999126 fixture has a single result with confidence = 0.38. The
+  extraction pipeline must still produce a schema-valid result (not crash or
+  return empty). Verifying that the schema_valid rubric holds even for degraded
+  inputs guards against a failure mode where the pipeline silently drops all
+  results below a confidence threshold without returning an error status.
+patient_id: 999126
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: nightly
+difficulty: intermediate
+failure_mode: extraction_low_confidence_dropped
+rubric: [schema_valid]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 1

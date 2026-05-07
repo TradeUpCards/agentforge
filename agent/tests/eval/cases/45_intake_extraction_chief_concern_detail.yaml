@@ -1,0 +1,24 @@
+name: intake_extraction_chief_concern_detail
+category: intake_extraction
+description: |
+  Patient 999134 presents with "chest tightness on exertion" as chief concern,
+  with no medications and no allergies. Asserts the chief_concern field is
+  extracted verbatim. This case validates that a clinically significant symptom
+  description is preserved exactly — paraphrasing or truncation of chief concern
+  text could cause a clinician to miss the exertional component of the complaint.
+patient_id: 999134
+user_id: 1
+doc_type: intake_form
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_chief_concern_truncated
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_field:
+    - field_path: "chief_concern"
+      expected_value: "chest tightness on exertion"

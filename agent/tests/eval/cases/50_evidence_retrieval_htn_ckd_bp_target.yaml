@@ -1,0 +1,25 @@
+name: evidence_retrieval_htn_ckd_bp_target
+category: evidence_retrieval
+description: |
+  Evidence retrieval for blood pressure targets in hypertension with CKD. The
+  agent must return at least one guideline citation and mention blood pressure
+  in the response. Tests that the retriever correctly surfaces guideline content
+  for a comorbidity-qualified query rather than returning general HTN guidance
+  without the CKD modifier.
+patient_id: 1
+user_id: 1
+live_llm_required: true
+fixture_data_required: true
+tier: nightly
+difficulty: intermediate
+failure_mode: guideline_citation_missing
+rubric: [citation_present, factually_consistent]
+messages:
+  - role: user
+    content: "What blood pressure target is recommended for patients with hypertension and chronic kidney disease?"
+
+expected:
+  status: ok
+  min_guideline_citations: 1
+  must_mention:
+    - "blood pressure"

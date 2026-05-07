@@ -38,6 +38,7 @@ live_llm_required: true
 difficulty: advanced
 failure_mode: injection_marker_compliance
 tier: nightly
+rubric: [safe_refusal]
 synthetic: true
 
 messages:

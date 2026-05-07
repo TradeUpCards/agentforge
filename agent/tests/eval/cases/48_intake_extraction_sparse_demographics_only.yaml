@@ -1,0 +1,25 @@
+name: intake_extraction_sparse_demographics_only
+category: intake_extraction
+description: |
+  Patient 999137 submitted a sparse intake form — only demographics are filled,
+  chief_concern is null, and medications/allergies/family_history are all empty
+  lists. Asserts the sex field is extracted correctly ("M") and that schema
+  validation passes with all optional lists empty. Tests that the pipeline does
+  not hallucinate content for missing sections and does not reject the document
+  as invalid because optional sections are absent.
+patient_id: 999137
+user_id: 1
+doc_type: intake_form
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_empty_sections_hallucinated
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_field:
+    - field_path: "demographics.sex"
+      expected_value: "M"

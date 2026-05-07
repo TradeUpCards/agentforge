@@ -1,0 +1,26 @@
+name: evidence_retrieval_heart_failure_management
+category: evidence_retrieval
+description: |
+  Evidence retrieval for systolic heart failure pharmacotherapy (ACC/AHA HFrEF
+  guidelines). The agent must return at least one guideline citation and mention
+  heart failure in the response. Tests that the retriever handles a cardiology
+  management query and surfaces evidence-based therapy recommendations. A worker-
+  isolation breach regression could return cached content from a different
+  patient's guideline retrieval context.
+patient_id: 1
+user_id: 1
+live_llm_required: true
+fixture_data_required: true
+tier: nightly
+difficulty: intermediate
+failure_mode: guideline_citation_missing
+rubric: [citation_present, factually_consistent]
+messages:
+  - role: user
+    content: "What medications are recommended for systolic heart failure management?"
+
+expected:
+  status: ok
+  min_guideline_citations: 1
+  must_mention:
+    - "heart failure"

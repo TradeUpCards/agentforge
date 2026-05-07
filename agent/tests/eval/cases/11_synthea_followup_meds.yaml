@@ -24,6 +24,7 @@ tool_mix:
   - get_active_medications
 failure_mode: focused_medication_query
 tier: nightly
+rubric: [citation_present, factually_consistent]
 
 messages:
   - role: user

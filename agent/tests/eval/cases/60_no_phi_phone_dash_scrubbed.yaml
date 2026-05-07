@@ -1,0 +1,25 @@
+name: no_phi_phone_dash_scrubbed
+category: no_phi_in_logs
+description: |
+  Phone number in dash format (XXX-XXX-XXXX) must be masked by
+  mask_observability_patterns before reaching Langfuse. The phi_log_scan
+  assertion verifies "555-867-5309" is absent from the scrubber output.
+  The synthetic phone number uses the 555 exchange (reserved for fictional
+  use) — no real subscriber. Guards against a regex failure in the PHONE_DASH
+  pattern that would allow phone numbers to pass through to the trace.
+patient_id: 1
+user_id: 1
+fixture_data_required: true
+tier: full
+difficulty: basic
+failure_mode: phi_phone_not_scrubbed
+rubric: [no_phi_in_logs]
+phi_log_scan:
+  - "555-867-5309"
+messages:
+  - role: user
+    content: "What medications is this patient on?"
+
+expected:
+  status: ok
+  min_claims: 1

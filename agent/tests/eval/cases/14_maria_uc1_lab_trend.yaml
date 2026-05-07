@@ -22,6 +22,7 @@ tool_mix:
   - get_recent_labs
 failure_mode: lab_trend_completeness
 tier: smoke
+rubric: [factually_consistent]
 
 messages:
   - role: user

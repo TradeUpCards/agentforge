@@ -1,0 +1,26 @@
+name: lab_extraction_a1c_standard
+category: lab_extraction
+description: |
+  Standard A1c extraction from a single-result lab PDF. Patient 999120 has
+  Hemoglobin A1c = 8.2% (abnormal). Smoke-tier baseline for extraction pipeline:
+  schema must be valid, result count >= 1, and the first result name and abnormal
+  flag must match the fixture exactly.
+patient_id: 999120
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: smoke
+difficulty: smoke
+failure_mode: extraction_schema_invalid
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 1
+  expect_extraction_field:
+    - field_path: "results.0.test_name"
+      expected_value: "Hemoglobin A1c"
+    - field_path: "results.0.abnormal"
+      expected_value: true

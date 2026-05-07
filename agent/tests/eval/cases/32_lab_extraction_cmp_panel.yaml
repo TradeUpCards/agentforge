@@ -1,0 +1,21 @@
+name: lab_extraction_cmp_panel
+category: lab_extraction
+description: |
+  Comprehensive Metabolic Panel extraction from patient 999121. The fixture
+  contains 6 results (glucose, sodium, potassium, creatinine, BUN, CO2). Asserts
+  that the extraction pipeline recovers at least 5 results from a multi-analyte
+  panel document without dropping entries.
+patient_id: 999121
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_result_count_low
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 5

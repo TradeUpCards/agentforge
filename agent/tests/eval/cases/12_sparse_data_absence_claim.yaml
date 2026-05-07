@@ -38,6 +38,7 @@ tool_mix:
   - get_recent_encounters
 failure_mode: sparse_data_absence_claim
 tier: nightly
+rubric: [factually_consistent]
 synthetic: true
 source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-2-reference-fixture"
 

@@ -1,0 +1,25 @@
+name: intake_extraction_multiple_allergies_no_meds
+category: intake_extraction
+description: |
+  Patient 999135 has three allergies (Penicillin, Sulfa, NSAIDs) and no
+  medications. Asserts extraction correctly captures the first allergy substance.
+  A pre-procedure allergy review scenario — all three allergies carry clinical
+  weight (Penicillin hives, Sulfa rash, NSAID bronchospasm). Tests that the
+  pipeline preserves the full allergy list when the medication list is empty,
+  rather than short-circuiting on the empty medications section.
+patient_id: 999135
+user_id: 1
+doc_type: intake_form
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_allergy_list_truncated
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_field:
+    - field_path: "allergies.0.substance"
+      expected_value: "Penicillin"

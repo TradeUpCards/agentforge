@@ -35,6 +35,7 @@ tool_mix:
   - get_recent_encounters
 failure_mode: progression_recognition_treatment_escalation
 tier: nightly
+rubric: [factually_consistent]
 synthetic: true
 source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-4-contradictory-fixture"
 

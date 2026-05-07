@@ -1,0 +1,42 @@
+{
+  "patient_id": 999124,
+  "document_reference_id": "docref-999124-lab_pdf",
+  "results": [
+    {
+      "test_name": "INR",
+      "value": 4.1,
+      "unit": "ratio",
+      "reference_range": "0.8-1.2",
+      "abnormal": true,
+      "collection_date": "2026-03-25",
+      "source_block_id": "block-999124-001",
+      "confidence": 0.98
+    },
+    {
+      "test_name": "PT",
+      "value": 42.5,
+      "unit": "sec",
+      "reference_range": "11.0-13.5",
+      "abnormal": true,
+      "collection_date": "2026-03-25",
+      "source_block_id": "block-999124-002",
+      "confidence": 0.97
+    },
+    {
+      "test_name": "aPTT",
+      "value": 38.0,
+      "unit": "sec",
+      "reference_range": "25-35",
+      "abnormal": true,
+      "collection_date": "2026-03-25",
+      "source_block_id": "block-999124-003",
+      "confidence": 0.96
+    }
+  ],
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 1,
+    "extraction_confidence_avg": 0.97
+  }
+}

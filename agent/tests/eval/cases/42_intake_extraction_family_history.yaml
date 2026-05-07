@@ -1,0 +1,24 @@
+name: intake_extraction_family_history
+category: intake_extraction
+description: |
+  Family history extraction from patient 999131. Fixture contains father with
+  Type 2 Diabetes and mother with Hypertension — two family history entries,
+  no medications, no allergies. Asserts extraction correctly captures the first
+  family_history entry condition. Tests that the pipeline populates the
+  family_history list rather than defaulting it to empty when entries are present.
+patient_id: 999131
+user_id: 1
+doc_type: intake_form
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_family_history_missing
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_field:
+    - field_path: "family_history.0.condition"
+      expected_value: "Type 2 Diabetes"

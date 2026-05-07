@@ -1,0 +1,22 @@
+name: lab_extraction_urinalysis
+category: lab_extraction
+description: |
+  Urinalysis extraction from patient 999128. Fixture contains 4 results:
+  urine protein (+2, abnormal), urine glucose (+1, abnormal), RBC (8/hpf,
+  abnormal), WBC (3/hpf, normal). Asserts extraction recovers >= 3 results.
+  Tests that the pipeline handles qualitative/semiquantitative lab values
+  (using "+" scale units) correctly — not only numeric float-valued results.
+patient_id: 999128
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_result_count_low
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 3

@@ -1,0 +1,25 @@
+name: intake_extraction_no_current_medications
+category: intake_extraction
+description: |
+  Patient 999132 reports no current medications — the intake form has an
+  explicitly empty medications section. Extraction must produce a schema-valid
+  IntakeForm with current_medications as an empty list (not null, not missing).
+  Asserts demographics.name is correctly captured as an anchor. A regression
+  where the pipeline returns null for an empty list would fail schema validation
+  and break downstream medication reconciliation checks.
+patient_id: 999132
+user_id: 1
+doc_type: intake_form
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_empty_list_as_null
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_field:
+    - field_path: "demographics.name"
+      expected_value: "Test Patient 999132"

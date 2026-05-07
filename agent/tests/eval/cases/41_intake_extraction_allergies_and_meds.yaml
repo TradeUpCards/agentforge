@@ -1,0 +1,24 @@
+name: intake_extraction_allergies_and_meds
+category: intake_extraction
+description: |
+  Smoke-tier intake form extraction for patient 999130. Fixture contains a
+  Penicillin allergy and Lisinopril medication. Asserts extraction produces a
+  schema-valid IntakeForm and the first allergy substance matches the fixture
+  value exactly. This is the smoke baseline for the intake extraction pipeline:
+  if this case fires, the entire intake extraction pathway is broken.
+patient_id: 999130
+user_id: 1
+doc_type: intake_form
+synthetic: true
+fixture_data_required: false
+tier: smoke
+difficulty: smoke
+failure_mode: extraction_schema_invalid
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_field:
+    - field_path: "allergies.0.substance"
+      expected_value: "Penicillin"

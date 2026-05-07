@@ -1,0 +1,32 @@
+{
+  "patient_id": 999131,
+  "document_reference_id": "docref-999131-intake_form",
+  "demographics": {
+    "name": "Test Patient 999131",
+    "dob": "1968-09-22",
+    "sex": "M",
+    "source_block_id": "block-999131-demo-001"
+  },
+  "chief_concern": "Follow-up blood pressure check",
+  "current_medications": [],
+  "allergies": [],
+  "family_history": [
+    {
+      "condition": "Type 2 Diabetes",
+      "relation": "father",
+      "source_block_id": "block-999131-fhx-001"
+    },
+    {
+      "condition": "Hypertension",
+      "relation": "mother",
+      "source_block_id": "block-999131-fhx-002"
+    }
+  ],
+  "source_citations": {},
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 2,
+    "extraction_confidence_avg": 0.93
+  }
+}

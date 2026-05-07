@@ -1,0 +1,32 @@
+{
+  "patient_id": 999125,
+  "document_reference_id": "docref-999125-lab_pdf",
+  "results": [
+    {
+      "test_name": "Hemoglobin A1c",
+      "value": 8.5,
+      "unit": "%",
+      "reference_range": "<5.7",
+      "abnormal": true,
+      "collection_date": "2026-01-10",
+      "source_block_id": "block-999125-001",
+      "confidence": 0.97
+    },
+    {
+      "test_name": "Hemoglobin A1c",
+      "value": 8.9,
+      "unit": "%",
+      "reference_range": "<5.7",
+      "abnormal": true,
+      "collection_date": "2026-03-10",
+      "source_block_id": "block-999125-002",
+      "confidence": 0.96
+    }
+  ],
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 2,
+    "extraction_confidence_avg": 0.965
+  }
+}

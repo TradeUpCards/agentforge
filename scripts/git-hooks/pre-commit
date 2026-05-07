@@ -37,6 +37,19 @@ else
     exit 0
 fi
 
+# Sentinel patient-ID guard -- eval case YAMLs must use sentinel IDs (999000-999999)
+# or the documented fixture IDs (1=Maria, 92=Guadalupe). Reject everything else.
+echo "[pre-commit] Checking eval case patient_ids for non-sentinel values..."
+if grep -rn "^patient_id:" "$repo_root/agent/tests/eval/cases/" 2>/dev/null \
+   | grep -v "patient_id: 1$" \
+   | grep -v "patient_id: 92$" \
+   | grep -v "patient_id: 999" \
+   | grep -q "patient_id:"; then
+    echo "[pre-commit] ERROR: non-sentinel patient_id in eval case YAML." >&2
+    echo "[pre-commit] Allowed: patient_id 1 (Maria), 92 (Guadalupe), 999000-999999 (sentinels)." >&2
+    exit 1
+fi
+
 echo "[pre-commit] Running verifier unit tests + smoke-tier eval cases..."
 EVAL_TIER=smoke "$PY" -m pytest agent/tests/unit/ agent/tests/eval/ -q --tb=short
 

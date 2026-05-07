@@ -23,6 +23,7 @@ patient_id: 1
 user_id: 1
 difficulty: intermediate
 failure_mode: ambiguous_input_grounding
+rubric: [factually_consistent]
 messages:
   - role: user
     content: "tell me about this patient"

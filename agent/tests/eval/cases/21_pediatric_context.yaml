@@ -33,6 +33,7 @@ tool_mix:
   - get_recent_encounters
 failure_mode: pediatric_context_awareness
 tier: nightly
+rubric: [factually_consistent]
 synthetic: true
 source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-4-pediatric-fixture"
 

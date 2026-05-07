@@ -1,0 +1,28 @@
+{
+  "patient_id": 999132,
+  "document_reference_id": "docref-999132-intake_form",
+  "demographics": {
+    "name": "Test Patient 999132",
+    "dob": "1985-11-03",
+    "sex": "F",
+    "source_block_id": "block-999132-demo-001"
+  },
+  "chief_concern": "Routine annual physical",
+  "current_medications": [],
+  "allergies": [
+    {
+      "substance": "Latex",
+      "reaction": "contact dermatitis",
+      "severity": "mild",
+      "source_block_id": "block-999132-allergy-001"
+    }
+  ],
+  "family_history": [],
+  "source_citations": {},
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 2,
+    "extraction_confidence_avg": 0.95
+  }
+}

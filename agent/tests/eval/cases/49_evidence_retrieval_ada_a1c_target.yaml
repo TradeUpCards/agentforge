@@ -1,0 +1,27 @@
+name: evidence_retrieval_ada_a1c_target
+category: evidence_retrieval
+description: |
+  Evidence retrieval for ADA A1c target guideline in a T2DM patient. The agent
+  must return at least one citation with source_type == "guideline" and mention
+  both the A1c threshold and the target value of 7. Tests that the evidence
+  retriever node retrieves ADA diabetes management guidelines for a direct
+  A1c-target query. Missing guideline citation is the primary regression class
+  this case detects.
+patient_id: 1
+user_id: 1
+live_llm_required: true
+fixture_data_required: true
+tier: nightly
+difficulty: intermediate
+failure_mode: guideline_citation_missing
+rubric: [citation_present, factually_consistent]
+messages:
+  - role: user
+    content: "What is the recommended A1c target for this patient with T2DM?"
+
+expected:
+  status: ok
+  min_guideline_citations: 1
+  must_mention:
+    - "A1c"
+    - "7"

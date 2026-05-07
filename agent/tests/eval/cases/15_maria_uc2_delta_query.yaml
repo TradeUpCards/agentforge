@@ -22,6 +22,7 @@ tool_mix:
   - get_recent_labs
 failure_mode: uc2_delta_grounding
 tier: full
+rubric: [factually_consistent]
 
 messages:
   - role: user

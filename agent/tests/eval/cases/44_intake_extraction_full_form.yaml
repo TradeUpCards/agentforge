@@ -1,0 +1,25 @@
+name: intake_extraction_full_form
+category: intake_extraction
+description: |
+  Full intake form extraction for patient 999133 — the most complete fixture
+  in the intake set. Contains demographics, chief concern, 2 medications
+  (Metformin, Atorvastatin), 2 allergies (Penicillin anaphylaxis, Codeine), and
+  2 family history entries (T2DM mother, CAD father). Asserts demographics.name
+  is correctly captured. This case verifies the pipeline handles all intake
+  sections simultaneously without field cross-contamination or truncation.
+patient_id: 999133
+user_id: 1
+doc_type: intake_form
+synthetic: true
+fixture_data_required: false
+tier: nightly
+difficulty: intermediate
+failure_mode: extraction_multi_section_truncation
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_field:
+    - field_path: "demographics.name"
+      expected_value: "Test Patient 999133"

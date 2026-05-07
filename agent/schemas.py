@@ -298,6 +298,17 @@ class AgentResponse(BaseModel):
     that pass overall (i.e. the strip didn't cross the 30% refusal
     threshold)."""
 
+    citations: list[Citation] = Field(
+        default_factory=list,
+        description=(
+            "Machine-readable citations derived from verified claims. "
+            "source_type distinguishes patient_record vs guideline evidence. "
+            "Guideline citations carry source_type='guideline' with chunk_id in source_id. "
+            "Patient record citations carry source_type='patient_record' with table:id in source_id. "
+            "W2_ARCHITECTURE.md §7.3."
+        ),
+    )
+
 
 class RefusalResponse(BaseModel):
     """Returned when the verifier rejects ≥30% of claims twice (per §3.6)."""

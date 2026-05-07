@@ -1,0 +1,22 @@
+{
+  "patient_id": 999126,
+  "document_reference_id": "docref-999126-lab_pdf",
+  "results": [
+    {
+      "test_name": "Glucose",
+      "value": 105.0,
+      "unit": "mg/dL",
+      "reference_range": "70-99",
+      "abnormal": true,
+      "collection_date": "2026-03-28",
+      "source_block_id": "block-999126-001",
+      "confidence": 0.38
+    }
+  ],
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 1,
+    "extraction_confidence_avg": 0.38
+  }
+}

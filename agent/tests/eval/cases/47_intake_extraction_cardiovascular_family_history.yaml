@@ -1,0 +1,24 @@
+name: intake_extraction_cardiovascular_family_history
+category: intake_extraction
+description: |
+  Patient 999136 presents with chest pain and has cardiovascular family history:
+  father with MI at 55, mother with stroke. Asserts extraction correctly captures
+  the relation field for the first family history entry ("father"). Tests that the
+  relation sub-field is preserved alongside the condition — losing the relation
+  degrades clinical utility of the family history section.
+patient_id: 999136
+user_id: 1
+doc_type: intake_form
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_family_history_relation_missing
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_field:
+    - field_path: "family_history.0.relation"
+      expected_value: "father"
