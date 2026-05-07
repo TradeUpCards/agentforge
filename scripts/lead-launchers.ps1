@@ -71,15 +71,83 @@ function _Resolve-WorktreePath {
     return Join-Path $AgentForgeParent $Raw
 }
 
+# Resolve a Python interpreter on PATH. Returns a 2-element @(exe, prefixArgs)
+# pair: prefixArgs is non-empty only for the Windows py launcher (which needs
+# `-3` to pick a Python 3 interpreter). Returns $null if no interpreter is
+# available. Used by _Render-KickoffIfYaml and the Finish-Lead phase
+# transition step — both fall through to a warning and skip the YAML work
+# when Python is missing, rather than failing the calling operation.
+function _Resolve-Python {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd) { return @($cmd.Source, @()) }
+    $cmd = Get-Command python3 -ErrorAction SilentlyContinue
+    if ($cmd) { return @($cmd.Source, @()) }
+    $cmd = Get-Command py -ErrorAction SilentlyContinue
+    if ($cmd) { return @($cmd.Source, @('-3')) }
+    return $null
+}
+
+# _Render-KickoffIfYaml -Name <name>
+#   If a YAML config exists at .gauntlet\week2\kickoff\<name>.yml, invoke
+#   scripts\render_kickoff.py to render it to <name>.md before parsing.
+#   No-op if the YAML is absent (legacy hand-authored kickoff) so existing
+#   leads keep working unchanged.
+#
+#   Always returns void. Render failures are warnings, not errors — the
+#   caller falls through to the existing .md if it exists. Same
+#   backward-compatibility guarantee as the bash launcher.
+function _Render-KickoffIfYaml {
+    param([Parameter(Mandatory=$true)][string]$Name)
+
+    $yml = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff\$Name.yml"
+    if (-not (Test-Path -LiteralPath $yml)) { return }
+
+    $py = _Resolve-Python
+    if ($null -eq $py) {
+        Write-Warning "_Render-KickoffIfYaml: python not on PATH; skipping render of $yml"
+        return
+    }
+    $pyExe    = $py[0]
+    $pyPrefix = $py[1]
+
+    $script = Join-Path $AgentForgeRoot "scripts\render_kickoff.py"
+    $argList = @()
+    if ($pyPrefix.Count -gt 0) { $argList += $pyPrefix }
+    $argList += @($script, "render", $Name)
+
+    # Capture combined stdout+stderr via 2>&1 redirection. render_kickoff
+    # writes its status line ("rendered <yml> -> <md> ...") to stderr;
+    # surface it to the caller so they can see which phase rendered.
+    $output = & $pyExe @argList 2>&1
+    $rc = $LASTEXITCODE
+    if ($output) {
+        foreach ($line in @($output)) {
+            Write-Host $line
+        }
+    }
+    if ($rc -ne 0) {
+        Write-Warning "_Render-KickoffIfYaml: render failed for $Name (exit $rc); falling back to existing .md"
+    }
+}
+
 # Hardened kickoff resolver used by Start-Lead and Finish-Lead. Validates
 # the branch and worktree fields with strict regex and resolves the
 # worktree to an absolute Windows path. Returns a hashtable with Branch,
 # Worktree (raw, as written), and AbsWorktree (canonical absolute).
 #
+# If a YAML config exists at <kickoff>\<name>.yml, the function first
+# re-renders <name>.md from it (via render_kickoff.py) so the parsed
+# metadata reflects the active phase. Legacy leads with no YAML keep
+# working against their hand-authored .md.
+#
 # Throws (rather than returning $null) on any validation failure — this
 # is the safe-resolution helper for destructive operations.
 function _Parse-Kickoff {
     param([Parameter(Mandatory=$true)][string]$Name)
+
+    # Render YAML -> MD first if a YAML config exists; falls through silently
+    # when the lead is still on the legacy hand-authored kickoff format.
+    _Render-KickoffIfYaml -Name $Name
 
     $promptPath = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff\$Name.md"
     if (-not (Test-Path -LiteralPath $promptPath)) {
@@ -636,13 +704,56 @@ function Finish-Lead {
     Skip the git fetch step (offline use). Without this, default behavior
     fetches before the merged/pushed checks because stale origin/master
     is the failure mode this tool is designed to prevent.
+
+    .PARAMETER NextPhase
+    After successful teardown, transition the lead to a new phase by
+    promoting the handoff's "Recommended next PM prompt" into the lead's
+    YAML config under this phase name. Requires -NextBranch. Mutually
+    exclusive with -KeepBranch (one says delete-and-rotate, the other
+    says preserve). Skipped silently with a warning if the lead has no
+    YAML config (still on the legacy hand-authored kickoff).
+
+    .PARAMETER NextBranch
+    Branch for the new phase (required with -NextPhase). Used as the
+    `branch` field on the new YAML phase entry; the next Start-<Lead>
+    will create a worktree on this branch.
+
+    .PARAMETER NextWorktree
+    Worktree path for the new phase. Defaults to the current phase's
+    worktree (i.e., reuse the same checkout location for the next phase).
+    Only meaningful with -NextPhase.
+
+    .PARAMETER NextMission
+    Short mission summary for the new phase. Heuristic if omitted (first
+    non-identity line of the recommended prompt). Only meaningful with
+    -NextPhase.
     #>
     param(
         [Parameter(Mandatory=$true)][string]$Name,
         [switch]$Force,
         [switch]$KeepBranch,
-        [switch]$NoFetch
+        [switch]$NoFetch,
+        [string]$NextPhase = "",
+        [string]$NextBranch = "",
+        [string]$NextWorktree = "",
+        [string]$NextMission = ""
     )
+
+    # --- Cross-flag validation ----------------------------------------
+    # Done before any destructive step so contradictory invocations bail
+    # before touching the worktree. Mirrors the bash launcher's checks.
+    if ($NextPhase -and -not $NextBranch) {
+        Write-Error "Finish-Lead: -NextPhase requires -NextBranch"
+        return
+    }
+    if ($NextPhase -and $KeepBranch) {
+        Write-Error "Finish-Lead: -NextPhase and -KeepBranch are contradictory (one says delete-and-rotate, the other says preserve)"
+        return
+    }
+    if ((-not $NextPhase) -and ($NextBranch -or $NextWorktree -or $NextMission)) {
+        Write-Error "Finish-Lead: -NextBranch / -NextWorktree / -NextMission only meaningful with -NextPhase"
+        return
+    }
 
     $errored = $false
 
@@ -869,6 +980,69 @@ function Finish-Lead {
         Write-Host "  Status:          OK" -ForegroundColor Green
     }
     Write-Host ""
+
+    # --- Step 15 (optional): phase transition -------------------------
+    # Mirrors the bash launcher: if -NextPhase was passed, invoke
+    # render_kickoff.py to:
+    #   - read the lead's handoff for the "Recommended next PM prompt" section
+    #   - mark the just-finished phase complete in <name>.yml
+    #   - add the new phase as active with the extracted prompt as first_task
+    #   - re-render <name>.md so the next Start-<Lead> picks up the new phase
+    # The transition is a separate step from teardown so a transition failure
+    # doesn't undo the cleanup that already succeeded.
+    if ($NextPhase) {
+        $yml = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff\$Name.yml"
+        if (-not (Test-Path -LiteralPath $yml)) {
+            $msg = @(
+                "",
+                "Finish-Lead: -NextPhase requires a YAML config at $yml.",
+                "  This lead is still on the legacy hand-authored kickoff format.",
+                "  Bootstrap with:",
+                "    python `"$AgentForgeRoot\scripts\render_kickoff.py`" init-from-md $Name --current-phase-name <prev-phase>",
+                "  Then re-run Finish-Lead -NextPhase. Teardown completed cleanly; only the",
+                "  phase transition step was skipped."
+            ) -join "`n"
+            Write-Error $msg
+            return
+        }
+
+        $py = _Resolve-Python
+        if ($null -eq $py) {
+            Write-Error "Finish-Lead: python not on PATH; cannot run phase transition. Teardown completed."
+            return
+        }
+        $pyExe    = $py[0]
+        $pyPrefix = $py[1]
+
+        $script = Join-Path $AgentForgeRoot "scripts\render_kickoff.py"
+        $transArgs = @()
+        if ($pyPrefix.Count -gt 0) { $transArgs += $pyPrefix }
+        $transArgs += @($script, "transition", $Name,
+                        "--to", $NextPhase,
+                        "--branch", $NextBranch)
+        if ($NextWorktree) { $transArgs += @("--worktree", $NextWorktree) }
+        if ($NextMission)  { $transArgs += @("--mission",  $NextMission) }
+
+        $titleCase = (Get-Culture).TextInfo.ToTitleCase($Name.ToLower())
+        Write-Host ""
+        Write-Host "Finish-Lead: transitioning $titleCase to $NextPhase ..." -ForegroundColor Cyan
+        $transOutput = & $pyExe @transArgs 2>&1
+        $transRc = $LASTEXITCODE
+        if ($transOutput) {
+            foreach ($line in @($transOutput)) {
+                Write-Host $line
+            }
+        }
+        if ($transRc -eq 0) {
+            $renderedMd = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff\$Name.md"
+            Write-Host ("  YAML updated: {0}" -f $yml)
+            Write-Host ("  Rendered:    {0}" -f $renderedMd)
+            Write-Host ("  Next:        Start-{0} (will create the new {1} worktree)" -f $titleCase, $NextBranch)
+        } else {
+            Write-Error "Finish-Lead: transition step failed (exit $transRc). Teardown completed cleanly; YAML may be unchanged."
+            return
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
