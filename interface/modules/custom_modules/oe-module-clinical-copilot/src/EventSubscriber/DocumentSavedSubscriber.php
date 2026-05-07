@@ -139,9 +139,10 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
 
             $docRefId = (string) $docId;
 
-            // 4. Idempotency: skip if already extracted.
-            if ($this->extractionExists($docRefId, $docType)) {
-                $this->logger->info('ClinicalCopilot: extraction already exists — idempotent skip', [
+            // 4. Idempotency: skip only if an active, successful extraction
+            //    already exists.  Refused or error rows do NOT block retry.
+            if ($this->activeOkExtractionExists($docRefId, $docType)) {
+                $this->logger->info('ClinicalCopilot: active ok extraction already exists — idempotent skip', [
                     'doc_ref_id' => $docRefId,
                     'doc_type'   => $docType,
                 ]);
@@ -187,6 +188,22 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 ? (float) $response['extraction_confidence_avg']
                 : null;
 
+            // Attempt-chain metadata (P2).  All fields are optional in the
+            // agent response; PHP-side defaults ensure backward compatibility
+            // with agents that have not yet been updated to emit these keys.
+            $templateId    = is_string($response['template_id'] ?? null)    ? $response['template_id']    : null;
+            $model         = is_string($response['model'] ?? null)           ? $response['model']          : null;
+            $promptVariant = is_string($response['prompt_variant'] ?? null)  ? $response['prompt_variant'] : 'default';
+            $attemptN      = is_int($response['attempt_n'] ?? null)          ? $response['attempt_n']      : 1;
+            $triggeredBy   = is_string($response['triggered_by'] ?? null)    ? $response['triggered_by']   : 'initial';
+            $rawCostUsd    = $response['cost_usd'] ?? null;
+            $costUsd       = (is_float($rawCostUsd) || is_int($rawCostUsd))
+                ? (float) $rawCostUsd
+                : null;
+            $agentLatencyMs   = is_int($response['latency_ms'] ?? null)      ? $response['latency_ms']     : null;
+            $totalFields   = is_int($response['total_fields'] ?? null)       ? $response['total_fields']   : null;
+            $strippedFields = is_int($response['stripped_fields'] ?? null)   ? $response['stripped_fields'] : null;
+
             // extraction_json holds only the validated schema payload — NOT raw doc text.
             $extractionJson = ($agentStatus === 'ok' && isset($response['extraction']))
                 ? json_encode($response['extraction'], JSON_UNESCAPED_UNICODE)
@@ -198,18 +215,37 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 'agent_status'  => $agentStatus,
                 'request_id'    => $requestId,
                 'latency_ms'    => $latencyMs,
+                'template_id'   => $templateId,
+                'attempt_n'     => $attemptN,
+                'triggered_by'  => $triggeredBy,
             ]);
 
             // 7. Persist result.
+            //    Before inserting the new attempt row, mark any prior active
+            //    rows for this (doc_ref_id, doc_type) as inactive.  This
+            //    enforces the at-most-one-active invariant defined in PRD §4.1.
+            //    For the very first attempt, the UPDATE matches zero rows and
+            //    is a safe no-op.
+            $this->roundtripService->markPriorAttemptsInactive($docRefId, $docType);
+
             $extractionId = $this->persistExtractionRow(
-                pid:           $sentinelPid,
-                docRefId:      $docRefId,
-                docType:       $docType,
-                status:        $agentStatus,
+                pid:            $sentinelPid,
+                docRefId:       $docRefId,
+                docType:        $docType,
+                status:         $agentStatus,
                 extractionJson: $extractionJson,
-                nBlocks:       $nBlocks,
-                confidenceAvg: $confidenceAvg,
-                requestId:     $requestId,
+                nBlocks:        $nBlocks,
+                confidenceAvg:  $confidenceAvg,
+                requestId:      $requestId,
+                templateId:     $templateId,
+                model:          $model,
+                promptVariant:  $promptVariant,
+                attemptN:       $attemptN,
+                triggeredBy:    $triggeredBy,
+                costUsd:        $costUsd,
+                latencyMs:      $agentLatencyMs,
+                totalFields:    $totalFields,
+                strippedFields: $strippedFields,
             );
 
             // 8. FHIR round-trip — only on successful extraction.  Persists
@@ -273,13 +309,26 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
     }
 
     /**
-     * Check whether a co_pilot_extractions row already exists for this
-     * (doc_ref_id, doc_type) pair.
+     * Return true only if an active, successfully-completed extraction already
+     * exists for this (doc_ref_id, doc_type) pair.
+     *
+     * Rows with is_active = 0 (superseded attempts) or status != 'ok'
+     * (refused / error) are intentionally excluded so that retries can
+     * proceed through without being blocked.
+     *
+     * Prior behaviour (pre-P2): any row — regardless of status — blocked a
+     * retry.  That caused refused / error rows to permanently silently skip
+     * re-extraction on subsequent uploads or manual reprocess attempts.
      */
-    protected function extractionExists(string $docRefId, string $docType): bool
+    protected function activeOkExtractionExists(string $docRefId, string $docType): bool
     {
         $rows = QueryUtils::fetchRecords(
-            'SELECT `id` FROM `co_pilot_extractions` WHERE `doc_ref_id` = ? AND `doc_type` = ? LIMIT 1',
+            'SELECT 1 FROM `co_pilot_extractions`
+              WHERE `doc_ref_id` = ?
+                AND `doc_type` = ?
+                AND `is_active` = 1
+                AND `status` = \'ok\'
+              LIMIT 1',
             [$docRefId, $docType]
         );
         return !empty($rows);
@@ -362,6 +411,11 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
      *
      * Uses QueryUtils::sqlInsert so the statement goes through OpenEMR's
      * standard query layer (audit trail, escaping).
+     *
+     * The P2 attempt-chain columns (template_id through stripped_fields) all
+     * default to NULL / their column DEFAULTs when omitted, so existing call
+     * sites that pre-date P2 (e.g. the error-path early return above) remain
+     * valid without being updated.
      */
     protected function persistExtractionRow(
         int $pid,
@@ -372,13 +426,25 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
         ?int $nBlocks,
         ?float $confidenceAvg,
         ?string $requestId,
+        ?string $templateId     = null,
+        ?string $model          = null,
+        string  $promptVariant  = 'default',
+        int     $attemptN       = 1,
+        string  $triggeredBy    = 'initial',
+        ?float  $costUsd        = null,
+        ?int    $latencyMs      = null,
+        ?int    $totalFields    = null,
+        ?int    $strippedFields = null,
     ): int {
         return (int) QueryUtils::sqlInsert(
             'INSERT INTO `co_pilot_extractions`
                 (`patient_id`, `doc_ref_id`, `doc_type`, `status`,
                  `extraction_json`, `n_blocks`, `extraction_confidence_avg`,
-                 `agent_request_id`)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                 `agent_request_id`,
+                 `template_id`, `model`, `prompt_variant`,
+                 `attempt_n`, `triggered_by`,
+                 `cost_usd`, `latency_ms`, `total_fields`, `stripped_fields`)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 $pid,
                 $docRefId,
@@ -388,6 +454,15 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 $nBlocks,
                 $confidenceAvg,
                 $requestId,
+                $templateId,
+                $model,
+                $promptVariant,
+                $attemptN,
+                $triggeredBy,
+                $costUsd,
+                $latencyMs,
+                $totalFields,
+                $strippedFields,
             ]
         );
     }

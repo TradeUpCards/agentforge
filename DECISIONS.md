@@ -552,6 +552,104 @@ pid: (missing)
 
 **Why this matters for the CTO defense.** Strongest interview talking-point from the build session. *"What does your eval suite test that a happy-path demo wouldn't reveal?"* — **namespace mismatches between session abstraction and raw superglobal access.** The deterministic verifier on the agent side wouldn't have caught this; the Python eval suite's auth-boundary case (`05_auth_boundary_bad_hmac.yaml`) only tests HMAC validation; it took an integration smoke test plus a strategic debug dump to find. Three-line fix; high-leverage finding. Both the lesson (use the abstraction, not the superglobal) and the diagnostic technique (dump session keys, not just session ID) are reusable for week 2.
 
+### 2026-05-06 — P1 HITL eval metrics: 8 extraction-pipeline decisions
+
+These decisions were reached during PRD authoring for the HITL extraction review workstream. Each is load-bearing for the Thursday eval gate. Source: `.gauntlet/week2/hitl-extraction-prd.md` §12.
+
+#### Decision 1 — PHI custody: no failed-value storage
+
+**Decision.** When a field fails the substring-grounding verifier, the LLM-produced value is discarded immediately. The following structural pointers persist, and nothing else: `field_path`, `source_block_id`, `bbox_json`, `verifier_reason`, `attempt_n`, `model`, `prompt_variant`.
+
+**Rationale.** The failed value adds no clinical signal beyond the original document, which is already encrypted at rest in OpenEMR's `documents` table. Storing it would create a second copy of LLM-derived PHI outside the existing custody perimeter, conflicting with the no-PHI-in-logs hard rule. Retry decisions require only "field X failed on block Y" — not the guessed value. The HITL review UI shows the clinician the original document at the cited bbox; that is sufficient.
+
+**Alternative rejected.** Storing failed values as a debugging aid. Rejected because: (a) Langfuse spans already capture structural failure counts without PHI; (b) dev-environment replay against the original document serves the same debugging need without creating a PHI custody problem.
+
+**Revisit threshold.** If a manual-override feature is added (clinician accepts a failed value as-is), the PHI custody story changes and requires a separate decision review before that column exists in schema.
+
+---
+
+#### Decision 2 — Append-only attempt chain via `parent_extraction_id` + `is_active`
+
+**Decision.** Each extraction attempt writes a new row to `co_pilot_extractions`. The attempt chain is threaded via `parent_extraction_id`. At most one row per `(doc_ref_id, doc_type)` has `is_active = TRUE`.
+
+**Rationale.** Retries form an audit chain. A reprocess decision — by the clinician or by the auto-retry ladder — should be defensible by inspection: "attempt 1 used Haiku-default, stripped 4/7 fields; attempt 2 used Haiku-verbatim, stripped 2/7 fields and succeeded." That traceability is destroyed by UPDATE-in-place. The `auto_retry_recovery_rate` metric specifically requires seeing all attempts, not just the active one.
+
+**Alternative rejected.** Single-row UPDATE-in-place with an `attempt_n` counter. Rejected because it overwrites the attempt-1 `model`, `prompt_variant`, `cost_usd`, and `stripped_fields` values, breaking the recovery-rate metric and violating the audit discipline the Week-1 `agent_log` table established.
+
+**Revisit threshold.** If `co_pilot_extractions` grows beyond ~100K rows per deployment, partitioning or cold archiving of `is_active = FALSE` rows is the next operational step. Storage cost at current Langfuse observation counts is negligible.
+
+---
+
+#### Decision 3 — Field-level upsert keyed on per-`doc_type` natural key
+
+**Decision.** `RoundtripService` performs field-level upserts rather than document-level inserts. Each `doc_type` defines a `(field_path, extracted_value) → clinical_natural_key` function; round-trip upserts on that key.
+
+**Rationale.** Without field-level idempotency, a reprocess that captures 2 additional fields from a 5-field document would duplicate the 3 clinical rows already written. The append-only attempt chain makes this problem inevitable unless idempotency is at the field level.
+
+**Alternative rejected.** Document-level "delete-and-rewrite" on reprocess. Rejected because OpenEMR does not tag clinical rows by their origin; deleting on reprocess risks destroying manually-entered data sharing the same table (e.g., a clinician who edited a lab result by hand after the first extraction).
+
+**Revisit threshold.** If a `doc_type` surfaces that has no canonical natural key (no normalized test name, no drug name), the key-extractor pattern needs a fallback strategy — likely a content hash of the verified field value, documented as a separate decision at that time.
+
+---
+
+#### Decision 4 — Auto-retry triggers only on `ExtractionLowGrounding` (>30% strip), not on any-strip
+
+**Decision.** Auto-retry fires only when the extraction raises `ExtractionLowGrounding` (strip rate exceeds 30%). Extractions under the threshold proceed without retry, even if some fields were stripped.
+
+**Rationale.** Cost discipline. A Sonnet escalation is 3–5× the cost of a Haiku base attempt. The P1 eval metrics will surface whether 30% is correctly calibrated for each `(doc_type, template_id)`. Shipping the ladder before we have calibration data risks triggering expensive Sonnet calls on documents that already extracted adequately.
+
+**Alternative rejected.** Retry on any strip (>0%). Unacceptable cost impact: a Haiku-to-Haiku retry on a single paraphrased field costs ~$0.002 in isolation, but at scale this doubles extraction LLM costs. A Sonnet call is $0.09–0.27 per attempt.
+
+**Revisit threshold.** P1 metric data. If the mean strip rate for a specific `(doc_type, template_id)` is consistently <5% but occasional single-field failures compound, tighten the trigger for that doc_type only. If strip rates are consistently >30% across all templates, the verifier threshold, not the retry trigger, is the problem to address.
+
+---
+
+#### Decision 5 — Retry ladder order: Haiku-default → Haiku-verbatim → Sonnet-verbatim
+
+**Decision.** Three attempts in escalating cost order: attempt 1 = Haiku-default, attempt 2 = Haiku-verbatim, attempt 3 = Sonnet-verbatim.
+
+**Rationale.** The most common grounding failure mode is paraphrased values — the LLM expands abbreviations or adds units not present verbatim in the source block. A verbatim-only prompt amendment addresses this at Haiku cost. Only when verbatim-Haiku also fails do we escalate to Sonnet, which has stronger instruction-following on constrained outputs.
+
+**Alternative rejected.** Haiku-default → Sonnet-default → Sonnet-verbatim. Rejected because Sonnet-default is slower and costlier than Haiku-verbatim for the paraphrase failure mode; it skips the cheapest fix for the most common failure class.
+
+**Revisit threshold.** If P1 metrics show Haiku-verbatim (attempt 2) has near-zero recovery rate across all `doc_types`, drop step 2 and escalate directly to Sonnet. The decision review at that point is one metric check against the committed baseline JSON.
+
+---
+
+#### Decision 6 — `template_id` auto-tagged from filename for W2 demo
+
+**Decision.** `template_id` is resolved by the `TEMPLATE_BY_FILENAME` dict in `agent/extractors/template_id.py`. Unknown filenames fall through to `template_id='unknown'`. Metrics still emit under the `unknown` bucket.
+
+**Rationale.** Explicit template tagging at upload time requires changes to OpenEMR's document UI — either new sub-categories in the document tree, a post-upload modal, or a new field on the document properties page. All three are out of scope for the Thursday eval gate. Filename-based resolution is zero-UX-cost and sufficient for the W2 demo corpus, which uses a fixed set of named files.
+
+**Alternative rejected.** Layout-fingerprint auto-detection — hash header text + page dimensions + table-row pattern, classify against known templates. This is the recommended long-term path because it imposes zero UX cost and degrades gracefully. Rejected for W2 because it requires a classifier not available in time for Thursday.
+
+**Revisit threshold.** W3. Layout-fingerprint classification is the target approach. Revisit as part of the broader template-management design when the demo corpus expands beyond the current 8 named files.
+
+---
+
+#### Decision 7 — Reactivation does not delete clinical rows
+
+**Decision.** When a prior attempt is reactivated (`is_active` toggled), the round-trip re-runs with upsert semantics. Clinical rows from the previously-active attempt that are absent from the reactivated attempt are not deleted.
+
+**Rationale.** OpenEMR does not tag clinical rows by their origin (`created_by` is not set by the extraction pipeline on shared tables like `procedure_result`). Deleting on reactivation risks destroying manually-entered clinical data that happens to share the same table, natural key, or row. The audit posture is to write and preserve; deletion is a higher-risk action that requires explicit, scoped confirmation.
+
+**Alternative rejected.** Delete-on-reactivate with a confirmation modal. Rejected because it requires: (a) a `created_by` tag on each extraction-produced clinical row, (b) a modal UX and server-side confirmation endpoint, (c) logic to distinguish extraction-produced rows from manually-entered rows sharing the same key. All three are out of scope for P3.
+
+**Revisit threshold.** If P3 user testing shows "extra clinical rows from a prior failed extraction" causes clinical confusion — e.g., a lab result that was wrong in attempt 1 persists even after attempt 2 corrects it — then delete-on-reactivate becomes the right answer. At that point, the `created_by` tag work is the prerequisite, and the decision gets its own review.
+
+---
+
+#### Decision 8 — Per-document cost ceiling $0.50; per-run ceiling configurable via env var
+
+**Decision.** Extraction refuses with `cost_ceiling_exceeded` if total cost across all attempts for one document exceeds $0.50. Per-run ceiling is configurable via `MAX_EXTRACTION_COST_USD_PER_RUN` env var (default $5.00).
+
+**Rationale.** Without a ceiling, a malformed document — one that consistently produces output that fails the verifier, triggering all three ladder attempts — could run up unbounded cost in production. $0.50 allows three Haiku attempts plus one Sonnet attempt on a reasonably long document before refusing. This is a fail-safe, not an expected operating point; typical single-attempt Haiku extraction costs ~$0.002.
+
+**Alternative rejected.** Hard-coded per-run ceiling. Rejected because different deployment contexts need different ceilings: eval runs benefit from a tighter ceiling to surface adversarial cost runaway faster; staging uses the default; production may need a higher ceiling for very large documents. Env-var configuration is a one-line delta with no redeploy required.
+
+**Revisit threshold.** If Anthropic pricing rises ≥25% (the same threshold used in COST_ANALYSIS.md §8.2 for the multi-provider switch decision), the $0.50 per-document ceiling needs recalibration — it should still cover three Haiku + one Sonnet attempt at the new prices.
+
 ---
 
 ## Revision log
@@ -587,5 +685,7 @@ pid: (missing)
 | 2026-05-01 (Fri night) | COST_ANALYSIS.md substantially revised after walking the post-ship math honestly. Headline per-PCP/mo corrected upward from $6.60 to $9.50 (LLM-only) / $9.74–$10.83 (total) across all four tiers — the prior $6.60 assumed a "50% automatic prefix caching" effect that doesn't actually exist in Anthropic's pricing. New §3.1 documents a measurement-driven kill switch (disable explicit caching if pilot cache-hit-ratio < 15%) reframed around "same-patient-same-model repeat call rate" rather than "UC3 share specifically." New §3.2 documents the cached-prefix multiplier — adding new UCs (UC4 orders, UC5 differential dx, etc.) on the same patient runs ~50% cheaper than the first UC because the prefix is already cached, making per-PCP/mo grow sub-linearly with UC count ($9.50 at 3 UCs → ~$11 at 6 UCs → ~$12.50 at 9 UCs vs. $19+ at cold-call math). New §11 documents roadmap implications: bundle UCs into the same encounter window, prefer Haiku for added UCs, pilot data justifies expansion not contraction. ARCHITECTURE.md §2.3, §2.4, §2.5 updated with inline `> Updated` callouts for the same nuances; this §6 same. The "~80% drop on multi-turn" claim is now correctly scoped to within-Sonnet-conversation, not blended. | AgentForge build |
 
 | 2026-05-04 (Mon) | **Week 2 architecture defense — load-bearing decisions locked.** Full rationale and tradeoff tables now live in [`W2_ARCHITECTURE.md`](./W2_ARCHITECTURE.md) at repo root; this row records the ledger entries. (1) **Two-stage document extraction** — Docling (IBM, self-hosted, real bboxes) → Haiku 4.5 (Pydantic schema). VLMs hallucinate bbox coordinates, so the layout engine produces them; the LLM only maps fields to block IDs. Mistral OCR API as documented fallback if Docling install bites the MVP window. (2) **LangGraph supervisor + 2 workers** (`intake-extractor`, `evidence-retriever`) with strict Pydantic input/output contracts; workers cannot call each other (only supervisor routes); 4-hop hard cap with named refusal `supervisor_max_hops`. Every routing decision emits a Langfuse span with rationale (inspectability is a tested property, not an aspiration). Considered + rejected: OpenAI Agents SDK (Anthropic-vendor mismatch), Pydantic AI (community size gamble), CrewAI (less inspectable), custom (loses framework defense). (3) **Qdrant for vector DB** — native sparse+dense+RRF in one query, single container, typed payload filters. Considered + rejected: Chroma (would force hand-rolled BM25), pgvector (would add Postgres sidecar to a MariaDB stack), Weaviate / Pinecone / LanceDB / FAISS. (4) **Hybrid RAG, GraphRAG explicitly rejected** — citation contract requires chunk-level roundtrip (GraphRAG community summaries break it); entity-extraction error compounds at small N (50–200 chunks); query distribution is local lookup not global synthesis. Revisit threshold: ~5K+ chunks OR query telemetry showing thematic cross-guideline questions. (5) **Cohere Rerank** with BAAI/bge-reranker-v2 fallback (same interface). (6) **RxNav for drug normalization** in entity-keyword retrieval boost (free, NIH, no auth, real-time). UMLS rejected (license overhead). OpenFDA Drug Label as supplemental corpus is a stretch. (7) **Boolean rubrics not 1-10** for the 50-case eval suite; >5% category regression fails the build. **Hard Gate confidence has 3 tested layers**: per-rubric meta-tests (deliberately broken fixtures), threshold sensitivity vs committed baseline JSON, 6 adversarial regression cases mapped to known regression classes. (8) **Patient documents do NOT go into RAG** — RAG is the evergreen guideline corpus only (USPSTF/ADA/JNC/drug-interaction rules). Patient docs extract into FHIR resources (`Observation`, `AllergyIntolerance`, `MedicationStatement` with `derivedFrom` → `DocumentReference`) and are retrieved via tool calls, same shape as Week-1's chart-data tools. (9) **Two-actor upload UX** — front desk uploads via OpenEMR's existing Documents tab (with auto-extract category triggering our DocumentSavedEvent subscriber); PCP doesn't manage uploads, just sees extracted facts in the Co-Pilot drawer when opening the chart later. PHP module reads PDF and POSTs file bytes (multipart, HMAC-signed) to agent — agent never has filesystem access to OpenEMR's documents directory. Bind-mount alternative considered + rejected (broader trust surface). (10) **Extraction verifier** as Week-2 analog of Week-1 claim verifier — deterministic substring check confirming each extracted field's value appears in its named source block; fields failing strip; >30% threshold refuses the whole extraction. (11) **`source_type` discriminator on Citation contract** has three values: `patient_record`, `guideline`, `extracted_document` — answer model is prompt-instructed to never blur the three; `factually_consistent` rubric verifies. (12) **MVP vs Extension scope on click-to-source UI**: MVP ships basic bbox highlight on the PDF when citation clicked (PRD Core Req #5); rich snippet preview popover is PRD-named extension. (13) **MultiMedQA eval slot** — ~22% of cases (11/50) from MedQA primary-care vignettes + MedicationQA. PubMedQA / HealthSearchQA / LiveQA / ConsumerQA explicitly skipped (consumer-shape mismatch). The OpenFDA "RxQA" mentioned in passing could not be confirmed as a published dataset. **FHIR R4 read path** moved from Week-1 deferred → Week-2 required (DocumentReference + Observation persistence is core to ingestion roundtrip). | AgentForge build |
+
+| 2026-05-06 | **P1 HITL eval metrics — 8 load-bearing decisions locked.** Full rationale for each lives in the appendix entry below. (1) PHI custody: failed extraction values are never stored — structural pointers only. (2) Append-only attempt chain via `parent_extraction_id` + `is_active`. (3) Field-level upsert keyed on per-`doc_type` natural key. (4) Auto-retry triggers only on `ExtractionLowGrounding` (>30% strip). (5) Retry ladder order: Haiku-default → Haiku-verbatim → Sonnet-verbatim. (6) `template_id` auto-tagged from filename for W2 demo. (7) Reactivation does not delete clinical rows. (8) Per-document cost ceiling $0.50; per-run ceiling via env var. Source of truth: `.gauntlet/week2/hitl-extraction-prd.md` §12. | AgentForge build |
 
 When updating, add a row to this table and date-stamp any modified appendix entries inline.

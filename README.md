@@ -94,6 +94,11 @@ The week-1 brief lists 8 required deliverables. Each maps to a file in this repo
 AgentForge/
 ├── agent/                                   ← Python agent service (NET-NEW)
 │   ├── agent.py, llm_client.py, verifier.py, tools.py, schemas.py, main.py
+│   ├── extractors/                         Document extraction pipeline (NET-NEW, Week 2)
+│   │   ├── cost.py                         Model pricing constants + compute_cost_usd()
+│   │   ├── template_id.py                  Filename → template_id resolver (TEMPLATE_BY_FILENAME dict)
+│   │   ├── haiku_extraction.py             Stage-2 Haiku/Sonnet field extractor + grounding verifier
+│   │   └── __init__.py                     attach_and_extract() entrypoint + Langfuse span wiring
 │   ├── fixtures/patients/                  Synthetic edge-case patients (sentinel IDs 999100-999114)
 │   └── tests/
 │       ├── unit/                           Verifier + PHI mask unit tests
@@ -128,7 +133,7 @@ If you're reviewing this repo, the work to look at lives in `agent/`, `interface
 - UC1 / UC2 / UC3 end-to-end against real Synthea-imported MariaDB
 - Verifier with date normalization (ISO/MM-DD-YYYY/MM/DD/YYYY) + value-date tuple matching
 - Explicit Anthropic prompt caching (verified live: 100% cache READ on identical follow-up)
-- Langfuse observability — traces + sessions + users + per-LLM-call latency + PHI date-bucketing mask + outbound PHI scrubber (cross-patient ID, SSN, phone, email, MRN)
+- Langfuse observability — traces + sessions + users + per-LLM-call latency + PHI date-bucketing mask + outbound PHI scrubber (cross-patient ID, SSN, phone, email, MRN); `strip_rate`, `template_id`, `cost_usd`, and `verifier_reason_counts` now emitted per extraction on the `haiku_schema_extraction` span (P1 eval metrics)
 - Auth depth: HMAC + CSRF + ACL on every backend endpoint; JS/CSS auth gate so login page doesn't leak module existence; **HMAC replay protection** via signed timestamp; **per-user rate limiting + hourly token budget**
 - HIPAA `agent_log` audit table — every PHI read recorded (closes AUDIT.md C-1)
 - 26 eval cases / 6 categories / two-mode runner / pre-commit smoke tier / 12 synthetic edge-case patient fixtures
@@ -145,6 +150,7 @@ If you're reviewing this repo, the work to look at lives in `agent/`, `interface
 - Backup automation cron + first restore drill (RUNBOOK.md §6 — procedure documented, automation deferred)
 - Alert routing wiring (SLO.md §4 — thresholds documented, page/ticket routing deferred)
 - NEEDS_REVIEW verifier verdict tier (agent-review surfaced)
+- P2 auto-retry escalation ladder (Haiku-default → Haiku-verbatim → Sonnet-verbatim) and P3 HITL review UI + manual reprocess endpoint — both specified in `.gauntlet/week2/hitl-extraction-prd.md`
 
 ---
 

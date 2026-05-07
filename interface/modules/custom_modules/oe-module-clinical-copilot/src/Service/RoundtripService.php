@@ -144,6 +144,44 @@ final class RoundtripService
     }
 
     // -----------------------------------------------------------------------
+    // Attempt-chain helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Mark all prior active extractions for this (doc_ref_id, doc_type) as inactive.
+     *
+     * Enforces the application-layer invariant that at most one row in
+     * co_pilot_extractions has is_active = 1 per (doc_ref_id, doc_type).
+     * Called from DocumentSavedSubscriber immediately before persisting a new
+     * attempt row (initial extraction, auto-retry, or manual reprocess).
+     *
+     * For the very first attempt there are no prior rows, so the UPDATE
+     * matches zero rows and is a no-op — this is safe and correct.
+     *
+     * PHI note: only the structural identifier (doc_ref_id) and the affected
+     * row count are logged.  No patient_id, no extracted values.
+     *
+     * @param non-empty-string $docRefId
+     * @param non-empty-string $docType
+     */
+    public function markPriorAttemptsInactive(string $docRefId, string $docType): void
+    {
+        QueryUtils::sqlStatementThrowException(
+            'UPDATE `co_pilot_extractions`
+                SET `is_active` = 0
+              WHERE `doc_ref_id` = ?
+                AND `doc_type` = ?
+                AND `is_active` = 1',
+            [$docRefId, $docType],
+        );
+
+        $this->logger->info('ClinicalCopilot/RoundtripService: prior attempts marked inactive', [
+            'doc_ref_id' => $docRefId,
+            'doc_type'   => $docType,
+        ]);
+    }
+
+    // -----------------------------------------------------------------------
     // LabReport → procedure_order + procedure_order_code + procedure_report
     //                + N × procedure_result
     // -----------------------------------------------------------------------

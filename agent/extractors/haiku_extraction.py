@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import unicodedata
+from dataclasses import dataclass, field as _dc_field
 from datetime import date
 from typing import Any
 
@@ -74,6 +75,61 @@ class ExtractionLowGrounding(ValueError):
 
 
 # ---------------------------------------------------------------------------
+# Verifier failure reason codes — fixed string literals, never user data.
+# IMPORTANT: add new codes here as constants; never pass interpolated strings
+# to ExtractionStats.record_failure(). The reason codes appear as JSON keys
+# in the haiku_schema_extraction Langfuse span and must be static vocabulary.
+# ---------------------------------------------------------------------------
+
+REASON_VALUE_NOT_SUBSTRING = "value_not_substring_of_block"
+REASON_BLOCK_NOT_FOUND = "block_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Extraction stats carrier (P1 eval metrics — PRD §8.1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExtractionStats:
+    """Structural counts from one parse+verify run.
+
+    Returned as the second element of parse_lab_report / parse_intake_form
+    so _run_haiku_extraction can emit them to the Langfuse span.
+
+    PHI discipline: counts and reason codes only — no field names, no
+    field values. verifier_reason_counts keys are ONLY the module-level
+    REASON_* constants defined in this file, never LLM output or block text.
+    """
+
+    total_fields: int = 0
+    stripped_fields: int = 0
+    verifier_reason_counts: dict[str, int] = _dc_field(default_factory=dict)
+
+    @property
+    def strip_rate(self) -> float:
+        """Fraction of fields that failed grounding. 0.0 if total_fields == 0."""
+        if self.total_fields == 0:
+            return 0.0
+        return self.stripped_fields / self.total_fields
+
+    def record_failure(self, reason: str) -> None:
+        """Increment stripped_fields and the named reason bucket.
+
+        Args:
+            reason: MUST be one of the REASON_* module-level constants
+                    (REASON_VALUE_NOT_SUBSTRING, REASON_BLOCK_NOT_FOUND).
+                    Never pass interpolated strings, field names, or
+                    values from LLM output — those would become keys in
+                    the Langfuse span's verifier_reason_counts JSON.
+        """
+        self.stripped_fields += 1
+        self.verifier_reason_counts[reason] = (
+            self.verifier_reason_counts.get(reason, 0) + 1
+        )
+
+
+# ---------------------------------------------------------------------------
 # O(1) block index builder
 # ---------------------------------------------------------------------------
 
@@ -115,22 +171,26 @@ def verify_field(
     value: str,
     source_block_id: str | None,
     block_index: dict[str, str],
-) -> bool:
+) -> tuple[bool, str | None]:
     """Check that `value` appears (normalized) in the named source block.
 
-    Returns False if:
-      - source_block_id is None or empty
-      - source_block_id is not in the block index
-      - normalized(value) is not a substring of normalized(block.text)
+    Returns (False, reason) if:
+      - source_block_id is None or empty  → reason: REASON_BLOCK_NOT_FOUND
+      - source_block_id is not in the block index  → reason: REASON_BLOCK_NOT_FOUND
+      - normalized(value) is not a substring of normalized(block.text)  → reason: REASON_VALUE_NOT_SUBSTRING
+
+    Returns (True, None) when grounding succeeds.
 
     Does NOT log the value or block text — grounding check is structural.
     """
     if not source_block_id:
-        return False
+        return False, REASON_BLOCK_NOT_FOUND
     block_text = block_index.get(source_block_id)
     if block_text is None:
-        return False
-    return _normalize(value) in _normalize(block_text)
+        return False, REASON_BLOCK_NOT_FOUND
+    if _normalize(value) in _normalize(block_text):
+        return True, None
+    return False, REASON_VALUE_NOT_SUBSTRING
 
 
 def _check_grounding_rate(
@@ -195,7 +255,11 @@ def _validate_confidence(confidence: float, label: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def build_lab_report_messages(doc: DoclingDoc) -> list[dict[str, Any]]:
+def build_lab_report_messages(
+    doc: DoclingDoc,
+    *,
+    verbatim: bool = False,
+) -> list[dict[str, Any]]:
     """Build the Anthropic messages list for LabReport extraction.
 
     The system block is the stable cacheable prefix (schema spec). Caller
@@ -207,8 +271,17 @@ def build_lab_report_messages(doc: DoclingDoc) -> list[dict[str, Any]]:
 
     No PHI in this function's return value goes to Langfuse —
     only token counts are observable. Block text stays in the messages.
+
+    Args:
+        doc:      DoclingDoc from Stage 1.
+        verbatim: When True, routes to build_user_message_verbatim() which
+                  appends the verbatim-only amendment (PRD §6.3).  Default
+                  False preserves all existing call sites unchanged.
     """
-    user_content = lab_report_extraction.build_user_message(doc)
+    if verbatim:
+        user_content = lab_report_extraction.build_user_message_verbatim(doc)
+    else:
+        user_content = lab_report_extraction.build_user_message(doc)
     return [
         {
             "role": "user",
@@ -217,13 +290,26 @@ def build_lab_report_messages(doc: DoclingDoc) -> list[dict[str, Any]]:
     ]
 
 
-def build_intake_form_messages(doc: DoclingDoc) -> list[dict[str, Any]]:
+def build_intake_form_messages(
+    doc: DoclingDoc,
+    *,
+    verbatim: bool = False,
+) -> list[dict[str, Any]]:
     """Build the Anthropic messages list for IntakeForm extraction.
 
     Same pattern as build_lab_report_messages — stable system block is
     in the prompt template; variable user block is doc-specific.
+
+    Args:
+        doc:      DoclingDoc from Stage 1.
+        verbatim: When True, routes to build_user_message_verbatim() which
+                  appends the verbatim-only amendment (PRD §6.3).  Default
+                  False preserves all existing call sites unchanged.
     """
-    user_content = intake_form_extraction.build_user_message(doc)
+    if verbatim:
+        user_content = intake_form_extraction.build_user_message_verbatim(doc)
+    else:
+        user_content = intake_form_extraction.build_user_message(doc)
     return [
         {
             "role": "user",
@@ -270,7 +356,7 @@ def parse_lab_report(
     patient_id: int,
     doc_ref_id: str,
     extraction_model: str,
-) -> LabReport:
+) -> tuple[LabReport, ExtractionStats]:
     """Parse Haiku's JSON response into a validated LabReport.
 
     Runs the extraction verifier on every LabResult's source_block_id and
@@ -285,7 +371,7 @@ def parse_lab_report(
         extraction_model: Model name string for ExtractMeta (e.g. "claude-haiku-4-5").
 
     Returns:
-        Validated LabReport.
+        Tuple of (validated LabReport, ExtractionStats with grounding counts).
 
     Raises:
         ValueError:              patient_id outside sentinel range, or invalid
@@ -306,8 +392,7 @@ def parse_lab_report(
     raw_results: list[dict[str, Any]] = raw.get("results", [])
 
     passed_results: list[LabResult] = []
-    total_verifier_fields = 0
-    failed_verifier_fields = 0
+    stats = ExtractionStats()
     all_confidences: list[float] = []
 
     for item in raw_results:
@@ -331,10 +416,10 @@ def parse_lab_report(
 
         # Grounding check: does the test_name appear in the source block?
         test_name: str = str(item.get("test_name", ""))
-        total_verifier_fields += 1
-        grounded = verify_field(test_name, source_block_id, block_index)
+        stats.total_fields += 1
+        grounded, reason = verify_field(test_name, source_block_id, block_index)
         if not grounded:
-            failed_verifier_fields += 1
+            stats.record_failure(reason or REASON_VALUE_NOT_SUBSTRING)
             # Strip this field — do NOT add to passed_results
             logger.info(
                 "extraction_verifier: field stripped (grounding failed)",
@@ -387,7 +472,7 @@ def parse_lab_report(
         )
 
     # Grounding rate check
-    _check_grounding_rate(total_verifier_fields, failed_verifier_fields, "LabReport")
+    _check_grounding_rate(stats.total_fields, stats.stripped_fields, "LabReport")
 
     # Compute average confidence
     avg_confidence: float | None = (
@@ -404,7 +489,7 @@ def parse_lab_report(
             page_count=doc.page_count,
             extraction_confidence_avg=avg_confidence,
         ),
-    )
+    ), stats
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +503,7 @@ def parse_intake_form(
     patient_id: int,
     doc_ref_id: str,
     extraction_model: str,
-) -> IntakeForm:
+) -> tuple[IntakeForm, ExtractionStats]:
     """Parse Haiku's JSON response into a validated IntakeForm.
 
     Runs the extraction verifier on every listed item's source_block_id.
@@ -433,7 +518,7 @@ def parse_intake_form(
         extraction_model: Model name string for ExtractMeta.
 
     Returns:
-        Validated IntakeForm.
+        Tuple of (validated IntakeForm, ExtractionStats with grounding counts).
 
     Raises:
         ValueError:              patient_id outside sentinel range, or invalid
@@ -464,8 +549,7 @@ def parse_intake_form(
         len(raw.get("family_history", [])),
     )
 
-    total_verifier_fields = 0
-    failed_verifier_fields = 0
+    stats = ExtractionStats()
     all_confidences: list[float] = []
 
     def _check_block_id(block_id: str | None, item_label: str) -> None:
@@ -482,10 +566,10 @@ def parse_intake_form(
     _check_block_id(demo_block_id, "demographics")
 
     demo_name: str = str(raw_demo.get("name", ""))
-    total_verifier_fields += 1
-    demo_grounded = verify_field(demo_name, demo_block_id, block_index)
+    stats.total_fields += 1
+    demo_grounded, demo_reason = verify_field(demo_name, demo_block_id, block_index)
     if not demo_grounded:
-        failed_verifier_fields += 1
+        stats.record_failure(demo_reason or REASON_VALUE_NOT_SUBSTRING)
         demo_block_id = None  # strip — null out block ref but keep the field
 
     raw_dob = raw_demo.get("dob")
@@ -508,10 +592,10 @@ def parse_intake_form(
     chief_concern_block_id: str | None = raw.get("chief_concern_block_id")
     _check_block_id(chief_concern_block_id, "chief_concern")
     if chief_concern:
-        total_verifier_fields += 1
-        cc_grounded = verify_field(chief_concern, chief_concern_block_id, block_index)
+        stats.total_fields += 1
+        cc_grounded, cc_reason = verify_field(chief_concern, chief_concern_block_id, block_index)
         if not cc_grounded:
-            failed_verifier_fields += 1
+            stats.record_failure(cc_reason or REASON_VALUE_NOT_SUBSTRING)
             chief_concern = None  # strip ungrounded chief_concern
 
     # --- medications ---
@@ -521,10 +605,10 @@ def parse_intake_form(
         med_block_id: str | None = med_item.get("source_block_id")
         _check_block_id(med_block_id, "medication")
         med_name: str = str(med_item.get("name", ""))
-        total_verifier_fields += 1
-        grounded = verify_field(med_name, med_block_id, block_index)
+        stats.total_fields += 1
+        grounded, reason = verify_field(med_name, med_block_id, block_index)
         if not grounded:
-            failed_verifier_fields += 1
+            stats.record_failure(reason or REASON_VALUE_NOT_SUBSTRING)
             logger.info(
                 "extraction_verifier: medication stripped (grounding failed)",
                 extra={"source_block_id": med_block_id},
@@ -546,10 +630,10 @@ def parse_intake_form(
         allergy_block_id: str | None = allergy_item.get("source_block_id")
         _check_block_id(allergy_block_id, "allergy")
         substance: str = str(allergy_item.get("substance", ""))
-        total_verifier_fields += 1
-        grounded = verify_field(substance, allergy_block_id, block_index)
+        stats.total_fields += 1
+        grounded, reason = verify_field(substance, allergy_block_id, block_index)
         if not grounded:
-            failed_verifier_fields += 1
+            stats.record_failure(reason or REASON_VALUE_NOT_SUBSTRING)
             logger.info(
                 "extraction_verifier: allergy stripped (grounding failed)",
                 extra={"source_block_id": allergy_block_id},
@@ -571,10 +655,10 @@ def parse_intake_form(
         fh_block_id: str | None = fh_item.get("source_block_id")
         _check_block_id(fh_block_id, "family_history")
         condition: str = str(fh_item.get("condition", ""))
-        total_verifier_fields += 1
-        grounded = verify_field(condition, fh_block_id, block_index)
+        stats.total_fields += 1
+        grounded, reason = verify_field(condition, fh_block_id, block_index)
         if not grounded:
-            failed_verifier_fields += 1
+            stats.record_failure(reason or REASON_VALUE_NOT_SUBSTRING)
             logger.info(
                 "extraction_verifier: family_history stripped (grounding failed)",
                 extra={"source_block_id": fh_block_id},
@@ -607,7 +691,7 @@ def parse_intake_form(
 
     # Grounding rate check
     _check_grounding_rate(
-        total_verifier_fields, failed_verifier_fields, "IntakeForm"
+        stats.total_fields, stats.stripped_fields, "IntakeForm"
     )
 
     avg_confidence: float | None = (
@@ -629,4 +713,4 @@ def parse_intake_form(
             page_count=doc.page_count,
             extraction_confidence_avg=avg_confidence,
         ),
-    )
+    ), stats

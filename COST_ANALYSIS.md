@@ -479,6 +479,34 @@ Use these to back-of-envelope any week 2+ UC pitch before committing engineering
 
 ---
 
+## Extraction Pipeline Cost Constants (P1 — HITL Eval Metrics)
+
+> Source: https://www.anthropic.com/pricing
+> Verified: 2026-05-06
+> Re-verify: before each weekly demo, and after any Anthropic pricing announcement.
+
+| Model              | Input $/M tokens | Output $/M tokens |
+|--------------------|-----------------|-------------------|
+| claude-haiku-4-5   | $0.80           | $4.00             |
+| claude-sonnet-4-6  | $3.00           | $15.00            |
+
+**Implementation:** `agent/extractors/cost.py` — `MODEL_PRICING` dict + `compute_cost_usd()`. These constants are the source of truth for `cost_usd` emitted on every Langfuse extraction span.
+
+**Per-document cost ceiling:** $0.50 total across all retry attempts (P2 auto-retry ladder fail-safe). Refuses with `cost_ceiling_exceeded` if exceeded.
+
+**Per-run ceiling:** configurable via `MAX_EXTRACTION_COST_USD_PER_RUN` env var, default $5.00. Allows eval-run tightening without redeployment.
+
+**Typical per-document cost (P1, single Haiku attempt on a 4-page lab PDF):**
+- ~1,500 input tokens + ~300 output tokens = ~$0.0024 per extraction
+
+**Worst-case per-document (P2 full ladder, Sonnet attempt 3 on a long document):**
+- ~4,000 input tokens + ~600 output tokens = ~$0.021 per Sonnet attempt
+- Three-attempt total ceiling: $0.50 (fail-safe)
+
+> **Note on model naming:** these prices are for the extraction pipeline models specifically. The chat-agent models (Haiku 4.5 for synthesis, Sonnet 4.6 for reasoning) use the same pricing table but different token shapes — see §2.1 for those token shapes. The extraction pipeline calls are structurally different: shorter input (document block text only, not full patient context) with a denser schema-constrained output.
+
+---
+
 ## Defense talking points (interview)
 
 - "What did week 1 cost?" — *$1.64 LLM spend, $0 Langfuse (free tier), $4 droplet prorated. ~$6 total. Counterfactual without multi-model tiering: ~$3.50 (Sonnet-only) or ~$15-25 (Opus-only).*

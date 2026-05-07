@@ -195,23 +195,31 @@ class TestVerifierPrimitives:
         doc = _make_doc()
         idx = _build_block_index(doc)
         # "Hemoglobin A1c" is in block_0's text
-        assert verify_field("Hemoglobin A1c", "block_0", idx) is True
+        ok, reason = verify_field("Hemoglobin A1c", "block_0", idx)
+        assert ok is True
+        assert reason is None
 
     def test_verify_field_fails_when_block_missing(self) -> None:
         doc = _make_doc()
         idx = _build_block_index(doc)
-        assert verify_field("Hemoglobin A1c", "block_99", idx) is False
+        ok, reason = verify_field("Hemoglobin A1c", "block_99", idx)
+        assert ok is False
+        assert reason == "block_not_found"
 
     def test_verify_field_fails_when_block_id_none(self) -> None:
         doc = _make_doc()
         idx = _build_block_index(doc)
-        assert verify_field("anything", None, idx) is False
+        ok, reason = verify_field("anything", None, idx)
+        assert ok is False
+        assert reason == "block_not_found"
 
     def test_verify_field_case_insensitive(self) -> None:
         doc = _make_doc()
         idx = _build_block_index(doc)
         # "hemoglobin a1c" should match block_0 text containing "Hemoglobin A1c"
-        assert verify_field("hemoglobin a1c", "block_0", idx) is True
+        ok, reason = verify_field("hemoglobin a1c", "block_0", idx)
+        assert ok is True
+        assert reason is None
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +231,7 @@ class TestLabReportExtractionFixtureMode:
     def test_valid_lab_report_parses_correctly(self) -> None:
         """Mocked Haiku response → parser → valid LabReport with expected shape."""
         doc = _make_doc()
-        report = parse_lab_report(
+        report, _stats = parse_lab_report(
             haiku_json_text=_lab_report_haiku_response(),
             doc=doc,
             patient_id=_PID_VALID,
@@ -263,7 +271,7 @@ class TestLabReportExtractionFixtureMode:
 
     def test_sentinel_patient_id_accepted(self) -> None:
         doc = _make_doc()
-        report = parse_lab_report(
+        report, _stats = parse_lab_report(
             haiku_json_text=_lab_report_haiku_response(),
             doc=doc,
             patient_id=_PID_VALID,
@@ -282,7 +290,7 @@ class TestIntakeFormExtractionFixtureMode:
     def test_valid_intake_form_parses_correctly(self) -> None:
         """Mocked Haiku response → parser → valid IntakeForm with expected shape."""
         doc = _make_doc()
-        form = parse_intake_form(
+        form, _stats = parse_intake_form(
             haiku_json_text=_intake_form_haiku_response(),
             doc=doc,
             patient_id=_PID_VALID,
@@ -325,7 +333,7 @@ class TestIntakeFormExtractionFixtureMode:
 
     def test_sentinel_patient_id_accepted(self) -> None:
         doc = _make_doc()
-        form = parse_intake_form(
+        form, _stats = parse_intake_form(
             haiku_json_text=_intake_form_haiku_response(),
             doc=doc,
             patient_id=_PID_VALID,
@@ -511,7 +519,7 @@ class TestConfidenceAggregation:
             ]
         })
 
-        report = parse_lab_report(
+        report, _stats = parse_lab_report(
             haiku_json_text=response,
             doc=doc,
             patient_id=_PID_VALID,
@@ -532,7 +540,7 @@ class TestConfidenceAggregation:
         doc = _make_doc()
         response = json.dumps({"results": []})
 
-        report = parse_lab_report(
+        report, _stats = parse_lab_report(
             haiku_json_text=response,
             doc=doc,
             patient_id=_PID_VALID,
@@ -700,7 +708,7 @@ class TestExtractionVerifierGrounding:
         no exception is raised and the result is a valid LabReport."""
         # All 3 results ground properly in this fixture
         doc = _make_doc()
-        report = parse_lab_report(
+        report, _stats = parse_lab_report(
             haiku_json_text=_lab_report_haiku_response(),
             doc=doc,
             patient_id=_PID_VALID,

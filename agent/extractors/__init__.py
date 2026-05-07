@@ -41,12 +41,15 @@ import asyncio
 import importlib.metadata
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Literal, Union
 
 from agent._phi_scrubber import mask_observability_patterns
 from agent.document_schemas import BBox, DoclingBlock, DoclingDoc, IntakeForm, LabReport
+from agent.extractors.cost import compute_cost_usd
+from agent.extractors.template_id import resolve_template_id
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +58,49 @@ DocType = Literal["lab_pdf", "intake_form"]
 _SENTINEL_MIN = 999_100
 _SENTINEL_MAX = 999_199
 
-# Model name used for Haiku extraction (matches W2_ARCHITECTURE.md model split)
+# Model names (W2_ARCHITECTURE.md model split)
 _HAIKU_MODEL = "claude-haiku-4-5"
+_SONNET_MODEL = "claude-sonnet-4-6"
+
+# Cost ceilings (PRD §6.4)
+# Per-document: hard ceiling across all retry attempts for one document.
+_PER_DOC_COST_CEILING_USD = 0.50
+# Per-run: read lazily from env at runtime (not at import time) so eval suites
+# can override via os.environ before the first call without patching globals.
+_DEFAULT_PER_RUN_COST_CEILING_USD = 5.00
+
+
+def _get_per_run_cost_ceiling() -> float:
+    """Return per-run cost ceiling from env, defaulting to $5.00.
+
+    Read lazily so eval suites may set MAX_EXTRACTION_COST_USD_PER_RUN in
+    os.environ before the first call; a module-level snapshot would miss
+    those overrides.
+    """
+    raw = os.environ.get("MAX_EXTRACTION_COST_USD_PER_RUN")
+    if raw is not None:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return _DEFAULT_PER_RUN_COST_CEILING_USD
+
+
+# ---------------------------------------------------------------------------
+# P2 exception: cost ceiling exceeded
+# ---------------------------------------------------------------------------
+
+
+class ExtractionCostCeilingExceeded(RuntimeError):
+    """Raised when cumulative cost would exceed the per-document ceiling.
+
+    Message format:
+        cost_ceiling_exceeded: cumulative cost {cumulative_cost_usd:.5f}
+        would exceed per-doc ceiling {ceiling:.2f} on attempt {attempt_n}
+
+    PHI discipline: no patient_id integer, no raw extracted values.
+    Only structural floats (cost estimates) and attempt ordinal appear.
+    """
 
 
 def _get_docling_version() -> str:
@@ -269,7 +313,7 @@ def _run_stage1_layout(
         )
 
     if not pdf_path.exists():
-        raise RuntimeError(f"PDF not found at {pdf_path}")
+        raise RuntimeError("PDF not found at the specified path")
 
     docling_version = _get_docling_version()
     page_count = _get_page_count(pdf_path)
@@ -312,21 +356,46 @@ async def _run_haiku_extraction(
     doc_type: str,
     patient_id: int,
     doc_ref_id: str,
+    filename: str | None = None,
+    *,
+    model: str = _HAIKU_MODEL,
+    prompt_variant: str = "default",
+    attempt_n: int = 1,
+    triggered_by: str = "initial",
+    parent_extraction_id: int | None = None,
 ) -> LabReport | IntakeForm:
-    """Call Haiku for schema extraction and parse the result.
+    """Call the LLM for schema extraction and parse the result.
 
     Langfuse instrumentation:
-      - Span name: haiku_schema_extraction
-      - Tags: token/cost/latency, model_name, doc_type, n_blocks
-      - patient_id_in_sentinel_range boolean (never the raw value)
-      - NEVER: raw doc text, extracted field values, patient_id integer
+      - Span name: "haiku_schema_extraction" for Haiku, "sonnet_schema_extraction"
+        for Sonnet (chosen at the start of the function based on `model`).
+      - Tags: token/cost/latency, model_name, doc_type, n_blocks, template_id,
+        attempt_n, prompt_variant, triggered_by, parent_extraction_id.
+      - patient_id_in_sentinel_range boolean (never the raw value).
+      - NEVER: raw doc text, extracted field values, patient_id integer, raw filename.
+
+    Args:
+        doc:                  DoclingDoc from Stage 1.
+        doc_type:             "lab_pdf" or "intake_form".
+        patient_id:           Must be in sentinel range.
+        doc_ref_id:           FHIR DocumentReference ID.
+        filename:             Original upload filename — used ONLY to resolve
+                              template_id.  Never emitted to spans or logs directly.
+        model:                Anthropic model string.  Default: _HAIKU_MODEL.
+                              Pass _SONNET_MODEL for attempt 3 escalation.
+        prompt_variant:       "default" or "verbatim_only".  Controls which user
+                              message builder is invoked.  Default: "default".
+        attempt_n:            Retry ladder ordinal (1, 2, 3).  Emitted to span.
+        triggered_by:         "initial", "auto_retry", or "manual_retry".
+        parent_extraction_id: DB ID of the prior attempt row (None for attempt 1).
 
     Raises:
-        RuntimeError:                Haiku returned non-JSON or unexpected shape.
-        ExtractionLowGrounding:      >30% of fields fail grounding check.
-        ValueError:                  Invalid block_id or confidence OOB.
+        RuntimeError:            LLM returned non-JSON or unexpected shape.
+        ExtractionLowGrounding:  >30% of fields fail grounding check.
+        ValueError:              Invalid block_id or confidence OOB.
     """
     from agent.extractors.haiku_extraction import (
+        ExtractionStats,
         build_intake_form_messages,
         build_intake_form_system,
         build_lab_report_messages,
@@ -339,12 +408,20 @@ async def _run_haiku_extraction(
 
     lf = get_client()
 
+    # Determine span name based on model — named spans let Langfuse group by model tier.
+    span_name = (
+        "sonnet_schema_extraction" if model == _SONNET_MODEL else "haiku_schema_extraction"
+    )
+
+    # Choose prompt builder based on prompt_variant.
+    use_verbatim = (prompt_variant == "verbatim_only")
+
     if doc_type == "lab_pdf":
         system_blocks = build_lab_report_system()
-        messages = build_lab_report_messages(doc)
+        messages = build_lab_report_messages(doc, verbatim=use_verbatim)
     else:
         system_blocks = build_intake_form_system()
-        messages = build_intake_form_messages(doc)
+        messages = build_intake_form_messages(doc, verbatim=use_verbatim)
 
     # system_blocks are the schema-spec cacheable prefix — bitwise-stable across
     # calls. Do NOT scrub: (a) they contain no PHI (generic schema instructions
@@ -356,34 +433,43 @@ async def _run_haiku_extraction(
 
     llm_client = build_llm_client()
 
+    # Resolve template_id from filename BEFORE building span_meta.
+    # Only the resolved label (from a closed vocabulary) enters the span —
+    # the raw filename is never emitted.
+    template_id = resolve_template_id(filename)
+
     # Langfuse span metadata: structural only, no PHI.
-    # Stage-3b: span opened below with lf.start_span("haiku_schema_extraction").
+    # All P1 keys plus the new P2 attempt-chain fields are included here.
     span_meta: dict[str, Any] = {
         "doc_type": doc_type,
         "n_blocks": len(doc.blocks),
         "page_count": doc.page_count,
-        "model": _HAIKU_MODEL,
+        "model": model,
         "patient_id_in_sentinel_range": _SENTINEL_MIN <= patient_id <= _SENTINEL_MAX,
+        "template_id": template_id,
+        "prompt_variant": prompt_variant,
+        "attempt_n": attempt_n,
+        "triggered_by": triggered_by,
+        "parent_extraction_id": parent_extraction_id,  # None for first attempt
     }
 
     latency_ms = 0
     t0 = time.monotonic()
-    # Stage-3b: open a named span for haiku schema extraction per §3.3 trace shape.
-    # Uses lf.start_observation() (returns a span object; call .update() + .end()
-    # manually).  The installed Langfuse version does not expose start_span();
-    # start_as_current_observation() is its context-manager form but requires
-    # synchronous context manager semantics incompatible with the async try/except
-    # structure here — so we use start_observation() with explicit .end() calls.
-    # Metadata is structural only — no PHI, no raw doc text, no extracted values.
-    haiku_span_obj = None
+    # Open a named span for the schema extraction attempt per §3.3 trace shape.
+    # Uses lf.start_observation() with explicit .end() calls — compatible with
+    # the async try/except structure.  Metadata is structural only — no PHI,
+    # no raw doc text, no extracted values.
+    span_obj = None
     try:
-        haiku_span_obj = lf.start_observation(name="haiku_schema_extraction", metadata=span_meta)
+        span_obj = lf.start_observation(name=span_name, metadata=span_meta)
     except Exception:
         pass
 
+    _span_ended = False
+
     try:
         response = await llm_client.create(
-            model=_HAIKU_MODEL,
+            model=model,
             system=system_blocks,  # type: ignore[arg-type]
             messages=messages,
             max_tokens=2048,
@@ -393,16 +479,17 @@ async def _run_haiku_extraction(
         latency_ms = int((time.monotonic() - t0) * 1000)
         # Scrub exception message: SDK errors may echo request-body fragments.
         scrubbed_msg = mask_observability_patterns(str(sdk_exc))
-        if haiku_span_obj is not None:
+        if span_obj is not None and not _span_ended:
             try:
-                haiku_span_obj.update(
+                span_obj.update(
                     metadata={**span_meta, "latency_ms": latency_ms, "error": "sdk_error"},
                 )
-                haiku_span_obj.end()
+                span_obj.end()
+                _span_ended = True
             except Exception:
                 pass
         raise RuntimeError(
-            f"Haiku SDK call failed for doc_type={doc_type}: {scrubbed_msg}"
+            f"SDK call failed for doc_type={doc_type} model={model}: {scrubbed_msg}"
         ) from None
 
     latency_ms = int((time.monotonic() - t0) * 1000)
@@ -413,19 +500,81 @@ async def _run_haiku_extraction(
         if getattr(b, "type", None) == "text"
     ).strip()
 
-    # Strip markdown fences if present (Haiku sometimes wraps with ```)
+    # Strip markdown fences if present (Haiku/Sonnet sometimes wraps with ```)
     if response_text.startswith("```"):
         lines = response_text.splitlines()
         inner = lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:]
         response_text = "\n".join(inner).strip()
 
-    # Emit token/cache usage to Langfuse span — no PHI, structural only.
+    # Capture usage here — used for both cost computation and span update.
     usage = response.usage
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
     cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    if haiku_span_obj is not None:
+
+    # Compute cost before the parse block so it's available on all paths.
+    cost_usd = compute_cost_usd(model, usage.input_tokens, usage.output_tokens)
+
+    # Parse the JSON response into the appropriate schema.
+    # Fix #1: json.JSONDecodeError carries the raw response text in its .doc
+    # attribute. If the LLM paraphrased block content into malformed JSON, .doc
+    # could contain PHI. We catch the error, log only structural info (line/col),
+    # and raise from None to drop __cause__/__context__ and their .doc attribute.
+    # ValueError / KeyError from the parser are also wrapped — their messages are
+    # structured and value-free, but we scrub defensively before re-raising.
+    try:
+        if doc_type == "lab_pdf":
+            parsed_result, extraction_stats = parse_lab_report(
+                haiku_json_text=response_text,
+                doc=doc,
+                patient_id=patient_id,
+                doc_ref_id=doc_ref_id,
+                extraction_model=model,
+            )
+        else:
+            parsed_result, extraction_stats = parse_intake_form(
+                haiku_json_text=response_text,
+                doc=doc,
+                patient_id=patient_id,
+                doc_ref_id=doc_ref_id,
+                extraction_model=model,
+            )
+    except json.JSONDecodeError as exc:
+        # exc.doc holds the raw response text — suppress it entirely.
+        if span_obj is not None and not _span_ended:
+            try:
+                span_obj.update(
+                    metadata={**span_meta, "error": "json_decode_error"}
+                )
+                span_obj.end()
+                _span_ended = True
+            except Exception:
+                pass
+        raise RuntimeError(
+            f"LLM response was not valid JSON for doc_type={doc_type} model={model} "
+            f"(decode error at line {exc.lineno}, col {exc.colno}). "
+            "Raw response suppressed for PHI compliance."
+        ) from None
+    except (ValueError, KeyError) as exc:
+        # Parser raises are structured (no raw field values) but scrub defensively.
+        scrubbed = mask_observability_patterns(str(exc))
+        if span_obj is not None and not _span_ended:
+            try:
+                span_obj.update(
+                    metadata={**span_meta, "error": "grounding_or_parse_failure"}
+                )
+                span_obj.end()
+                _span_ended = True
+            except Exception:
+                pass
+        raise RuntimeError(
+            f"LLM output failed schema validation for doc_type={doc_type} "
+            f"model={model}: {scrubbed}"
+        ) from None
+
+    # Success path: emit all P1 attributes plus P2 attempt-chain fields and close span.
+    if span_obj is not None and not _span_ended:
         try:
-            haiku_span_obj.update(
+            span_obj.update(
                 metadata={
                     **span_meta,
                     "latency_ms": latency_ms,
@@ -434,49 +583,144 @@ async def _run_haiku_extraction(
                     "cache_read_input_tokens": cache_read,
                     "cache_creation_input_tokens": cache_create,
                     "stop_reason": response.stop_reason,
+                    "cost_usd": cost_usd,
+                    "total_fields": extraction_stats.total_fields,
+                    "stripped_fields": extraction_stats.stripped_fields,
+                    "strip_rate": round(extraction_stats.strip_rate, 4),
+                    "verifier_reason_counts": extraction_stats.verifier_reason_counts,
                 },
             )
-            haiku_span_obj.end()
+            span_obj.end()
+            _span_ended = True
         except Exception:
             pass
 
-    # Parse the JSON response into the appropriate schema.
-    # Fix #1: json.JSONDecodeError carries the raw response text in its .doc
-    # attribute. If Haiku paraphrased block content into malformed JSON, .doc
-    # could contain PHI. We catch the error, log only structural info (line/col),
-    # and raise from None to drop __cause__/__context__ and their .doc attribute.
-    # ValueError / KeyError from the parser are also wrapped — their messages are
-    # structured and value-free, but we scrub defensively before re-raising.
-    try:
-        if doc_type == "lab_pdf":
-            return parse_lab_report(
-                haiku_json_text=response_text,
+    return parsed_result
+
+
+async def _run_extraction_with_retry(
+    *,
+    doc: DoclingDoc,
+    doc_type: str,
+    patient_id: int,
+    doc_ref_id: str,
+    filename: str | None = None,
+    parent_extraction_id: int | None = None,
+    triggered_by: str = "initial",
+) -> Union[LabReport, IntakeForm]:
+    """Run the auto-retry escalation ladder per PRD §6.
+
+    Ladder:
+      attempt 1: Haiku,  prompt_variant=default        (always runs)
+      attempt 2: Haiku,  prompt_variant=verbatim_only  (only if attempt 1 raised ExtractionLowGrounding)
+      attempt 3: Sonnet, prompt_variant=verbatim_only  (only if attempt 2 raised ExtractionLowGrounding)
+
+    On ExtractionLowGrounding from all three attempts, re-raises the LAST
+    ExtractionLowGrounding without wrapping it (so existing call sites that
+    catch ExtractionLowGrounding continue to work unchanged).
+
+    Cost discipline:
+      Before each attempt, cumulative_cost_usd is checked against
+      _PER_DOC_COST_CEILING_USD ($0.50).  If exceeded, raises
+      ExtractionCostCeilingExceeded instead of proceeding.
+
+      Cost estimation uses compute_cost_usd(model, max_tokens, max_tokens)
+      where max_tokens=2048 (the per-call budget) as an upper-bound
+      pre-attempt approximation.  Actual cost is tracked inside
+      _run_haiku_extraction via the Langfuse span; the wrapper accumulates
+      the conservative upper-bound so it can gate without coupling to the
+      internal token counters.  This avoids re-plumbing actual token usage
+      out of _run_haiku_extraction and keeps the wrapper self-contained.
+
+    PHI discipline:
+      - ExtractionCostCeilingExceeded message contains only structural floats
+        and attempt ordinal — no patient_id, no extracted values.
+      - On ExtractionLowGrounding, the exception object from the failed attempt
+        is NOT passed into the next attempt call — each attempt is independent
+        and receives only the original DoclingDoc.  The caught exception is
+        discarded (stored temporarily only to re-raise on final failure).
+
+    Args:
+        doc:                  DoclingDoc from Stage 1.
+        doc_type:             "lab_pdf" or "intake_form".
+        patient_id:           Sentinel-range patient ID.
+        doc_ref_id:           FHIR DocumentReference ID.
+        filename:             Upload filename for template_id resolution only.
+        parent_extraction_id: DB ID of the prior extraction chain head (None
+                              for fresh extractions; set for manual reprocess).
+        triggered_by:         "initial", "auto_retry", or "manual_retry".
+
+    Returns:
+        LabReport | IntakeForm from the first successful attempt.
+
+    Raises:
+        ExtractionLowGrounding:        All three attempts refused (>30% strip rate).
+        ExtractionCostCeilingExceeded: Cumulative estimated cost would exceed
+                                       _PER_DOC_COST_CEILING_USD before an attempt.
+    """
+    from agent.extractors.haiku_extraction import ExtractionLowGrounding
+
+    # Retry ladder: ordered triples of (model, prompt_variant).
+    # Attempt numbering is 1-indexed to match the DB schema (PRD §4.1).
+    _LADDER: list[tuple[str, str]] = [
+        (_HAIKU_MODEL,  "default"),
+        (_HAIKU_MODEL,  "verbatim_only"),
+        (_SONNET_MODEL, "verbatim_only"),
+    ]
+
+    cumulative_cost_usd: float = 0.0
+    # Conservative budget per call: max_tokens=2048 for both input and output.
+    # This is an intentional overestimate — we never have 2048 output tokens AND
+    # 2048 input tokens simultaneously, but using max_tokens for both sides gives
+    # a safe upper bound without access to actual token counts before the call.
+    _BUDGET_TOKENS = 2048
+
+    last_grounding_exc: ExtractionLowGrounding | None = None
+
+    for attempt_idx, (attempt_model, attempt_variant) in enumerate(_LADDER):
+        attempt_n = attempt_idx + 1
+
+        # Pre-attempt cost check: would this attempt push us over the ceiling?
+        attempt_cost_estimate = compute_cost_usd(attempt_model, _BUDGET_TOKENS, _BUDGET_TOKENS)
+        # compute_cost_usd returns None only for unknown models; both ladder models are known.
+        if attempt_cost_estimate is None:
+            attempt_cost_estimate = 0.0
+        if cumulative_cost_usd + attempt_cost_estimate > _PER_DOC_COST_CEILING_USD:
+            raise ExtractionCostCeilingExceeded(
+                f"cost_ceiling_exceeded: cumulative cost {cumulative_cost_usd:.5f} "
+                f"would exceed per-doc ceiling {_PER_DOC_COST_CEILING_USD:.2f} "
+                f"on attempt {attempt_n}"
+            )
+
+        try:
+            result = await _run_haiku_extraction(
                 doc=doc,
+                doc_type=doc_type,
                 patient_id=patient_id,
                 doc_ref_id=doc_ref_id,
-                extraction_model=_HAIKU_MODEL,
+                filename=filename,
+                model=attempt_model,
+                prompt_variant=attempt_variant,
+                attempt_n=attempt_n,
+                triggered_by=triggered_by if attempt_n == 1 else "auto_retry",
+                parent_extraction_id=parent_extraction_id,
             )
-        else:
-            return parse_intake_form(
-                haiku_json_text=response_text,
-                doc=doc,
-                patient_id=patient_id,
-                doc_ref_id=doc_ref_id,
-                extraction_model=_HAIKU_MODEL,
-            )
-    except json.JSONDecodeError as exc:
-        # exc.doc holds the raw response text — suppress it entirely.
-        raise RuntimeError(
-            f"Haiku response was not valid JSON for doc_type={doc_type} "
-            f"(decode error at line {exc.lineno}, col {exc.colno}). "
-            "Raw response suppressed for PHI compliance."
-        ) from None
-    except (ValueError, KeyError) as exc:
-        # Parser raises are structured (no raw field values) but scrub defensively.
-        scrubbed = mask_observability_patterns(str(exc))
-        raise RuntimeError(
-            f"Haiku output failed schema validation for doc_type={doc_type}: {scrubbed}"
-        ) from None
+            return result
+
+        except ExtractionLowGrounding as exc:
+            # PHI note: exc contains only structural counts and the reason code
+            # string from _check_grounding_rate — no field values, no block text.
+            # We discard the failed attempt's content entirely; the exception
+            # object itself is stored only to re-raise on final failure.
+            last_grounding_exc = exc
+            # Accumulate the upper-bound estimate before moving to the next attempt.
+            cumulative_cost_usd += attempt_cost_estimate
+            # Continue to next attempt; each attempt is independent.
+
+    # All three attempts failed — re-raise the last ExtractionLowGrounding
+    # without wrapping, so callers that catch ExtractionLowGrounding are unaffected.
+    assert last_grounding_exc is not None  # guaranteed by loop logic
+    raise last_grounding_exc
 
 
 def attach_and_extract(
@@ -486,6 +730,7 @@ def attach_and_extract(
     pdf_path: Path | None = None,
     *,
     stage1_only: bool = False,
+    filename: str | None = None,
 ) -> Union[LabReport, IntakeForm, DoclingDoc]:
     """Sync entry point: Stage 1 + optional Stage 2.
 
@@ -513,6 +758,9 @@ def attach_and_extract(
                       Docling output without invoking an LLM. Keyword-only.
                       # TODO(stage-3): evaluate removal once smoke tests are
                       # replaced by integration tests under the supervisor graph.
+        filename:     Original upload filename. Used ONLY to resolve template_id
+                      for the Langfuse span — never logged or traced directly.
+                      Keyword-only.
 
     Returns:
         LabReport | IntakeForm | DoclingDoc depending on doc_type and
@@ -527,7 +775,7 @@ def attach_and_extract(
 
     if not stage1_only and doc_type in ("lab_pdf", "intake_form"):
         logger.info(
-            "attach_and_extract: starting Haiku schema extraction",
+            "attach_and_extract: starting extraction (auto-retry ladder)",
             extra={
                 "doc_ref_id": doc_ref_id,
                 "doc_type": doc_type,
@@ -535,11 +783,12 @@ def attach_and_extract(
             },
         )
         result: LabReport | IntakeForm = asyncio.run(
-            _run_haiku_extraction(
+            _run_extraction_with_retry(
                 doc=docling_doc,
                 doc_type=doc_type,
                 patient_id=patient_id,
                 doc_ref_id=doc_ref_id,
+                filename=filename,
             )
         )
         n_fields = (
@@ -552,7 +801,7 @@ def attach_and_extract(
             )
         )
         logger.info(
-            "attach_and_extract: Haiku extraction complete",
+            "attach_and_extract: extraction complete",
             extra={
                 "doc_ref_id": doc_ref_id,
                 "doc_type": doc_type,
@@ -572,6 +821,7 @@ async def attach_and_extract_async(
     pdf_path: Path | None = None,
     *,
     stage1_only: bool = False,
+    filename: str | None = None,
 ) -> Union[LabReport, IntakeForm, DoclingDoc]:
     """Async entry point: Stage 1 + optional Stage 2.
 
@@ -579,23 +829,26 @@ async def attach_and_extract_async(
     LangGraph nodes) to avoid creating a new event loop via asyncio.run().
 
     Same behavior and args as attach_and_extract() — see its docstring.
+    The filename keyword arg is forwarded to _run_haiku_extraction for
+    template_id resolution; never emitted to spans or logs directly.
     """
     docling_doc = _run_stage1_layout(patient_id, doc_ref_id, doc_type, pdf_path)
 
     if not stage1_only and doc_type in ("lab_pdf", "intake_form"):
         logger.info(
-            "attach_and_extract_async: starting Haiku schema extraction",
+            "attach_and_extract_async: starting extraction (auto-retry ladder)",
             extra={
                 "doc_ref_id": doc_ref_id,
                 "doc_type": doc_type,
                 "n_blocks": len(docling_doc.blocks),
             },
         )
-        result = await _run_haiku_extraction(
+        result = await _run_extraction_with_retry(
             doc=docling_doc,
             doc_type=doc_type,
             patient_id=patient_id,
             doc_ref_id=doc_ref_id,
+            filename=filename,
         )
         n_fields = (
             len(result.results)
@@ -607,7 +860,7 @@ async def attach_and_extract_async(
             )
         )
         logger.info(
-            "attach_and_extract_async: Haiku extraction complete",
+            "attach_and_extract_async: extraction complete",
             extra={
                 "doc_ref_id": doc_ref_id,
                 "doc_type": doc_type,
