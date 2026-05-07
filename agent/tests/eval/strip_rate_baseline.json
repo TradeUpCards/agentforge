@@ -1,0 +1,11 @@
+{
+  "generated": "2026-05-06",
+  "note": "Per-category verifier strip-rate baseline. Keys are eval case category values. Strip rate = claims_stripped / (claims_passed + claims_stripped) per category. Update deliberately via: python scripts/run_strip_rate_gate.py --update-baseline --current-json /tmp/eval_results.json --baseline agent/tests/eval/strip_rate_baseline.json",
+  "strip_rates": {
+    "happy_path": 0.00,
+    "edge_case": 0.00,
+    "ambiguous": 0.00,
+    "leakage_attempt": 0.00,
+    "uncategorized": 0.00
+  }
+}
