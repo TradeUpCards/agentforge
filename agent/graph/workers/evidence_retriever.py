@@ -1,15 +1,16 @@
-"""Evidence retriever worker node (W2 Stage-3b).
+"""Evidence retriever worker node (W2 Stage-3b, graph phase).
 
 Wraps search_guidelines() (Stage-3a hybrid RAG) and the W1 patient-record
 tools (get_problem_list, get_active_medications, get_recent_labs, get_allergies,
 get_recent_encounters) via execute_tool().
 
-Routing heuristic (deterministic, no LLM call):
-  - If the query mentions clinical-record keywords (medication, allergy, lab,
-    encounter, prescription, problem, condition, history, diagnosis) AND a
-    patient_id is available in state → call one or more W1 patient tools.
-  - Otherwise → call search_guidelines (guideline evidence).
-  - When both are relevant, call guidelines first (cheaper, no DB).
+Retrieval strategy (decision #3 — replaces old keyword-router heuristic):
+  - When state["patient_id"] is present, ALWAYS fetch all 5 W1 patient tools
+    in parallel (mirrors agent.py:fetch_baseline_context). No keyword routing.
+  - ADDITIVELY call search_guidelines when any token from _GUIDELINE_KEYWORDS
+    appears in query.lower(). This is an additive call — patient data fetch
+    always fires first when patient_id is present.
+  - When patient_id is absent: call search_guidelines only.
 
 W2_ARCHITECTURE.md §3.4 (worker isolation), §3.3 (span: worker.evidence_retriever).
 
@@ -35,21 +36,35 @@ logger = logging.getLogger(__name__)
 
 _WORKER_NAME = "evidence_retriever"
 
-# Keywords that indicate the query needs patient-record tools (W1).
-_PATIENT_RECORD_KEYWORDS = frozenset({
-    "medication", "medications", "drug", "drugs", "prescription", "prescriptions",
-    "allergy", "allergies", "lab", "labs", "laboratory", "result", "results",
-    "encounter", "encounters", "visit", "problem", "problems", "condition",
-    "conditions", "history", "diagnosis", "diagnoses", "hba1c", "a1c",
-    "glucose", "blood pressure", "bp",
+# All 5 W1 patient-record tools, fetched in parallel when patient_id is present.
+# Mirrors _BASELINE_TOOLS in agent/agent.py:fetch_baseline_context.
+_ALL_PATIENT_TOOLS = (
+    "get_problem_list",
+    "get_active_medications",
+    "get_recent_labs",
+    "get_allergies",
+    "get_recent_encounters",
+)
+
+# Keywords indicating the query needs guideline evidence.
+# Low-bar set — any overlap triggers the additive search_guidelines call.
+_GUIDELINE_KEYWORDS = frozenset({
+    "guideline", "ada", "uspstf", "recommendation", "recommendations",
+    "evidence", "target", "goal", "threshold", "standard", "protocol",
+    "consensus", "clinical practice", "jnc", "aha",
 })
+
+# TODO: centralize pricing constants
+# Haiku 4.5: $1.00/MTok input, $5.00/MTok output (no LLM call in this worker)
+# (included for future cost attribution if LLM is added to evidence retrieval)
 
 
 def evidence_retriever_node(state: SupervisorState) -> dict[str, Any]:
     """LangGraph worker node: evidence retrieval.
 
-    Decides between guideline search and patient-record tools based on
-    the query content. Builds Citation objects and appends to state.
+    Decision #3: always fetch all 5 W1 patient tools when patient_id is
+    present. Additively call search_guidelines when query mentions
+    _GUIDELINE_KEYWORDS. Builds Citation objects and appends to state.
 
     Returns a state patch. LangGraph merges it automatically.
     """
@@ -64,18 +79,33 @@ def evidence_retriever_node(state: SupervisorState) -> dict[str, Any]:
     t0 = time.monotonic()
     new_citations: list[Citation] = []
     n_citations_added = 0
-    tool_called = "none"
+    tools_called: list[str] = []
 
     with _langfuse_span(lf, _langfuse_available) as _span:
         try:
             query = state.get("query", "")
-            patient_id = _extract_patient_id(state)
-            needs_patient_data = _query_needs_patient_data(query)
+            # Decision #7: patient_id is now a top-level SupervisorState field.
+            patient_id = state.get("patient_id")
 
-            if needs_patient_data and patient_id is not None:
-                new_citations, tool_called = _fetch_patient_records(patient_id, query)
-            else:
-                new_citations, tool_called = _fetch_guidelines(query)
+            if patient_id is not None:
+                # Decision #3: always fetch all 5 W1 patient tools in parallel.
+                patient_citations, patient_tools = _fetch_all_patient_records(
+                    patient_id
+                )
+                new_citations.extend(patient_citations)
+                tools_called.extend(patient_tools)
+
+            # Additive: fetch guidelines when query has relevant keywords.
+            if _query_needs_guidelines(query):
+                guideline_citations, guideline_tool = _fetch_guidelines(query)
+                new_citations.extend(guideline_citations)
+                tools_called.append(guideline_tool)
+
+            # If no patient_id and no guideline keywords, fall back to guidelines.
+            if not tools_called:
+                guideline_citations, guideline_tool = _fetch_guidelines(query)
+                new_citations.extend(guideline_citations)
+                tools_called.append(guideline_tool)
 
             n_citations_added = len(new_citations)
         except Exception as exc:
@@ -87,14 +117,16 @@ def evidence_retriever_node(state: SupervisorState) -> dict[str, Any]:
             logger.debug("evidence_retriever_node scrubbed error: %s", scrubbed)
 
         latency_ms = int((time.monotonic() - t0) * 1000)
+        tool_called_str = ",".join(tools_called) if tools_called else "none"
         if _langfuse_available and lf is not None:
             try:
                 lf.update_current_span(
                     metadata={
                         "worker_name": _WORKER_NAME,
                         "n_citations_added": n_citations_added,
-                        "tool_called": tool_called,
+                        "tool_called": tool_called_str,
                         "latency_ms": latency_ms,
+                        "retrieval_hits": n_citations_added,
                     }
                 )
             except Exception:
@@ -107,46 +139,58 @@ def evidence_retriever_node(state: SupervisorState) -> dict[str, Any]:
     existing_tool_calls = list(state.get("tool_calls_accumulated", []))
     existing_tool_calls.append({
         "name": _WORKER_NAME,
-        "tool_called": tool_called,
+        "tool_called": tool_called_str,
         "citations_added": n_citations_added,
         "latency_ms": latency_ms,
     })
 
+    # Decision #10: worker_results aligned to ToolCallSummary shape.
     existing_results = list(state.get("worker_results", []))
     existing_results.append({
-        "worker_name": _WORKER_NAME,
-        "tool_called": tool_called,
-        "citations_added": n_citations_added,
-        "record_count": n_citations_added,
+        "tool_name": _WORKER_NAME,
+        "params": {
+            "patient_id": state.get("patient_id"),
+            "query_chars": len(state.get("query", "")),
+        },
         "latency_ms": latency_ms,
+        "success": True,
+        "record_count": n_citations_added,
+        "error": None,
+        # Legacy keys for supervisor context message compatibility.
+        "worker_name": _WORKER_NAME,
+        "citations_added": n_citations_added,
+        "tool_called": tool_called_str,
     })
+
+    # Decision #14: per-node observability entry.
+    obs_entry = {
+        "node_name": _WORKER_NAME,
+        "latency_ms": latency_ms,
+        "tokens_input": 0,   # no LLM call in this worker
+        "tokens_output": 0,
+        "cost_estimate_usd": 0.0,
+        "retrieval_hits": n_citations_added,
+        "extraction_confidence": None,
+    }
+    existing_obs = list(state.get("node_observability", []))
+    existing_obs.append(obs_entry)
 
     return {
         "citations": existing_citations,
         "tool_calls_accumulated": existing_tool_calls,
         "worker_results": existing_results,
+        "node_observability": existing_obs,
     }
 
 
-def _query_needs_patient_data(query: str) -> bool:
-    """Deterministic heuristic: does this query need patient-record tools?
+def _query_needs_guidelines(query: str) -> bool:
+    """Deterministic heuristic: does this query need guideline evidence?
 
-    Checks for overlap between lower-cased query tokens and the set of
-    patient-record keywords. No LLM involved — pure string matching.
+    Checks for overlap between lower-cased query tokens and _GUIDELINE_KEYWORDS.
+    No LLM involved — pure string matching.
     """
     query_lower = query.lower()
-    return any(kw in query_lower for kw in _PATIENT_RECORD_KEYWORDS)
-
-
-def _extract_patient_id(state: SupervisorState) -> int | None:
-    """Find the patient_id from tool_calls_accumulated doc context, if present."""
-    for entry in state.get("tool_calls_accumulated", []):
-        if "patient_id" in entry:
-            try:
-                return int(entry["patient_id"])
-            except (TypeError, ValueError):
-                pass
-    return None
+    return any(kw in query_lower for kw in _GUIDELINE_KEYWORDS)
 
 
 def _fetch_guidelines(query: str) -> tuple[list[Citation], str]:
@@ -167,50 +211,47 @@ def _fetch_guidelines(query: str) -> tuple[list[Citation], str]:
     return citations, "search_guidelines"
 
 
-def _fetch_patient_records(patient_id: int, query: str) -> tuple[list[Citation], str]:
-    """Call W1 patient-record tools and return (citations, tool_called).
+def _fetch_all_patient_records(
+    patient_id: int,
+) -> tuple[list[Citation], list[str]]:
+    """Fetch all 5 W1 patient tools in parallel (decision #3).
 
-    Selects which W1 tools to call based on query content. Calls are
-    synchronous (W1 tools are sync; execute_tool is async so we run it).
+    Mirrors agent.py:fetch_baseline_context but adapted for the sync
+    LangGraph node context. All 5 tools are always called regardless of
+    query content — the evidence_retriever worker has no keyword router.
+
+    Returns (citations, tools_called_list).
     """
-    # Decide which tools to invoke (structural heuristic, no LLM).
-    tools_to_call: list[str] = []
-    query_lower = query.lower()
-
-    if any(kw in query_lower for kw in ("medication", "drug", "prescription")):
-        tools_to_call.append("get_active_medications")
-    if any(kw in query_lower for kw in ("allergy", "allergies")):
-        tools_to_call.append("get_allergies")
-    if any(kw in query_lower for kw in ("lab", "result", "hba1c", "a1c", "glucose")):
-        tools_to_call.append("get_recent_labs")
-    if any(kw in query_lower for kw in ("encounter", "visit")):
-        tools_to_call.append("get_recent_encounters")
-    if any(kw in query_lower for kw in ("problem", "condition", "history", "diagnosis")):
-        tools_to_call.append("get_problem_list")
-
-    # Default: if no keyword matched, call problem list as safest default.
-    if not tools_to_call:
-        tools_to_call = ["get_problem_list"]
-
-    citations: list[Citation] = []
     tool_input = {"patient_id": patient_id}
+    citations: list[Citation] = []
+    tools_called: list[str] = []
 
-    for tool_name in tools_to_call:
-        records = _run_tool_sync(execute_tool, tool_name, tool_input)
-        for rec in records:
-            citations.append(
-                Citation(
-                    source_type="patient_record",
-                    source_id=f"{rec.table}:{rec.record_id}",
-                    page_or_section=None,
-                    field_or_chunk_id=rec.record_id,
-                    quote_or_value=f"{rec.table}:{rec.record_id}",
-                    bbox=None,
+    for tool_name in _ALL_PATIENT_TOOLS:
+        try:
+            records = _run_tool_sync(execute_tool, tool_name, tool_input)
+            tools_called.append(tool_name)
+            for rec in records:
+                citations.append(
+                    Citation(
+                        source_type="patient_record",
+                        source_id=f"{rec.table}:{rec.record_id}",
+                        page_or_section=None,
+                        field_or_chunk_id=rec.record_id,
+                        quote_or_value=f"{rec.table}:{rec.record_id}",
+                        bbox=None,
+                    )
                 )
+        except Exception as exc:
+            scrubbed = mask_observability_patterns(str(exc))
+            logger.error(
+                "evidence_retriever: tool %s failed: %s",
+                tool_name,
+                type(exc).__name__,
             )
+            logger.debug("evidence_retriever tool error (scrubbed): %s", scrubbed)
+            tools_called.append(tool_name)  # still record the attempt
 
-    tool_called = ",".join(tools_to_call) if tools_to_call else "none"
-    return citations, tool_called
+    return citations, tools_called
 
 
 def _run_tool_sync(tool_fn: Any, tool_name: str, tool_input: dict[str, Any]) -> list[Any]:

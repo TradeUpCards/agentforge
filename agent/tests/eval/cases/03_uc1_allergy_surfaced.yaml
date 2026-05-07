@@ -1,4 +1,5 @@
 name: uc1_allergy_surfaced
+endpoint: /chat
 category: happy_path
 description: |
   Pre-visit brief must surface active allergies. Allergies are safety-critical

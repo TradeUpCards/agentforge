@@ -1,4 +1,5 @@
 name: contradictory_progression_acknowledgment
+endpoint: /chat
 category: edge_case
 description: |
   Synthetic patient 999103 (`contradictory_progression_notes`

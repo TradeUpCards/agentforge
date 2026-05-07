@@ -652,6 +652,54 @@ These decisions were reached during PRD authoring for the HITL extraction review
 
 ---
 
+---
+
+### 2026-05-07 — Model split for supervisor + responder graph nodes — Haiku-default with bounded Sonnet escalation {#2026-05-07--model-split-for-supervisor--responder-graph-nodes}
+
+**Supersession notice.** This entry explicitly supersedes W2_ARCHITECTURE.md §0's prior claim that "Sonnet 4.5 for the supervisor." That sentence was written during the initial architecture-defense draft before the graph phase was scoped. The model choice was re-evaluated when the responder node was added and the cost model was examined against the W1 routing-as-Haiku precedent. The W2_ARCHITECTURE.md §0 line has been rewritten accordingly; the new text cross-references this entry.
+
+**Decision.** Haiku 4.5 is the default model for the supervisor node and the responder node. Sonnet 4.6 escalation is invoked only under two bounded conditions:
+
+1. The supervisor returns invalid JSON or an unrecognised route on its first call.
+2. The responder's `synthesize_with_verifier()` call returns a `REFUSED` verdict on the first synthesis attempt.
+
+In both cases, a single Sonnet 4.6 re-attempt is made. No further escalation occurs. The `AgentResponse` field `escalated_to_sonnet: bool` records whether escalation fired for a given request (Decision #15 in the locked design). Operators can confirm the escalation rate is low via the Langfuse per-node funnel — see `OBSERVABILITY.md` §"How to verify Sonnet escalation rate".
+
+**Rationale.**
+
+Three forces drove this decision:
+
+1. **Cost.** Sonnet 4.6 is approximately 3× the per-token cost of Haiku 4.5 on both input and output tokens. In the W1 routing agent, Haiku handled all routing decisions — demonstrating that bounded, well-prompted routing is well within Haiku's capability. The supervisor's routing decision in the graph is structurally similar (parse state, emit a JSON routing decision), so Haiku-default is the natural continuation of that precedent.
+
+2. **W1 precedent.** The W1 multi-model tiering decision (DECISIONS.md §2 and COST_ANALYSIS.md §3) established Haiku for well-bounded tasks. The supervisor's routing and the responder's synthesis are both well-bounded by Pydantic schemas and explicit prompts — the same conditions under which Haiku has been reliable in W1.
+
+3. **Bounded blast radius.** The escalation rule is deliberately narrow: bad JSON and REFUSED-on-first-attempt are rare, detectable conditions. The extra Sonnet call on those paths costs ~$0.005–0.015 (a single document-length call), which is the right tradeoff for recovering those cases without degrading cost at the median.
+
+**Trade-offs accepted.**
+
+- Haiku 4.5 may produce invalid JSON from the supervisor more frequently than Sonnet 4.6 would. The escalation path mitigates the user-visible impact, but the escalation itself adds one round-trip of latency (~1–2s) on those requests. This is acceptable because (a) the frequency is expected to be low, and (b) the alternative — Sonnet-everywhere — would add 3× cost to every single request.
+- Haiku's instruction-following on the responder's synthesis prompt is less reliable than Sonnet's on adversarial inputs. The verifier catch-on-REFUSED path is the defense: if Haiku's synthesis fails the verifier, Sonnet gets one attempt. If Sonnet also fails, the request refuses — same discipline as W1's 30%-strip refusal path.
+- The escalation rate is a new metric that did not exist in W1. If the rate exceeds ~5% of `/graph_chat` traces, the economics of "Haiku + occasional Sonnet" begin to approach "Sonnet-everywhere" and the decision should be revisited.
+
+**Alternatives considered and rejected.**
+
+| Alternative | Reason rejected |
+|---|---|
+| Sonnet 4.6 everywhere (supervisor + responder) | 3× cost at the median; W1 precedent shows Haiku is sufficient for bounded routing + synthesis tasks; cost asymmetry is not justified by observed accuracy gap at week-2 scale |
+| Haiku everywhere with no escalation | Unverified failure modes — bad JSON from supervisor with no recovery path produces a hard failure on a user-visible request; REFUSED-on-first-attempt with no fallback degrades quality on the cases Haiku struggles with |
+| Sonnet for supervisor, Haiku for responder | Asymmetric without justification; the supervisor's routing call is if anything *simpler* than the responder's synthesis; makes the model split harder to explain and maintain |
+| Haiku 4.5 for supervisor, Haiku 4.5 for responder with no escalation, Sonnet only for workers | Workers (intake-extractor, evidence-retriever) are Haiku in the current design; escalating workers but not the synthesizer inverts the risk model |
+
+**Revisit threshold.** Re-evaluate this decision if any of the following conditions are met:
+
+- The Sonnet escalation rate on `/graph_chat` traces exceeds 5% over a rolling 7-day window (see `OBSERVABILITY.md` §"How to verify Sonnet escalation rate" for the Langfuse query).
+- Anthropic releases a pricing change that reduces the Haiku-to-Sonnet cost ratio below 2× — at that ratio, the complexity cost of maintaining two code paths exceeds the savings.
+- The eval gate (`rubric` or `strip-rate`) shows that Haiku-default on the responder produces a measurable quality regression vs a Sonnet-default baseline in the same eval run — i.e., the quality cost is empirically visible, not just theoretical.
+
+**Source.** `.gauntlet/week2/handoffs/bram-handoff.md` §"What's already approved", Decision #4, and the 17-decision lock list at lines 159–196.
+
+---
+
 ## Revision log
 
 | Date | Revision | Author |
@@ -687,5 +735,6 @@ These decisions were reached during PRD authoring for the HITL extraction review
 | 2026-05-04 (Mon) | **Week 2 architecture defense — load-bearing decisions locked.** Full rationale and tradeoff tables now live in [`W2_ARCHITECTURE.md`](./W2_ARCHITECTURE.md) at repo root; this row records the ledger entries. (1) **Two-stage document extraction** — Docling (IBM, self-hosted, real bboxes) → Haiku 4.5 (Pydantic schema). VLMs hallucinate bbox coordinates, so the layout engine produces them; the LLM only maps fields to block IDs. Mistral OCR API as documented fallback if Docling install bites the MVP window. (2) **LangGraph supervisor + 2 workers** (`intake-extractor`, `evidence-retriever`) with strict Pydantic input/output contracts; workers cannot call each other (only supervisor routes); 4-hop hard cap with named refusal `supervisor_max_hops`. Every routing decision emits a Langfuse span with rationale (inspectability is a tested property, not an aspiration). Considered + rejected: OpenAI Agents SDK (Anthropic-vendor mismatch), Pydantic AI (community size gamble), CrewAI (less inspectable), custom (loses framework defense). (3) **Qdrant for vector DB** — native sparse+dense+RRF in one query, single container, typed payload filters. Considered + rejected: Chroma (would force hand-rolled BM25), pgvector (would add Postgres sidecar to a MariaDB stack), Weaviate / Pinecone / LanceDB / FAISS. (4) **Hybrid RAG, GraphRAG explicitly rejected** — citation contract requires chunk-level roundtrip (GraphRAG community summaries break it); entity-extraction error compounds at small N (50–200 chunks); query distribution is local lookup not global synthesis. Revisit threshold: ~5K+ chunks OR query telemetry showing thematic cross-guideline questions. (5) **Cohere Rerank** with BAAI/bge-reranker-v2 fallback (same interface). (6) **RxNav for drug normalization** in entity-keyword retrieval boost (free, NIH, no auth, real-time). UMLS rejected (license overhead). OpenFDA Drug Label as supplemental corpus is a stretch. (7) **Boolean rubrics not 1-10** for the 50-case eval suite; >5% category regression fails the build. **Hard Gate confidence has 3 tested layers**: per-rubric meta-tests (deliberately broken fixtures), threshold sensitivity vs committed baseline JSON, 6 adversarial regression cases mapped to known regression classes. (8) **Patient documents do NOT go into RAG** — RAG is the evergreen guideline corpus only (USPSTF/ADA/JNC/drug-interaction rules). Patient docs extract into FHIR resources (`Observation`, `AllergyIntolerance`, `MedicationStatement` with `derivedFrom` → `DocumentReference`) and are retrieved via tool calls, same shape as Week-1's chart-data tools. (9) **Two-actor upload UX** — front desk uploads via OpenEMR's existing Documents tab (with auto-extract category triggering our DocumentSavedEvent subscriber); PCP doesn't manage uploads, just sees extracted facts in the Co-Pilot drawer when opening the chart later. PHP module reads PDF and POSTs file bytes (multipart, HMAC-signed) to agent — agent never has filesystem access to OpenEMR's documents directory. Bind-mount alternative considered + rejected (broader trust surface). (10) **Extraction verifier** as Week-2 analog of Week-1 claim verifier — deterministic substring check confirming each extracted field's value appears in its named source block; fields failing strip; >30% threshold refuses the whole extraction. (11) **`source_type` discriminator on Citation contract** has three values: `patient_record`, `guideline`, `extracted_document` — answer model is prompt-instructed to never blur the three; `factually_consistent` rubric verifies. (12) **MVP vs Extension scope on click-to-source UI**: MVP ships basic bbox highlight on the PDF when citation clicked (PRD Core Req #5); rich snippet preview popover is PRD-named extension. (13) **MultiMedQA eval slot** — ~22% of cases (11/50) from MedQA primary-care vignettes + MedicationQA. PubMedQA / HealthSearchQA / LiveQA / ConsumerQA explicitly skipped (consumer-shape mismatch). The OpenFDA "RxQA" mentioned in passing could not be confirmed as a published dataset. **FHIR R4 read path** moved from Week-1 deferred → Week-2 required (DocumentReference + Observation persistence is core to ingestion roundtrip). | AgentForge build |
 
 | 2026-05-06 | **P1 HITL eval metrics — 8 load-bearing decisions locked.** Full rationale for each lives in the appendix entry below. (1) PHI custody: failed extraction values are never stored — structural pointers only. (2) Append-only attempt chain via `parent_extraction_id` + `is_active`. (3) Field-level upsert keyed on per-`doc_type` natural key. (4) Auto-retry triggers only on `ExtractionLowGrounding` (>30% strip). (5) Retry ladder order: Haiku-default → Haiku-verbatim → Sonnet-verbatim. (6) `template_id` auto-tagged from filename for W2 demo. (7) Reactivation does not delete clinical rows. (8) Per-document cost ceiling $0.50; per-run ceiling via env var. Source of truth: `.gauntlet/week2/hitl-extraction-prd.md` §12. | AgentForge build |
+| 2026-05-07 | **Model split for supervisor + responder graph nodes — Haiku 4.5 default with bounded Sonnet 4.6 escalation.** Supersedes W2_ARCHITECTURE.md §0 "Sonnet 4.5 for the supervisor" claim. Full rationale + alternatives + revisit threshold in appendix entry below. New `OBSERVABILITY.md` documents the Langfuse per-node funnel and escalation-rate query. | AgentForge build — delivery-lead |
 
 When updating, add a row to this table and date-stamp any modified appendix entries inline.

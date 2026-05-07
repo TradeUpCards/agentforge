@@ -1,4 +1,5 @@
 name: synthea_allergy_surfaced
+endpoint: /chat
 category: happy_path
 description: |
   Live-data eval against Guadalupe Botsford (patient_id 92). Verifies

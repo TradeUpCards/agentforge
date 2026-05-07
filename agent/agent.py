@@ -983,6 +983,12 @@ async def run_chat(
     #     turn (same prefix, cached). This is the major win.
     #   - Cross-patient: NO benefit (different prefix → different cache
     #     entry). Architecture inherently can't cache across patients.
+    #
+    # W2 graph phase note (decision #12): the synthesis + verifier logic is
+    # also available as agent/_synthesis.py:synthesize_with_verifier() for
+    # use by the responder node. The inline code here is the /chat path and
+    # is kept unchanged (behavioral invariant). The responder node uses the
+    # helper directly via the test-compatible interface.
     patient_context = _format_patient_context(retrieved_records)
     system_blocks = [
         {

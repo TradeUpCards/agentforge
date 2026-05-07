@@ -1,0 +1,38 @@
+name: graph_uc1_pre_visit_brief
+endpoint: /graph_chat
+category: happy_path
+description: |
+  UC1 — "Pre-visit brief" via /graph_chat. Sentinel patient 999100 with
+  patient_id passed at top-level SupervisorState (decision #7). The graph
+  supervisor should route to evidence_retriever which calls all 5 W1 tools
+  (decision #3). The responder synthesizes the brief and returns an
+  AgentResponse with at least one patient_record citation.
+
+  Primary regression classes guarded:
+    - patient_id not propagated to evidence_retriever (decision #7 bypass)
+    - responder never runs (terminal_reason='no_route' instead of 'responded')
+    - claims_passed_count drops to 0 (verifier over-strips)
+
+patient_id: 999100
+user_id: 1
+synthetic: true
+fixture_data_required: false
+live_llm_required: true
+tier: nightly
+difficulty: intermediate
+failure_mode: graph_uc1_no_patient_record_citation
+tool_mix:
+  - get_problem_list
+  - get_active_medications
+  - get_recent_labs
+  - get_allergies
+  - get_recent_encounters
+rubric: [citation_present, factually_consistent]
+messages:
+  - role: user
+    content: "Give me a pre-visit brief for this patient."
+
+expected:
+  status: ok
+  min_claims: 1
+  min_citations: 1

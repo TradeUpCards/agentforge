@@ -1,4 +1,5 @@
 name: evidence_retrieval_warfarin_drug_interactions
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Evidence retrieval for warfarin drug interaction guidelines. The agent must

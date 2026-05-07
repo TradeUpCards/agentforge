@@ -1,4 +1,5 @@
 name: evidence_retrieval_heart_failure_management
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Evidence retrieval for systolic heart failure pharmacotherapy (ACC/AHA HFrEF

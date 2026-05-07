@@ -4,24 +4,27 @@ build_supervisor_graph() is the single public function. It wires up:
   - supervisor_node (entry point, routing + hop-cap enforcement)
   - intake_extractor_node (Stage-2 document extraction worker)
   - evidence_retriever_node (Stage-3a hybrid RAG + W1 patient-record worker)
+  - responder_node (NEW — W2 graph phase, terminal synthesis node)
 
-Graph shape (W2_ARCHITECTURE.md §3.1):
-  supervisor → worker (by route) → supervisor (loop) → END (when terminal)
+Graph shape (W2_ARCHITECTURE.md §3.1, updated for graph phase):
+  supervisor → {worker(s)} → supervisor (loop) → responder → END
+  supervisor (no_route)    → END  [bypasses responder]
 
 Routing is determined by inspecting the state after each supervisor call:
-  - state['terminal_reason'] is set → END
-  - state['hops_taken'] incremented → route to the worker the supervisor chose.
+  - state['terminal_reason'] == "answered" or "supervisor_max_hops"
+    → route to responder (synthesis)
+  - state['terminal_reason'] == "no_route"
+    → route to END (bypass responder, handler returns RefusalResponse)
+  - state['_pending_route'] is set → route to the named worker
 
 The supervisor encodes its routing decision as the 'hops_taken' increment +
-the updated state. The conditional edge function reads the last entry in
-state['tool_calls_accumulated'] to recover which worker was chosen, OR
-checks terminal_reason for the stop condition.
-
-Because the supervisor returns {hops_taken: N+1} on a valid route and
-{terminal_reason: ...} on a stop, the edge function has unambiguous signals.
+the updated state. The conditional edge function reads _pending_route to
+determine which worker was chosen, or terminal_reason for the stop condition.
 
 Worker → supervisor edge is always unconditional (workers always return to
 supervisor per §3.4 worker isolation rule).
+
+Responder → END edge is always unconditional (terminal node).
 
 W2_ARCHITECTURE.md §3.1, §3.2, §3.5.
 """
@@ -37,11 +40,13 @@ from agent.graph.state import SupervisorState
 from agent.graph.supervisor import supervisor_node
 from agent.graph.workers.evidence_retriever import evidence_retriever_node
 from agent.graph.workers.intake_extractor import intake_extractor_node
+from agent.graph.workers.responder import responder_node
 
 # Node names — referenced in edges; defined once to avoid string drift.
 _SUPERVISOR = "supervisor"
 _INTAKE_EXTRACTOR = "intake_extractor"
 _EVIDENCE_RETRIEVER = "evidence_retriever"
+_RESPONDER = "responder"
 
 
 def build_supervisor_graph() -> CompiledStateGraph:
@@ -53,9 +58,14 @@ def build_supervisor_graph() -> CompiledStateGraph:
 
     Node wiring:
       entry:  supervisor
-      edges:  supervisor → {intake_extractor | evidence_retriever | END}
+      edges:  supervisor → {intake_extractor | evidence_retriever | responder | END}
               intake_extractor → supervisor
               evidence_retriever → supervisor
+              responder → END
+
+    The responder fires when terminal_reason is "answered" or "supervisor_max_hops".
+    When terminal_reason is "no_route", the graph routes directly to END so the
+    /graph_chat handler can return RefusalResponse without going through responder.
 
     Returns:
         CompiledStateGraph
@@ -66,17 +76,19 @@ def build_supervisor_graph() -> CompiledStateGraph:
     graph.add_node(_SUPERVISOR, supervisor_node)
     graph.add_node(_INTAKE_EXTRACTOR, intake_extractor_node)
     graph.add_node(_EVIDENCE_RETRIEVER, evidence_retriever_node)
+    graph.add_node(_RESPONDER, responder_node)
 
     # Entry point.
     graph.set_entry_point(_SUPERVISOR)
 
-    # Supervisor → worker (conditional) or END.
+    # Supervisor → worker | responder | END (conditional).
     graph.add_conditional_edges(
         _SUPERVISOR,
         _supervisor_router,
         {
             _INTAKE_EXTRACTOR: _INTAKE_EXTRACTOR,
             _EVIDENCE_RETRIEVER: _EVIDENCE_RETRIEVER,
+            _RESPONDER: _RESPONDER,
             END: END,
         },
     )
@@ -85,6 +97,9 @@ def build_supervisor_graph() -> CompiledStateGraph:
     graph.add_edge(_INTAKE_EXTRACTOR, _SUPERVISOR)
     graph.add_edge(_EVIDENCE_RETRIEVER, _SUPERVISOR)
 
+    # Responder is terminal — always routes to END.
+    graph.add_edge(_RESPONDER, END)
+
     return graph.compile()
 
 
@@ -92,32 +107,37 @@ def _supervisor_router(state: SupervisorState) -> str:
     """Conditional edge function: maps state to the next node name.
 
     Called by LangGraph after supervisor_node returns a state patch.
-    Reads terminal_reason and the last tool_calls_accumulated entry to
-    determine the next node.
+    Reads terminal_reason and _pending_route to determine the next node.
+
+    Updated for graph phase (decision #2):
+      - "answered" or "supervisor_max_hops" → responder (not END directly)
+      - "no_route" → END (bypass responder, /graph_chat handler returns RefusalResponse)
+      - _pending_route set → the named worker
 
     Returns:
-        Node name: 'intake_extractor', 'evidence_retriever', or END sentinel.
+        Node name: 'intake_extractor', 'evidence_retriever', 'responder',
+        or END sentinel.
     """
-    # Terminal conditions.
     terminal_reason = state.get("terminal_reason")
-    if terminal_reason is not None:
+
+    if terminal_reason == "no_route":
+        # Bypass responder — /graph_chat handler returns RefusalResponse directly.
         return END
 
-    # Determine which worker the supervisor chose by inspecting the last
-    # tool_calls_accumulated entry. The supervisor doesn't write to
-    # tool_calls_accumulated directly — it's the workers that do. So on the
-    # FIRST call, accumulated is empty and hops_taken just incremented.
-    # We use hops_taken mod-based detection: the supervisor stores its
-    # routing intent in _pending_route via a side channel in the state.
-    #
-    # Design note: we use a '_pending_route' key in the state to carry the
-    # supervisor's decision to the edge function without polluting
-    # tool_calls_accumulated (which is worker-written structural metadata).
+    if terminal_reason in ("answered", "supervisor_max_hops"):
+        # Enough evidence accumulated (or hop cap) — run synthesis.
+        return _RESPONDER
+
+    if terminal_reason is not None:
+        # Unknown terminal reason — safe to route to END.
+        return END
+
+    # Determine which worker the supervisor chose via _pending_route.
     pending_route = state.get("_pending_route")  # type: ignore[typeddict-item]
     if pending_route == "intake_extractor":
         return _INTAKE_EXTRACTOR
     if pending_route == "evidence_retriever":
         return _EVIDENCE_RETRIEVER
 
-    # Fallback: if no pending_route, go to END (max_hops or no_route).
+    # Fallback: if no pending_route and no terminal_reason, go to END.
     return END

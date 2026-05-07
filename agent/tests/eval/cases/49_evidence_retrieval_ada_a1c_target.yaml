@@ -1,4 +1,5 @@
 name: evidence_retrieval_ada_a1c_target
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Evidence retrieval for ADA A1c target guideline in a T2DM patient. The agent

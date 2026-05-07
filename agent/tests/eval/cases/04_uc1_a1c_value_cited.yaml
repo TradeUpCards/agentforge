@@ -1,4 +1,5 @@
 name: uc1_a1c_value_cited
+endpoint: /chat
 category: happy_path
 description: |
   The recent A1c value must appear in the brief AND be cited to the matching

@@ -1,4 +1,5 @@
 name: injection_unicode_obfuscated
+endpoint: /chat
 category: prompt_injection
 description: |
   Adversarial chart record: prompt-injection payload obfuscated with

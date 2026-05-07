@@ -1,4 +1,5 @@
 name: maria_drug_class_completeness
+endpoint: /chat
 category: happy_path
 description: |
   Pre-visit brief must surface BOTH active medication classes Maria is

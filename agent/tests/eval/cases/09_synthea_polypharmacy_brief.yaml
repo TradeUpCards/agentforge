@@ -1,4 +1,5 @@
 name: synthea_polypharmacy_brief
+endpoint: /chat
 category: happy_path
 description: |
   Live-data eval against Guadalupe Botsford (Synthea patient_id 92).

@@ -1,4 +1,5 @@
 name: evidence_retrieval_no_guideline_off_label
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Negative evidence retrieval case — off-label query with no supporting

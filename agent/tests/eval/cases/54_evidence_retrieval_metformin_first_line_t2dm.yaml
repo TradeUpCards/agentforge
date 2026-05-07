@@ -1,4 +1,5 @@
 name: evidence_retrieval_metformin_first_line_t2dm
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Evidence retrieval for metformin as first-line T2DM therapy (ADA / AACE

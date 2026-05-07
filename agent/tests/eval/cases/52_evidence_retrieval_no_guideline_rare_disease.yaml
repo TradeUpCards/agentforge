@@ -1,4 +1,5 @@
 name: evidence_retrieval_no_guideline_rare_disease
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Negative evidence retrieval case — Erdheim-Chester disease (a rare histiocytic

@@ -1,4 +1,5 @@
 name: evidence_retrieval_statin_ldl_target
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Evidence retrieval for statin therapy LDL target guidelines (ACC/AHA). The

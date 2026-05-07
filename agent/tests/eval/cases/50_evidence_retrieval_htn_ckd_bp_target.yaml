@@ -1,4 +1,5 @@
 name: evidence_retrieval_htn_ckd_bp_target
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Evidence retrieval for blood pressure targets in hypertension with CKD. The

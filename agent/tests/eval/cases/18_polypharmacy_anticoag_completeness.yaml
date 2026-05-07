@@ -1,4 +1,5 @@
 name: polypharmacy_anticoagulant_completeness
+endpoint: /chat
 category: happy_path
 description: |
   Pre-visit brief against synthetic polypharmacy patient 999101 — 8

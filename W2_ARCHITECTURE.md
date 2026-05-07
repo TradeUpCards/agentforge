@@ -30,7 +30,7 @@ Week 1 shipped a stateless agent that reads structured OpenEMR data, attributes 
 - **Qdrant** — vector DB with native sparse+dense hybrid retrieval (chosen over Chroma/pgvector/Weaviate/Pinecone — see §6 for rationale)
 - **Cohere Rerank** — top-K rerank on hybrid candidates. Chosen because (1) PRD names it, (2) best-in-class accuracy on cross-encoder rerank benchmarks, (3) free tier + cheap pricing for our 50-case eval. **Fallback: BAAI/bge-reranker-v2** (open-source, same interface) if Cohere rate limits or pricing surprise.
 - **RxNav** (NIH/NLM public API) — drug-name normalization to RxCUI for the entity-keyword retrieval boost. Chosen because (1) free, (2) no auth required, (3) NIH-maintained = authoritative for US clinical data, (4) real-time API. Considered: UMLS Metathesaurus (rejected — license overhead, broader than week-2 needs); local RxNorm DB dump (rejected — staleness risk).
-- **Model role split** (inherited from Week 1 multi-model tiering): **Sonnet 4.5** for the supervisor (route decisions need reasoning capacity); **Haiku 4.5** for workers (extraction + synthesis are well-bounded; 3× cheaper). Same tiering shipped + cached in Week 1.
+- **Model role split** (supersedes earlier Week 2 draft — see [DECISIONS.md 2026-05-07](#2026-05-07--model-split-for-supervisor--responder-graph-nodes)): **Haiku 4.5** is the default for the supervisor, workers, and the new responder node; **Sonnet 4.6** escalates only when (a) the supervisor returns invalid JSON or an unrecognised route, or (b) the responder verifier returns REFUSED on the first synthesis attempt. This bounded escalation preserves the 3× cost advantage of Haiku-everywhere while capping the blast radius of the cases where Haiku under-performs. The responder is a new worker-tier node (see §3.5) added in the graph phase; it runs Haiku 4.5 by default with the same Sonnet 4.6 escalation rules.
 - All other Week 1 stack stays: Anthropic Claude, Langfuse, Pydantic, FastAPI, MariaDB.
 
 **Tradeoff acknowledged.** Adding LangGraph + Docling + a vector DB is real new surface area. The defense for choosing them: each has a load-bearing reason (LangGraph for inspectable supervisor, Docling for real bounding boxes, vector DB for hybrid retrieval), and each has a documented exit ramp (workers as plain functions, Docling output as a JSON contract, vector DB behind a tiny `Retriever` interface).
@@ -241,49 +241,71 @@ A reviewer can always answer "where did this fact come from?" by following `Obse
 ### 3.1 The graph
 
 ```
-                          ┌──────────────────┐
-                          │   SUPERVISOR     │
-                          │ (Sonnet 4.5)     │
-                          └────────┬─────────┘
-                                   │ routes based on user intent + state
-                ┌──────────────────┼──────────────────┐
-                ▼                                     ▼
-      ┌────────────────────┐                ┌─────────────────────┐
-      │  intake-extractor  │                │ evidence-retriever  │
-      │  (Haiku 4.5 +      │                │ (Haiku 4.5 +        │
-      │   Docling layer)   │                │  hybrid RAG)        │
-      ├────────────────────┤                ├─────────────────────┤
-      │ Input:             │                │ Input:              │
-      │  patient_id,       │                │  query, patient_ctx │
-      │  doc_ref_id,       │                │ Output:             │
-      │  doc_type          │                │  {chunks: [{        │
-      │ Output:            │                │    chunk_id,        │
-      │  validated Pydantic│                │    text, source,    │
-      │  model + bbox      │                │    page, score      │
-      │  citations         │                │  }]}                │
-      └────────────────────┘                └─────────────────────┘
-                                   │
-                                   ▼
-                          ┌──────────────────┐
-                          │   SUPERVISOR     │
-                          │ synthesizes →    │
-                          │ verifier (Wk-1)  │
-                          │ → response       │
-                          └──────────────────┘
+                          ┌──────────────────────────────────────┐
+                          │            SUPERVISOR                │
+                          │  (Haiku 4.5; Sonnet 4.6 escalation) │
+                          │  escalates on: bad JSON / no-route   │
+                          └────────────────┬─────────────────────┘
+                                           │ routes based on user intent + state
+                ┌──────────────────────────┼──────────────────────────┐
+                ▼                                                     ▼
+      ┌────────────────────┐                            ┌─────────────────────┐
+      │  intake-extractor  │                            │ evidence-retriever  │
+      │  (Haiku 4.5 +      │                            │ (Haiku 4.5 +        │
+      │   Docling layer)   │                            │  hybrid RAG)        │
+      ├────────────────────┤                            ├─────────────────────┤
+      │ Input:             │                            │ Input:              │
+      │  patient_id,       │                            │  query, patient_ctx │
+      │  doc_ref_id,       │                            │ Output:             │
+      │  doc_type          │                            │  {chunks: [{        │
+      │ Output:            │                            │    chunk_id,        │
+      │  validated Pydantic│                            │    text, source,    │
+      │  model + bbox      │                            │    page, score      │
+      │  citations         │                            │  }]}                │
+      └────────────────────┘                            └─────────────────────┘
+                │  worker → supervisor (loop until answered | max_hops | no_route)
+                └──────────────────────────┬──────────────────────────┘
+                                           ▼
+                          ┌──────────────────────────────────────┐
+                          │            SUPERVISOR                │
+                          │  terminal states:                    │
+                          │   answered | supervisor_max_hops     │
+                          │     → pass to RESPONDER              │
+                          │   no_route → RefusalResponse END     │
+                          └────────────────┬─────────────────────┘
+                                           │ (answered | max_hops only)
+                                           ▼
+                          ┌──────────────────────────────────────┐
+                          │            RESPONDER                 │
+                          │  (Haiku 4.5; Sonnet 4.6 escalation) │
+                          │  escalates on: verifier REFUSED      │
+                          │  on first synthesis attempt          │
+                          ├──────────────────────────────────────┤
+                          │  runs outbound PHI gate (defense-    │
+                          │  in-depth); writes final_response    │
+                          │  into state; sets                    │
+                          │  escalated_to_sonnet: bool           │
+                          └────────────────┬─────────────────────┘
+                                           │
+                                           ▼ END
 ```
 
 ### 3.2 Supervisor responsibilities
 
-The supervisor is a Sonnet-driven LangGraph node that:
+The supervisor is a Haiku 4.5-driven LangGraph node (Sonnet 4.6 escalation on bad JSON or unrecognised route — see [DECISIONS.md 2026-05-07](#2026-05-07--model-split-for-supervisor--responder-graph-nodes)) that:
 1. Reads incoming user intent + current state
-2. Decides which worker to call (or whether to return final answer)
+2. Decides which worker to call (or whether to terminate)
 3. Emits a routing decision span to Langfuse with:
    - Selected worker
    - Rationale (one-sentence justification)
    - Confidence score
 4. Calls the worker
-5. On worker return, decides: call another worker, retry, or synthesize final response
+5. On worker return, decides: call another worker, retry, or declare a terminal state
 6. **Hard stop after 4 worker hops** — calculated as **2 workers × 2 round-trips before declaring stuck**. Anything more is loop-flavored, not progress. Named refusal reason `supervisor_max_hops` so operators can spot supervisor-loop patterns in `agent_log` aggregations.
+7. **Terminal state → responder hand-off rule:**
+   - If terminal state is `answered` or `supervisor_max_hops`: control passes to the responder node (§3.5), which synthesizes the final response from accumulated worker results.
+   - If terminal state is `no_route`: the graph returns `RefusalResponse(reason="no_route")` directly and **bypasses the responder** — no synthesis is attempted when no evidence was gathered.
+   - The responder is the only node that writes `final_response` into state; the supervisor never synthesizes directly.
 
 ### 3.3 Inspectability — what a Langfuse trace looks like
 
@@ -318,7 +340,47 @@ Each worker has a **strict input/output contract** (Pydantic models). Workers ca
 | `intake-extractor` | `ExtractRequest{patient_id, doc_ref_id, doc_type}` | `ExtractedDoc{fields, citations[], confidence}` | Docling layout + Haiku schema extraction + extraction verifier (§2.4) |
 | `evidence-retriever` | `EvidenceRequest{query, patient_context}` | `EvidenceBundle{chunks[], total_score}` | Hybrid RAG (Qdrant native sparse+dense + Cohere rerank) |
 
-### 3.5 Why LangGraph (vs alternatives)
+### 3.5 Responder node
+
+The responder is a new worker-tier node added in the graph phase (planned per DECISIONS.md entry 2026-05-07; implementation in progress on `agentforge/w2-graph-supervisor`).
+
+**Position in the graph.** The responder sits after the supervisor's terminal states `answered` and `supervisor_max_hops`. It never receives control after `no_route` — that path bypasses it and returns a `RefusalResponse` directly.
+
+**Input contract (reads from `SupervisorState`):**
+
+| Field | Type | Description |
+|---|---|---|
+| `query` | `str` | Original user message forwarded from supervisor |
+| `patient_id` | `int` | Top-level state field (Decision #7 — patient_id is top-level, not buried in worker inputs) |
+| `citations` | `list[Citation]` | Accumulated from all completed worker runs |
+| `worker_results` | `list[ToolCallSummary]` | Typed summary dicts from each worker (Decision #10) |
+
+**Output contract (writes into `SupervisorState`):**
+
+| Field | Type | Description |
+|---|---|---|
+| `final_response` | `AgentResponse` | The synthesized, verifier-passed response |
+| `escalated_to_sonnet` | `bool` | `True` if Sonnet 4.6 was invoked for this request (Decision #15) |
+
+**Synthesis helper.** The responder calls `agent/_synthesis.py:synthesize_with_verifier()`, which was extracted from `agent/agent.py:run_chat` (planned per DECISIONS.md entry 2026-05-07). This keeps `run_chat` (the existing `/chat` path) and the responder node behaviorally identical at the synthesis layer.
+
+**Outbound PHI gate.** The responder runs the same `_phi_scrubber.py` outbound scrubber pattern used by `agent/agent.py:1156-1192`. This is defense-in-depth: even if a worker emits PHI into state, the responder's outbound gate catches it before `final_response` is written. Decision #11 — the PHI gate belongs in the responder because it is the last node that touches the response before it exits the graph.
+
+**Sonnet escalation rule.** If `synthesize_with_verifier()` returns a `REFUSED` verdict on the first attempt, the responder re-invokes with `claude-sonnet-4-6` as the model and `escalated_to_sonnet=True` in state. No further escalation occurs (one Sonnet attempt is the cap). This mirrors the extraction retry ladder's cost discipline.
+
+**7-field per-node observability.** The responder (like every node) must return the following fields in its state patch for Langfuse ingestion (Decision #14 — required by PRD §7):
+
+| Field | Type | Source |
+|---|---|---|
+| `node_name` | `str` | `"responder"` |
+| `latency_ms` | `int` | Wall-clock span duration |
+| `tokens_input` | `int` | From Anthropic usage response |
+| `tokens_output` | `int` | From Anthropic usage response |
+| `cost_estimate_usd` | `float` | Derived from token counts × model price |
+| `retrieval_hits` | `int` | Count of citations passed in (0 for responder itself; populated by workers) |
+| `extraction_confidence` | `float | None` | Forwarded from intake-extractor if present; else `None` |
+
+### 3.6 Why LangGraph (vs alternatives)
 
 | Framework | Verdict | Reason |
 |---|---|---|

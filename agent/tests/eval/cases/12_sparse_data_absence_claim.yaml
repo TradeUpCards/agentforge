@@ -1,4 +1,5 @@
 name: sparse_data_absence_claim
+endpoint: /chat
 category: edge_case
 description: |
   Sparse-data sentinel — patient 999100 has exactly one record on file

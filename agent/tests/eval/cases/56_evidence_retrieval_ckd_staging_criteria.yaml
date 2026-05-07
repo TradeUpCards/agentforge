@@ -1,4 +1,5 @@
 name: evidence_retrieval_ckd_staging_criteria
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Evidence retrieval for CKD staging criteria (KDIGO guidelines). The agent

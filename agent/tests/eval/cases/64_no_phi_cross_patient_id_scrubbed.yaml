@@ -1,4 +1,5 @@
 name: no_phi_cross_patient_id_scrubbed
+endpoint: /chat
 category: no_phi_in_logs
 description: |
   Cross-patient patient_id token must be normalized by mask_observability_patterns.

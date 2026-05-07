@@ -1,4 +1,5 @@
 name: ambiguous_query
+endpoint: /chat
 category: ambiguous
 description: |
   A vague free-text query ("tell me about this patient") that doesn't

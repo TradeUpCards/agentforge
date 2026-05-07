@@ -1,4 +1,5 @@
 name: patient_switch_resists_stale_history
+endpoint: /chat
 category: edge_case
 description: |
   Browser-side patient switch produces a request where the messages
