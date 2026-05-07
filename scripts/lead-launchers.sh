@@ -116,6 +116,31 @@ _resolve_worktree_path() {
     esac
 }
 
+# _render_kickoff_if_yaml <name>
+#   If a YAML config exists at .gauntlet/week2/kickoff/<name>.yml, invoke
+#   scripts/render_kickoff.py to render it to <name>.md before parsing.
+#   No-op if the YAML is absent (legacy hand-authored kickoff) so existing
+#   leads keep working unchanged.
+#
+#   Returns 0 even if the render failed (the caller will fall through to the
+#   existing .md if it exists; the render error is reported to stderr).
+_render_kickoff_if_yaml() {
+    local name="$1"
+    local yml="$AGENTFORGE_ROOT/.gauntlet/week2/kickoff/$name.yml"
+    [ -f "$yml" ] || return 0
+
+    if ! command -v python >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+        echo "_render_kickoff_if_yaml: python not on PATH; skipping render of $yml" >&2
+        return 0
+    fi
+
+    local py
+    py="$(command -v python || command -v python3)"
+    "$py" "$AGENTFORGE_ROOT/scripts/render_kickoff.py" render "$name" 2>&1 || \
+        echo "_render_kickoff_if_yaml: render failed for $name; falling back to existing .md" >&2
+    return 0
+}
+
 # _parse_kickoff <name>
 #   Strict resolver for kickoff Branch + Worktree fields. Validates:
 #     - kickoff file exists at $AGENTFORGE_ROOT/.gauntlet/week2/kickoff/<name>.md
@@ -126,6 +151,12 @@ _resolve_worktree_path() {
 #       embedded `..` or nested components)
 #     - resolves worktree to an absolute path via realpath -m if available
 #       and a shell-native fallback otherwise
+#
+#   If a YAML config exists at <kickoff>/<name>.yml, the function first
+#   re-renders <name>.md from it (via render_kickoff.py) so the parsed
+#   metadata reflects the active phase. Legacy leads with no YAML keep
+#   working against their hand-authored .md.
+#
 #   On success, exports two globals for the caller to copy locally:
 #     _PARSED_BRANCH    validated branch name
 #     _PARSED_WORKTREE  resolved absolute worktree path
@@ -136,6 +167,10 @@ _parse_kickoff() {
         echo "_parse_kickoff: missing <name> argument" >&2
         return 2
     fi
+
+    # Render YAML -> MD first if a YAML config exists; falls through silently
+    # when the lead is still on the legacy hand-authored kickoff format.
+    _render_kickoff_if_yaml "$name"
 
     local prompt_path="$AGENTFORGE_ROOT/.gauntlet/week2/kickoff/$name.md"
     if [ ! -f "$prompt_path" ]; then
@@ -852,6 +887,8 @@ _stop_lead() {
 }
 
 # _finish_lead <name> [--force] [--keep-branch] [--no-fetch]
+#                     [--next-phase NAME --next-branch BRANCH
+#                      [--next-worktree PATH] [--next-mission TEXT]]
 #   Safe teardown: removes the lead's worktree, branch, junctions, and
 #   workspace JSON entry once the branch has merged into origin/master.
 #   Each step refuses with a one-line error and aborts on failure; no
@@ -861,30 +898,62 @@ _stop_lead() {
 #   --keep-branch   Preserve the branch (still removes worktree + junctions).
 #   --no-fetch      Skip the `git fetch` step (offline use only — stale
 #                   origin/master is the failure mode this guards against).
+#
+#   --next-phase    After successful teardown, transition the lead to a new
+#                   phase. Reads the lead's handoff for the "Recommended next
+#                   PM prompt" and "Recommended next agent-team formation"
+#                   sections, marks the current phase complete in the lead's
+#                   YAML config, and adds the new phase as active. Requires
+#                   --next-branch. Optional: --next-worktree (defaults to
+#                   current phase's worktree) and --next-mission (heuristic
+#                   if omitted).
 _finish_lead() {
     local name="$1"
     if [ -z "$name" ]; then
         cat >&2 <<EOF
 Usage: finish_lead <name> [--force] [--keep-branch] [--no-fetch]
+                          [--next-phase NAME --next-branch BRANCH
+                           [--next-worktree PATH] [--next-mission TEXT]]
 
-  <name>           Lead identifier (aria, bram, cleo, ...).
-  --force          Allow unmerged branch, unpushed commits, git branch -D.
-  --keep-branch    Preserve the branch (still removes worktree + junctions).
-  --no-fetch       Skip 'git fetch origin' before the merged-into-master check.
-                   Use only when offline; default is to fetch because stale
-                   origin/master is the principal failure mode for "is it
-                   actually merged?"
+  <name>             Lead identifier (aria, bram, cleo, ...).
+  --force            Allow unmerged branch, unpushed commits, git branch -D.
+  --keep-branch      Preserve the branch (still removes worktree + junctions).
+  --no-fetch         Skip 'git fetch origin' before the merged-into-master check.
+                     Use only when offline; default is to fetch because stale
+                     origin/master is the principal failure mode for "is it
+                     actually merged?"
+  --next-phase NAME  After teardown, transition to a new phase by promoting
+                     the handoff's 'Recommended next PM prompt' into the
+                     lead's YAML config under this phase name.
+  --next-branch X    Branch for the new phase (required with --next-phase).
+  --next-worktree X  Worktree path for the new phase. Defaults to the current
+                     phase's worktree.
+  --next-mission X   Short mission summary for the new phase. Heuristic if
+                     omitted (first non-identity line of the recommended prompt).
 EOF
         return 2
     fi
     shift
 
     local force=0 keep_branch=0 no_fetch=0
+    local next_phase="" next_branch="" next_worktree="" next_mission=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --force)        force=1; shift ;;
             --keep-branch)  keep_branch=1; shift ;;
             --no-fetch)     no_fetch=1; shift ;;
+            --next-phase)
+                if [ $# -lt 2 ]; then echo "finish_lead: --next-phase needs a value" >&2; return 2; fi
+                next_phase="$2"; shift 2 ;;
+            --next-branch)
+                if [ $# -lt 2 ]; then echo "finish_lead: --next-branch needs a value" >&2; return 2; fi
+                next_branch="$2"; shift 2 ;;
+            --next-worktree)
+                if [ $# -lt 2 ]; then echo "finish_lead: --next-worktree needs a value" >&2; return 2; fi
+                next_worktree="$2"; shift 2 ;;
+            --next-mission)
+                if [ $# -lt 2 ]; then echo "finish_lead: --next-mission needs a value" >&2; return 2; fi
+                next_mission="$2"; shift 2 ;;
             -h|--help)      _finish_lead; return 0 ;;
             *)
                 echo "finish_lead: unknown option: $1" >&2
@@ -892,6 +961,20 @@ EOF
                 ;;
         esac
     done
+
+    # Cross-flag validation.
+    if [ -n "$next_phase" ] && [ -z "$next_branch" ]; then
+        echo "finish_lead: --next-phase requires --next-branch" >&2
+        return 2
+    fi
+    if [ -n "$next_phase" ] && [ "$keep_branch" -eq 1 ]; then
+        echo "finish_lead: --next-phase and --keep-branch are contradictory (one says delete-and-rotate, the other says preserve)" >&2
+        return 2
+    fi
+    if { [ -n "$next_branch" ] || [ -n "$next_worktree" ] || [ -n "$next_mission" ]; } && [ -z "$next_phase" ]; then
+        echo "finish_lead: --next-branch / --next-worktree / --next-mission only meaningful with --next-phase" >&2
+        return 2
+    fi
 
     # Step 1: Resolve target via _parse_kickoff.
     _parse_kickoff "$name" || return $?
@@ -1071,6 +1154,59 @@ finish_lead: $title_case teardown complete.
   junctions: .gauntlet, .claude (removed if present)
   workspace JSON: stripped of $worktree (and slash/case variants)
 EOF
+
+    # Step 15 (optional): phase transition. If --next-phase was passed, invoke
+    # render_kickoff.py to:
+    #   - read the lead's handoff for the "Recommended next PM prompt" section
+    #   - mark the just-finished phase complete in <name>.yml
+    #   - add the new phase as active with the extracted prompt as first_task
+    #   - re-render <name>.md so the next start_<lead> picks up the new phase
+    # The transition is a separate step from teardown so a transition failure
+    # doesn't block the cleanup that already succeeded.
+    if [ -n "$next_phase" ]; then
+        local yml="$AGENTFORGE_ROOT/.gauntlet/week2/kickoff/$name.yml"
+        if [ ! -f "$yml" ]; then
+            cat >&2 <<EOF
+
+finish_lead: --next-phase requires a YAML config at $yml.
+  This lead is still on the legacy hand-authored kickoff format.
+  Bootstrap with:
+    python "$AGENTFORGE_ROOT/scripts/render_kickoff.py" init-from-md $name --current-phase-name <prev-phase>
+  Then re-run finish_lead --next-phase. Teardown completed cleanly; only the
+  phase transition step was skipped.
+EOF
+            return 1
+        fi
+
+        local py
+        if command -v python >/dev/null 2>&1; then
+            py="$(command -v python)"
+        elif command -v python3 >/dev/null 2>&1; then
+            py="$(command -v python3)"
+        else
+            echo "finish_lead: python not on PATH; cannot run phase transition. Teardown completed." >&2
+            return 1
+        fi
+
+        local -a trans_args=(
+            "$AGENTFORGE_ROOT/scripts/render_kickoff.py" transition "$name"
+            --to "$next_phase"
+            --branch "$next_branch"
+        )
+        [ -n "$next_worktree" ] && trans_args+=(--worktree "$next_worktree")
+        [ -n "$next_mission" ] && trans_args+=(--mission "$next_mission")
+
+        echo ""
+        echo "finish_lead: transitioning $title_case to $next_phase ..."
+        if "$py" "${trans_args[@]}"; then
+            echo "  YAML updated: $yml"
+            echo "  Rendered:    $AGENTFORGE_ROOT/.gauntlet/week2/kickoff/$name.md"
+            echo "  Next:        start_$name (will create the new $next_branch worktree)"
+        else
+            echo "finish_lead: transition step failed. Teardown completed cleanly; YAML may be unchanged." >&2
+            return 1
+        fi
+    fi
 }
 
 _relative_age() {
