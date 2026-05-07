@@ -85,6 +85,8 @@ final class TestableAgentClient extends AgentClient
         string $docType,
         string $fileBytes,
         string $filePath,
+        bool $isReprocess = false,
+        ?int $parentExtractionId = null,
     ): array {
         return $this->stubbedResponse;
     }
