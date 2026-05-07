@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -550,8 +550,37 @@ async def graph_chat(request: ChatRequest) -> AgentResponse | RefusalResponse:
     }
 
     # --- Invoke graph --------------------------------------------------------
+    # Wrap graph.invoke() in a Langfuse parent span so the per-node observations
+    # (supervisor.decide, worker.evidence_retriever, worker.responder, plus
+    # auto-instrumented anthropic.messages.create + tool.execute children) all
+    # nest under one trace. Without this wrapper each node's `start_observation`
+    # creates a standalone root trace and the per-request graph topology isn't
+    # visually grouped in Langfuse. The wrapper is best-effort: if Langfuse
+    # isn't configured (no public key) or the SDK call fails, fall back to a
+    # no-op contextmanager and the original (un-nested) behavior.
     try:
-        final_state = _compiled_graph.invoke(initial_state)
+        from langfuse import get_client as _get_lf_client_for_parent
+        _lf_for_parent = _get_lf_client_for_parent()
+        if (
+            _lf_for_parent is not None
+            and get_settings().langfuse_public_key
+            and hasattr(_lf_for_parent, "start_as_current_span")
+        ):
+            _parent_cm = _lf_for_parent.start_as_current_span(
+                name="/graph_chat",
+                metadata={
+                    "request_id": request_id,
+                    "patient_id": request.patient_id,
+                },
+            )
+        else:
+            _parent_cm = nullcontext()
+    except Exception:
+        _parent_cm = nullcontext()
+
+    try:
+        with _parent_cm:
+            final_state = _compiled_graph.invoke(initial_state)
     except Exception as exc:
         logger.exception("/graph_chat: graph.invoke() raised unexpectedly")
         raise HTTPException(
