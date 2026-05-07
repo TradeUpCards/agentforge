@@ -1064,6 +1064,14 @@ def main() -> None:
                 "failures": r.failures,
                 "rubric_results": r.rubric_results,
                 "latency_ms": r.latency_ms,
+                # Strip-rate gate fields (run_strip_rate_gate.py).
+                # claims_stripped_count / claims_passed_count are non-zero only
+                # for /chat-path cases with status=ok.  Extraction cases and
+                # refused/error cases contribute 0 to both buckets so they are
+                # correctly excluded from the per-category strip-rate denominator.
+                "doc_type": r.case.doc_type,
+                "claims_stripped_count": r.response.get("claims_stripped", 0),
+                "claims_passed_count": len(r.response.get("claims", [])),
             })
         output_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
         print(f"Wrote JSON results: {output_path}")

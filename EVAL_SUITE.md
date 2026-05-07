@@ -389,9 +389,107 @@ Do not modify `baseline.json` or any case YAML for the demo; only the scratch `c
 
 ---
 
-## 8. No-PHI gate
+## 8. Strip-rate regression gate (Week 2)
 
-### 8.1 Pre-commit sentinel ID guard
+### 8.1 What it is
+
+`scripts/run_strip_rate_gate.py` measures the **verifier claim strip rate** per eval case `category` and flags any category that rises more than 5 percentage points (absolute) above the baseline. A rising strip rate means the verifier is doing more work stripping ungrounded claims — an early warning that claim grounding has regressed before it crosses the 30%-refusal threshold that surfaces as a `safe_refusal` failure.
+
+**Strip rate formula (per category):**
+
+```
+strip_rate(category) = sum(claims_stripped_count)
+                       ─────────────────────────────────────────────────
+                       sum(claims_passed_count) + sum(claims_stripped_count)
+```
+
+Only non-skipped cases with at least one claim (passed or stripped) contribute. Extraction-only cases (`/attach_and_extract`, no verifier), refused cases, and skipped cases all contribute zero to both numerator and denominator and are excluded from the strip-rate calculation.
+
+### 8.2 `(doc_type, template_id)` cut dimensions
+
+In production, the strip rate is tracked per `(doc_type, template_id)` in `co_pilot_extractions.stripped_fields / total_fields` — columns introduced in Aria's P2 schema migration (`stripped_fields`, `total_fields`, `template_id`). At the eval layer, case `category` serves as the proxy segmentation axis:
+
+| Eval `category` | Production equivalent |
+|---|---|
+| `happy_path` | `/chat` cases backed by patient records (doc_type varies) |
+| `evidence_retrieval` | `/chat` cases backed by guideline corpus chunks |
+| `edge_case` | `/chat` cases on sparse / empty patient context |
+| `ambiguous` | `/chat` cases with under-specified queries |
+| `leakage_attempt` | `/chat` cases probing cross-patient boundary |
+| `lab_extraction` | `doc_type=lab_pdf` — extraction only; excluded from strip-rate denominator (no verifier) |
+| `intake_extraction` | `doc_type=intake_form` — extraction only; excluded from strip-rate denominator |
+| `uncategorized` | catch-all for cases without a `category` field |
+
+When a new extraction template ships, the eval-layer proxy changes because new fixture cases are authored for the new template and appear under a new `category`. This is coarse segmentation at the eval layer; the production `co_pilot_extractions` queries provide fine-grained `(doc_type, template_id)` cuts.
+
+### 8.3 `unknown` template_id handling
+
+In production, documents whose template_id is null or empty are bucketed as `unknown`. At the eval layer, the equivalent is cases with no `category` set — these are bucketed under `uncategorized` in the strip-rate baseline. The gate monitors `uncategorized` with the same >5pp threshold. A rising `uncategorized` rate can indicate that new cases were added without a `category` field (fix: add the field) or that a shared fixture is producing poorly-grounded claims across multiple unclassified cases.
+
+### 8.4 Regression threshold
+
+Same threshold as the rubric gate: **5 percentage-point absolute rise** fails the gate. A rise of exactly 5pp passes (check is strictly `>`). Rationale: a single case flip on a thin category slice is noise; a sustained >5pp shift indicates a real grounding regression.
+
+New categories that appear in the current run but are absent from the baseline are **reported but not failed** — they are surfaced for visibility and incorporated on the next deliberate `--update-baseline` run.
+
+### 8.5 Baseline format
+
+`agent/tests/eval/strip_rate_baseline.json`:
+
+```json
+{
+  "generated": "2026-05-06",
+  "strip_rates": {
+    "happy_path":      0.00,
+    "edge_case":       0.00,
+    "ambiguous":       0.00,
+    "leakage_attempt": 0.00,
+    "uncategorized":   0.00
+  }
+}
+```
+
+Keys are the case `category` values present in a baseline fixture-mode run (categories with all-skipped cases produce no strip-rate data and are omitted). Update deliberately after an intentional improvement:
+
+```bash
+python scripts/run_strip_rate_gate.py --update-baseline \
+  --current-json /tmp/eval_results.json \
+  --baseline agent/tests/eval/strip_rate_baseline.json
+```
+
+The initial baseline is set to 0.00 for all fixture-mode categories — conservative by design. Any claim that the verifier strips in fixture mode (where the fixture data is engineered to match the claims) is a real signal.
+
+### 8.6 Runner JSON output fields
+
+The gate reads from `python -m agent.tests.eval.runner --output-json <path>`. Each row in the JSON output includes three fields used by this gate (additive — does not break `run_eval_gate.py`):
+
+```json
+{
+  "doc_type": null,
+  "claims_stripped_count": 0,
+  "claims_passed_count": 5
+}
+```
+
+`doc_type` is `null` for `/chat` path cases, `"lab_pdf"` or `"intake_form"` for extraction cases. `claims_stripped_count` and `claims_passed_count` are 0 for extraction/refused/skipped cases.
+
+### 8.7 Meta-tests
+
+`agent/tests/eval/meta/test_meta_strip_rate.py` contains five tests:
+
+- `TestStripRateBaselineStructure` (1 test): `strip_rate_baseline.json` exists, has `generated` field and `strip_rates` dict of floats in [0,1].
+- `TestStripRateMath` (4 tests):
+  - `test_no_regression_passes` — identical rates → PASS
+  - `test_small_increase_passes` — 3pp rise → PASS (below threshold)
+  - `test_exact_threshold_passes` — 5pp rise → PASS (threshold strictly `>`)
+  - `test_regression_detected` — 8pp rise → FAIL, surfaces category + delta
+  - `test_new_category_in_current_does_not_fail` — new key in current not in baseline → PASS (reported but not failed)
+
+---
+
+## 9. No-PHI gate
+
+### 9.1 Pre-commit sentinel ID guard
 
 The pre-commit hook (`scripts/git-hooks/pre-commit`) includes a grep step that runs before pytest. It scans every YAML file in `agent/tests/eval/cases/` for `patient_id:` fields and rejects any value that is not in the allowed set:
 
@@ -408,17 +506,17 @@ Any other integer causes the commit to fail with:
 
 This guard prevents accidental check-in of a real patient ID into a fixture file. It does not prevent all PHI leakage (a real name or SSN in a free-text field would not be caught by this grep), but it catches the most likely failure mode: a developer copying a real patient ID from a live system into a test case.
 
-### 8.2 Rubric-level coverage
+### 9.2 Rubric-level coverage
 
 The `no_phi_in_logs` rubric (tracked in `baseline.json`) is evaluated by the runner against cases that include observability trace output. It checks that no day-precision dates (ISO or US-format) and no raw patient IDs appear in trace fields that would be forwarded to external observability services (e.g., Langfuse). This rubric maps to the PHI date-bucketing behavior tested in `agent/tests/unit/test_mask.py`.
 
-### 8.3 Validator at fixture load time
+### 9.3 Validator at fixture load time
 
 `agent/_validators.py:validate_no_real_pii` runs at fixture load time for every synthetic patient JSON. It applies regex screens against SSN, phone, and email patterns. This is a defense-in-depth check; the pre-commit ID guard is the first line of defense for YAML files.
 
 ---
 
-## 9. Defense talking points (interview)
+## 10. Defense talking points (interview)
 
 - **"Why three tiers + two modes?"** — *Tiers route cost (smoke runs every commit, nightly runs weekly). Modes control what's plumbed into the agent (fixture canned response for determinism, live for real model variability). Smoke × fixture is ~4s + free; nightly × live is ~$0.30 + ~5min. The split lets the pre-commit hook stay cheap-and-fast without giving up coverage of "does this still work against a real LLM."*
 - **"What does the eval suite test that a click-through demo doesn't?"** — *§2 is the answer table. Auth bypass, prompt injection across 5 chart-field surfaces, cross-patient leakage, empty-data fabrication, ambiguous queries, real-chart-depth failures, polypharmacy completeness, pediatric context, treatment-progression direction, free-text-buried clinical detail, verifier date-format edge cases, value-date tuple integrity, PHI date-bucketing in observability traces. Every one of those would be missed by a happy-path Maria-fixture demo.*
