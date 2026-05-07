@@ -51,6 +51,12 @@ if grep -rn "^patient_id:" "$repo_root/agent/tests/eval/cases/" 2>/dev/null \
 fi
 
 echo "[pre-commit] Running verifier unit tests + smoke-tier eval cases..."
-EVAL_TIER=smoke "$PY" -m pytest agent/tests/unit/ agent/tests/eval/ -q --tb=short
+# USE_FIXTURE_EXTRACTION=true activates the conftest mock that intercepts
+# attach_and_extract_async and returns pre-built fixtures from
+# agent/fixtures/patients/. Without this, smoke-tier extraction cases
+# (lab_extraction_*, intake_extraction_*) fall through to real Docling
+# and fail with PDFium errors. CI mirrors this in .gitlab-ci.yml and
+# .github/workflows/agent-eval.yml.
+EVAL_TIER=smoke USE_FIXTURE_EXTRACTION=true "$PY" -m pytest agent/tests/unit/ agent/tests/eval/ -q --tb=short
 
 echo "[pre-commit] All checks passed."
