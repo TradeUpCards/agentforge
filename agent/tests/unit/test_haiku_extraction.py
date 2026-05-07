@@ -552,16 +552,169 @@ class TestConfidenceAggregation:
 
 
 # ---------------------------------------------------------------------------
-# Test 6: Confidence above 1.0 raises
+# Test 6: Confidence OOB — strip-and-continue (P3 behavior change)
 # ---------------------------------------------------------------------------
 
 
-class TestConfidenceBoundsRaises:
-    def test_haiku_returns_confidence_above_1_raises(self) -> None:
-        """confidence=1.5 → ValueError raised; bounds enforced before Pydantic."""
-        doc = _make_doc()
+class TestConfidenceBoundsStripAndContinue:
+    """P3 decision: confidence_oob is strip-and-continue, not ValueError.
+
+    The field with OOB confidence is dropped from the result set and
+    REASON_CONFIDENCE_OOB is recorded in ExtractionStats. No ValueError is
+    raised; the parser continues with the remaining fields.
+
+    W2_ARCHITECTURE.md P3 brief §1: "confidence_oob becomes strip-and-continue".
+    """
+
+    def test_haiku_returns_confidence_above_1_strips_field_not_raises(self) -> None:
+        """confidence=1.5 → field stripped (no ValueError); other valid fields
+        keep the total strip rate below 30% so ExtractionLowGrounding is not raised.
+
+        Strategy: 1 OOB confidence field + 4 valid fields = 5 total.
+        OOB strip rate = 1/5 = 20%, below the 30% threshold.
+
+        Uses a 5-block doc where all blocks contain their respective test names.
+        """
+        from agent.document_schemas import BBox, DoclingBlock, DoclingDoc
+
+        def _blk(bid: str, text: str) -> DoclingBlock:
+            return DoclingBlock(
+                block_id=bid,
+                text=text,
+                block_type="text",
+                page=1,
+                bbox=BBox(page=1, x0=10.0, y0=10.0, x1=200.0, y1=25.0),
+            )
+
+        doc = DoclingDoc(
+            document_reference_id=_DOC_REF_ID,
+            page_count=1,
+            blocks=[
+                _blk("b0", "Hemoglobin A1c 7.8 %"),
+                _blk("b1", "Glucose Fasting 142 mg/dL"),
+                _blk("b2", "eGFR 62 mL/min"),
+                _blk("b3", "Cholesterol Total 210 mg/dL"),
+                _blk("b4", "Triglycerides 150 mg/dL"),
+            ],
+            docling_version="2.92.0",
+        )
         bad_response = json.dumps({
             "results": [
+                {
+                    "test_name": "Hemoglobin A1c",  # OOB confidence — stripped
+                    "value": 7.8,
+                    "unit": "%",
+                    "reference_range": None,
+                    "abnormal": None,
+                    "collection_date": None,
+                    "source_block_id": "b0",
+                    "confidence": 1.5,  # > 1.0 — OOB
+                },
+                {
+                    "test_name": "Glucose Fasting",
+                    "value": 142.0,
+                    "unit": "mg/dL",
+                    "reference_range": None,
+                    "abnormal": None,
+                    "collection_date": None,
+                    "source_block_id": "b1",
+                    "confidence": 0.9,  # valid
+                },
+                {
+                    "test_name": "eGFR",
+                    "value": 62.0,
+                    "unit": "mL/min",
+                    "reference_range": None,
+                    "abnormal": None,
+                    "collection_date": None,
+                    "source_block_id": "b2",
+                    "confidence": 0.85,  # valid
+                },
+                {
+                    "test_name": "Cholesterol Total",
+                    "value": 210.0,
+                    "unit": "mg/dL",
+                    "reference_range": None,
+                    "abnormal": None,
+                    "collection_date": None,
+                    "source_block_id": "b3",
+                    "confidence": 0.88,  # valid
+                },
+                {
+                    "test_name": "Triglycerides",
+                    "value": 150.0,
+                    "unit": "mg/dL",
+                    "reference_range": None,
+                    "abnormal": None,
+                    "collection_date": None,
+                    "source_block_id": "b4",
+                    "confidence": 0.92,  # valid
+                },
+            ]
+        })
+
+        # Must NOT raise ValueError or ExtractionLowGrounding (1/5 = 20% < 30%)
+        report, stats = parse_lab_report(
+            haiku_json_text=bad_response,
+            doc=doc,
+            patient_id=_PID_VALID,
+            doc_ref_id=_DOC_REF_ID,
+            extraction_model=_MODEL,
+        )
+
+        # OOB field stripped; valid fields preserved
+        assert isinstance(report, LabReport)
+        # confidence_oob recorded in stats
+        from agent.extractors.haiku_extraction import REASON_CONFIDENCE_OOB
+        assert stats.verifier_reason_counts.get(REASON_CONFIDENCE_OOB, 0) >= 1
+        # At least one field_verdict with reason=confidence_oob
+        oob_verdicts = [
+            v for v in stats.field_verdicts if v[2] == REASON_CONFIDENCE_OOB
+        ]
+        assert len(oob_verdicts) >= 1
+        # Remaining 4 valid fields are parsed (no further stripping)
+        assert len(report.results) == 4
+
+    def test_confidence_below_0_strips_field_not_raises(self) -> None:
+        """confidence=-0.1 → field stripped, no ValueError raised.
+
+        Strategy: 1 OOB field + 4 valid fields → strip rate = 1/5 = 20% < 30%.
+        """
+        from agent.document_schemas import BBox, DoclingBlock, DoclingDoc
+
+        def _blk(bid: str, text: str) -> DoclingBlock:
+            return DoclingBlock(
+                block_id=bid,
+                text=text,
+                block_type="text",
+                page=1,
+                bbox=BBox(page=1, x0=10.0, y0=10.0, x1=200.0, y1=25.0),
+            )
+
+        doc = DoclingDoc(
+            document_reference_id=_DOC_REF_ID,
+            page_count=1,
+            blocks=[
+                _blk("b0", "eGFR 62 mL/min"),
+                _blk("b1", "Hemoglobin A1c 7.8 %"),
+                _blk("b2", "Glucose Fasting 142 mg/dL"),
+                _blk("b3", "Cholesterol 210 mg/dL"),
+                _blk("b4", "Triglycerides 150 mg/dL"),
+            ],
+            docling_version="2.92.0",
+        )
+        bad_response = json.dumps({
+            "results": [
+                {
+                    "test_name": "eGFR",
+                    "value": 62.0,
+                    "unit": "mL/min",
+                    "reference_range": None,
+                    "abnormal": None,
+                    "collection_date": None,
+                    "source_block_id": "b0",
+                    "confidence": -0.1,  # < 0.0 — OOB
+                },
                 {
                     "test_name": "Hemoglobin A1c",
                     "value": 7.8,
@@ -569,61 +722,54 @@ class TestConfidenceBoundsRaises:
                     "reference_range": None,
                     "abnormal": None,
                     "collection_date": None,
-                    "source_block_id": "block_0",
-                    "confidence": 1.5,  # > 1.0
-                }
-            ]
-        })
-
-        with pytest.raises(ValueError) as exc_info:
-            parse_lab_report(
-                haiku_json_text=bad_response,
-                doc=doc,
-                patient_id=_PID_VALID,
-                doc_ref_id=_DOC_REF_ID,
-                extraction_model=_MODEL,
-            )
-
-        error_msg = str(exc_info.value)
-        # Message references confidence bounds
-        assert "confidence" in error_msg.lower()
-        # Raw field value must not appear — neither the lab value nor the
-        # confidence value itself (Fix #2: _validate_confidence no longer
-        # interpolates the out-of-range value into the message)
-        assert "7.8" not in error_msg
-        assert "1.5" not in error_msg
-
-    def test_confidence_below_0_raises(self) -> None:
-        """confidence=-0.1 → ValueError raised."""
-        doc = _make_doc()
-        bad_response = json.dumps({
-            "results": [
+                    "source_block_id": "b1",
+                    "confidence": 0.95,  # valid
+                },
                 {
-                    "test_name": "eGFR",
-                    "value": 62.0,
-                    "unit": "mL/min/1.73m2",
+                    "test_name": "Glucose Fasting",
+                    "value": 142.0,
+                    "unit": "mg/dL",
                     "reference_range": None,
                     "abnormal": None,
                     "collection_date": None,
-                    "source_block_id": "block_2",
-                    "confidence": -0.1,  # < 0.0
-                }
+                    "source_block_id": "b2",
+                    "confidence": 0.9,  # valid
+                },
+                {
+                    "test_name": "Cholesterol",
+                    "value": 210.0,
+                    "unit": "mg/dL",
+                    "reference_range": None,
+                    "abnormal": None,
+                    "collection_date": None,
+                    "source_block_id": "b3",
+                    "confidence": 0.88,  # valid
+                },
+                {
+                    "test_name": "Triglycerides",
+                    "value": 150.0,
+                    "unit": "mg/dL",
+                    "reference_range": None,
+                    "abnormal": None,
+                    "collection_date": None,
+                    "source_block_id": "b4",
+                    "confidence": 0.87,  # valid
+                },
             ]
         })
 
-        with pytest.raises(ValueError) as exc_info:
-            parse_lab_report(
-                haiku_json_text=bad_response,
-                doc=doc,
-                patient_id=_PID_VALID,
-                doc_ref_id=_DOC_REF_ID,
-                extraction_model=_MODEL,
-            )
+        # Must NOT raise ValueError (1/5 = 20% < 30% threshold)
+        report, stats = parse_lab_report(
+            haiku_json_text=bad_response,
+            doc=doc,
+            patient_id=_PID_VALID,
+            doc_ref_id=_DOC_REF_ID,
+            extraction_model=_MODEL,
+        )
 
-        error_msg = str(exc_info.value)
-        assert "confidence" in error_msg.lower()
-        assert "62.0" not in error_msg
-        assert "-0.1" not in error_msg
+        assert isinstance(report, LabReport)
+        from agent.extractors.haiku_extraction import REASON_CONFIDENCE_OOB
+        assert stats.verifier_reason_counts.get(REASON_CONFIDENCE_OOB, 0) >= 1
 
 
 # ---------------------------------------------------------------------------

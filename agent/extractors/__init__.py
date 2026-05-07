@@ -270,6 +270,60 @@ def _raw_blocks_to_docling_doc(
     )
 
 
+_BLOCK_TEXT_SNIPPET_MAX_CHARS = 80
+"""Maximum text snippet length per block in the P3 response payload.
+
+80 characters is PHI-acceptable per W2_ARCHITECTURE.md P3 brief §5 because
+the original document content is already visible to the clinician in the
+review modal. Truncation is bytewise on the rstripped text (no further
+normalisation — preserves original punctuation and case).
+"""
+
+
+def _serialize_blocks_for_response(doc: DoclingDoc) -> list[dict[str, Any]]:
+    """Serialize the full Docling block inventory for the P3 response payload.
+
+    Produces the ``docling_blocks`` array described in the P3 API contract.
+    Every block in the DoclingDoc is included — both cited (referenced by
+    field_verdicts) and uncited — so the UI can render all blocks and the
+    backend can build a complete overlay even before the verdicts are applied.
+
+    BBox format in the output matches the P3 API contract:
+        {"x": left, "y": bottom, "w": width, "h": height}
+    in PDF user-space points, origin bottom-left.  The DoclingDoc stores
+    blocks as (x0, y0, x1, y1) where x0/y0 are left/bottom.
+
+    Text snippet truncation: rstrip whitespace first, then take the first
+    _BLOCK_TEXT_SNIPPET_MAX_CHARS characters.  No further normalisation
+    (preserves original case, punctuation, etc.).  PHI discipline: the
+    original document text is already visible to the clinician, so 80-char
+    snippets are acceptable (P3 brief §5).
+
+    Args:
+        doc: The DoclingDoc produced by Stage 1.
+
+    Returns:
+        List of dicts, one per block, each with keys:
+            block_id, page, bbox (x/y/w/h), text_snippet.
+    """
+    result: list[dict[str, Any]] = []
+    for block in doc.blocks:
+        bbox = block.bbox
+        text_snippet = block.text.rstrip()[:_BLOCK_TEXT_SNIPPET_MAX_CHARS]
+        result.append({
+            "block_id": block.block_id,
+            "page": bbox.page,
+            "bbox": {
+                "x": bbox.x0,
+                "y": bbox.y0,
+                "w": bbox.x1 - bbox.x0,
+                "h": bbox.y1 - bbox.y0,
+            },
+            "text_snippet": text_snippet,
+        })
+    return result
+
+
 def _get_page_count(pdf_path: Path) -> int:
     """Return the page count of a PDF using pypdfium2 (bundled with Docling).
 
@@ -731,6 +785,8 @@ def attach_and_extract(
     *,
     stage1_only: bool = False,
     filename: str | None = None,
+    triggered_by: Literal["initial", "auto_retry", "manual_retry"] = "initial",
+    parent_extraction_id: int | None = None,
 ) -> Union[LabReport, IntakeForm, DoclingDoc]:
     """Sync entry point: Stage 1 + optional Stage 2.
 
@@ -748,19 +804,27 @@ def attach_and_extract(
     should prefer attach_and_extract_async() to avoid spawning a new event loop.
 
     Args:
-        patient_id:   Must be in the W2 sentinel range 999100-999199.
-        doc_ref_id:   FHIR DocumentReference ID (content-stable across re-runs).
-        doc_type:     "lab_pdf", "intake_form", or any other string.
-        pdf_path:     Path to the local PDF file. When None, expects OpenEMR
-                      storage integration (not yet wired in Stage 1/2).
-        stage1_only:  If True, always return DoclingDoc (skip Stage 2). Used
-                      by smoke tests and layout-only callers who want the
-                      Docling output without invoking an LLM. Keyword-only.
-                      # TODO(stage-3): evaluate removal once smoke tests are
-                      # replaced by integration tests under the supervisor graph.
-        filename:     Original upload filename. Used ONLY to resolve template_id
-                      for the Langfuse span — never logged or traced directly.
-                      Keyword-only.
+        patient_id:            Must be in the W2 sentinel range 999100-999199.
+        doc_ref_id:            FHIR DocumentReference ID (content-stable across re-runs).
+        doc_type:              "lab_pdf", "intake_form", or any other string.
+        pdf_path:              Path to the local PDF file. When None, expects OpenEMR
+                               storage integration (not yet wired in Stage 1/2).
+        stage1_only:           If True, always return DoclingDoc (skip Stage 2). Used
+                               by smoke tests and layout-only callers who want the
+                               Docling output without invoking an LLM. Keyword-only.
+                               # TODO(stage-3): evaluate removal once smoke tests are
+                               # replaced by integration tests under the supervisor graph.
+        filename:              Original upload filename. Used ONLY to resolve template_id
+                               for the Langfuse span — never logged or traced directly.
+                               Keyword-only.
+        triggered_by:          Why this extraction was triggered. "initial" for the
+                               first extraction of a document; "auto_retry" for a retry
+                               initiated by the retry ladder; "manual_retry" for one
+                               triggered by clinician action in the UI. Keyword-only.
+                               Default: "initial".
+        parent_extraction_id:  DB row ID of the prior extraction in this chain (None
+                               for the first extraction of a document). Keyword-only.
+                               Default: None.
 
     Returns:
         LabReport | IntakeForm | DoclingDoc depending on doc_type and
@@ -789,6 +853,8 @@ def attach_and_extract(
                 patient_id=patient_id,
                 doc_ref_id=doc_ref_id,
                 filename=filename,
+                triggered_by=triggered_by,
+                parent_extraction_id=parent_extraction_id,
             )
         )
         n_fields = (
@@ -822,6 +888,8 @@ async def attach_and_extract_async(
     *,
     stage1_only: bool = False,
     filename: str | None = None,
+    triggered_by: Literal["initial", "auto_retry", "manual_retry"] = "initial",
+    parent_extraction_id: int | None = None,
 ) -> Union[LabReport, IntakeForm, DoclingDoc]:
     """Async entry point: Stage 1 + optional Stage 2.
 
@@ -831,6 +899,16 @@ async def attach_and_extract_async(
     Same behavior and args as attach_and_extract() — see its docstring.
     The filename keyword arg is forwarded to _run_haiku_extraction for
     template_id resolution; never emitted to spans or logs directly.
+
+    Args (P3 additions):
+        triggered_by:          Why this extraction was triggered. Forwarded to
+                               _run_extraction_with_retry and emitted in the
+                               haiku_schema_extraction Langfuse span.
+                               Default: "initial".
+        parent_extraction_id:  DB row ID of the prior extraction in this chain.
+                               Forwarded to _run_extraction_with_retry. None
+                               for the first extraction of a document.
+                               Default: None.
     """
     docling_doc = _run_stage1_layout(patient_id, doc_ref_id, doc_type, pdf_path)
 
@@ -849,6 +927,8 @@ async def attach_and_extract_async(
             patient_id=patient_id,
             doc_ref_id=doc_ref_id,
             filename=filename,
+            triggered_by=triggered_by,
+            parent_extraction_id=parent_extraction_id,
         )
         n_fields = (
             len(result.results)
