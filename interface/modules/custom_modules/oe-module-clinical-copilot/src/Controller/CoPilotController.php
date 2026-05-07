@@ -39,7 +39,12 @@ use Throwable;
 
 final class CoPilotController
 {
-    private const AGENT_CHAT_PATH = '/chat';
+    // Routes UI chat traffic through the supervisor + 2-workers + responder
+    // graph (PRD §4 Core requirement). The legacy /chat endpoint bypasses
+    // the supervisor and remains available for direct callers + the eval
+    // suite's W1-baseline cases (01-30); /graph_chat is the path the UI
+    // exercises so the graph is on the production runtime path.
+    private const AGENT_CHAT_PATH = '/graph_chat';
     private const AGENT_TIMEOUT_SECONDS = 60;
     private const MAX_REQUEST_BYTES = 1_048_576; // 1 MiB cap on inbound JSON.
 
