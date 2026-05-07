@@ -1,0 +1,35 @@
+name: graph_uc2_since_last_visit
+endpoint: /graph_chat
+category: happy_path
+description: |
+  UC2 — "What's changed since the last visit?" via /graph_chat. Sentinel
+  patient 999100. The graph evidence_retriever should call get_recent_encounters
+  and get_recent_labs to surface the temporal delta. The responder synthesizes
+  a delta summary with at least one patient_record citation.
+
+  Primary regression classes guarded:
+    - encounter and labs tools not called for UC2 query (keyword router
+      too restrictive — returns only problem_list default)
+    - responder omits temporal anchoring ("last visit" not mentioned)
+    - claims_passed_count drops to 0 (verifier over-strips on temporal claims)
+
+patient_id: 999100
+user_id: 1
+synthetic: true
+fixture_data_required: false
+live_llm_required: true
+tier: nightly
+difficulty: intermediate
+failure_mode: graph_uc2_no_delta_citation
+tool_mix:
+  - get_recent_encounters
+  - get_recent_labs
+rubric: [citation_present, factually_consistent]
+messages:
+  - role: user
+    content: "What has changed for this patient since their last visit?"
+
+expected:
+  status: ok
+  min_claims: 1
+  min_citations: 1

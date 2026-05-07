@@ -309,6 +309,16 @@ class AgentResponse(BaseModel):
         ),
     )
 
+    escalated_to_sonnet: bool = Field(
+        default=False,
+        description=(
+            "True when the responder node retried with Sonnet 4.6 after the "
+            "Haiku first attempt was refused by the verifier. False for all "
+            "/chat responses and /graph_chat responses that passed on the "
+            "first Haiku attempt. W2 graph phase decision #15."
+        ),
+    )
+
 
 class RefusalResponse(BaseModel):
     """Returned when the verifier rejects ≥30% of claims twice (per §3.6)."""

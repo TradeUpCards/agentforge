@@ -1,8 +1,8 @@
-"""Supervisor node (W2 Stage-3b).
+"""Supervisor node (W2 Stage-3b, graph phase).
 
 The supervisor is the LangGraph entry node. It:
   1. Reads the current state (query + accumulated results so far).
-  2. Calls Anthropic (Sonnet — reasoning capacity per §3 model split) with a
+  2. Calls Anthropic (Haiku 4.5 by default — decision #4) with a
      small system prompt asking for a JSON routing decision.
   3. Validates the route is in the allowed set.
   4. Increments hops_taken.
@@ -10,6 +10,13 @@ The supervisor is the LangGraph entry node. It:
 
 If hops_taken would exceed 4, it sets terminal_reason = "supervisor_max_hops" and emits
 the SUPERVISOR_MAX_HOPS_REACHED sentinel log line.
+
+Model split (decision #4):
+  - Haiku 4.5 (model_workhorse) is the default. With max_tokens=128 and a
+    routing-only system prompt, query echo risk is acceptable and cost is 3×
+    lower than Sonnet.
+  - Sonnet 4.6 (model_reasoning) is used on retry when Haiku returns invalid
+    JSON or an unrecognised route (single escalation attempt per hop).
 
 W2_ARCHITECTURE.md §3.2, §3.3, §3.5.
 
@@ -28,6 +35,7 @@ import time
 from typing import Any
 
 from agent._phi_scrubber import mask_observability_patterns
+from agent.config import get_settings
 from agent.graph.state import SupervisorState
 from agent.llm_client import build_llm_client
 
@@ -35,10 +43,6 @@ logger = logging.getLogger(__name__)
 
 # Hard cap on worker hops per §3.2.
 _MAX_HOPS = 4
-
-# The supervisor uses Sonnet for routing decisions (reasoning capacity).
-# Model name from config.model_reasoning; hardcoded fallback matches §3.
-_SUPERVISOR_MODEL = "claude-sonnet-4-6"
 
 # Allowed routes the supervisor may choose.
 _ALLOWED_ROUTES = frozenset({"intake_extractor", "evidence_retriever", "none"})
@@ -58,6 +62,14 @@ _SYSTEM_PROMPT = (
     '"rationale": "<one sentence>"}\n\n'
     "Do not include any other text outside the JSON object."
 )
+
+# TODO: centralize pricing constants
+# Haiku 4.5: $1.00/MTok input, $5.00/MTok output
+# Sonnet 4.6: $3.00/MTok input, $15.00/MTok output
+_HAIKU_COST_INPUT_PER_MTOK = 1.00
+_HAIKU_COST_OUTPUT_PER_MTOK = 5.00
+_SONNET_COST_INPUT_PER_MTOK = 3.00
+_SONNET_COST_OUTPUT_PER_MTOK = 15.00
 
 
 def supervisor_node(state: SupervisorState) -> dict[str, Any]:
@@ -95,10 +107,26 @@ def supervisor_node(state: SupervisorState) -> dict[str, Any]:
 
     t0 = time.monotonic()
     route = "none"
+    tokens_input = 0
+    tokens_output = 0
+    escalated = False
     try:
         with _langfuse_span(lf, _langfuse_available, hops_taken) as _span:
-            route = _call_supervisor_llm(state)
+            route, tokens_input, tokens_output, escalated = _call_supervisor_llm(state)
             latency_ms = int((time.monotonic() - t0) * 1000)
+
+            # Compute cost estimate for observability.
+            if escalated:
+                cost_usd = (
+                    (tokens_input / 1_000_000) * _SONNET_COST_INPUT_PER_MTOK
+                    + (tokens_output / 1_000_000) * _SONNET_COST_OUTPUT_PER_MTOK
+                )
+            else:
+                cost_usd = (
+                    (tokens_input / 1_000_000) * _HAIKU_COST_INPUT_PER_MTOK
+                    + (tokens_output / 1_000_000) * _HAIKU_COST_OUTPUT_PER_MTOK
+                )
+
             # Tag span with structural-only metadata: route category + latency.
             # The rationale string is intentionally not logged (may echo query).
             if _langfuse_available and lf is not None:
@@ -108,6 +136,10 @@ def supervisor_node(state: SupervisorState) -> dict[str, Any]:
                             "route": route,
                             "hops_taken": hops_taken,
                             "latency_ms": latency_ms,
+                            "tokens_input": tokens_input,
+                            "tokens_output": tokens_output,
+                            "cost_estimate_usd": round(cost_usd, 8),
+                            "escalated_to_sonnet": escalated,
                         }
                     )
                 except Exception:
@@ -132,26 +164,60 @@ def supervisor_node(state: SupervisorState) -> dict[str, Any]:
         return {"terminal_reason": "answered", "hops_taken": hops_taken, "_pending_route": None}
 
     # Valid worker route: increment hop counter and signal the router.
-    return {"hops_taken": hops_taken + 1, "_pending_route": route}
+    # Append node observability (decision #14).
+    obs_entry = {
+        "node_name": "supervisor",
+        "latency_ms": int((time.monotonic() - t0) * 1000),
+        "tokens_input": tokens_input,
+        "tokens_output": tokens_output,
+        "cost_estimate_usd": round(
+            ((tokens_input / 1_000_000) * (_SONNET_COST_INPUT_PER_MTOK if escalated else _HAIKU_COST_INPUT_PER_MTOK))
+            + ((tokens_output / 1_000_000) * (_SONNET_COST_OUTPUT_PER_MTOK if escalated else _HAIKU_COST_OUTPUT_PER_MTOK)),
+            8,
+        ),
+        "retrieval_hits": 0,
+        "extraction_confidence": None,
+    }
+    existing_obs = list(state.get("node_observability", []))
+    existing_obs.append(obs_entry)
+
+    return {
+        "hops_taken": hops_taken + 1,
+        "_pending_route": route,
+        "node_observability": existing_obs,
+    }
 
 
-def _call_supervisor_llm(state: SupervisorState) -> str:
-    """Call the Anthropic LLM and return the chosen route string.
+def _call_supervisor_llm(
+    state: SupervisorState,
+) -> tuple[str, int, int, bool]:
+    """Call the Anthropic LLM and return (route, tokens_in, tokens_out, escalated).
 
     Structural: returns route only; rationale is parsed but discarded
     (it may echo the query — PHI-adjacent per §8.3).
+
+    Decision #4 model split:
+      - Haiku 4.5 (model_workhorse) is the default.
+      - Sonnet 4.6 (model_reasoning) is used on retry when Haiku returns
+        invalid JSON or an unrecognised route (single escalation per hop).
+
+    Decision #1: supervisor sees the full query text (not just length).
+    With max_tokens=128 and a routing-only system prompt, the query echo
+    risk is acceptable per the locked design.
     """
+    settings = get_settings()
     query = state.get("query", "")
     worker_results = state.get("worker_results", [])
 
     # Build a minimal context message (no raw tool output, no chunk text).
     context_lines = []
     for wr in worker_results:
-        worker_name = wr.get("worker_name", "unknown")
+        # worker_results entries align to ToolCallSummary shape (decision #10).
+        worker_name = wr.get("tool_name", wr.get("worker_name", "unknown"))
         context_lines.append(
             f"- Worker '{worker_name}' ran: "
             f"records={wr.get('record_count', 0)}, "
-            f"citations_added={wr.get('citations_added', 0)}"
+            f"citations_added={wr.get('citations_added', wr.get('record_count', 0))}"
         )
     context_summary = "\n".join(context_lines) if context_lines else "No workers called yet."
 
@@ -159,8 +225,9 @@ def _call_supervisor_llm(state: SupervisorState) -> str:
     has_doc_context = bool(state.get("tool_calls_accumulated"))
     doc_flag = "Document context: available." if has_doc_context else "Document context: none."
 
+    # Decision #1: full query text (not just length).
     user_message = (
-        f"Query length: {len(query)} chars. "
+        f"Query: {query}\n\n"
         f"Hops so far: {state.get('hops_taken', 0)}. "
         f"{doc_flag}\n\n"
         f"Workers called so far:\n{context_summary}"
@@ -168,58 +235,86 @@ def _call_supervisor_llm(state: SupervisorState) -> str:
 
     llm_client = build_llm_client()
 
-    # asyncio.run() is safe here: supervisor_node is called synchronously
-    # by LangGraph. The async worker wraps in attach_and_extract_async per
-    # the Stage-2 footgun note.
-    # Python 3.12: use get_running_loop() to detect running loop safely.
-    try:
-        asyncio.get_running_loop()
-        _loop_running = True
-    except RuntimeError:
-        _loop_running = False
+    def _run_coro(coro: Any) -> Any:
+        """Run a coroutine synchronously, handling running event loops."""
+        try:
+            asyncio.get_running_loop()
+            _loop_running = True
+        except RuntimeError:
+            _loop_running = False
 
-    coro = llm_client.create(
-        model=_SUPERVISOR_MODEL,
-        system=_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
-        max_tokens=128,
-        temperature=0.0,
-    )
-
-    try:
         if _loop_running:
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(asyncio.run, coro)
-                response = future.result(timeout=30)
+                return future.result(timeout=30)
         else:
-            response = asyncio.run(coro)
-    except Exception as sdk_exc:
-        scrubbed = mask_observability_patterns(str(sdk_exc))
-        raise RuntimeError(
-            f"Supervisor LLM call failed: {scrubbed}"
-        ) from None
+            return asyncio.run(coro)
 
-    response_text = "".join(
-        getattr(b, "text", "") for b in response.content
-        if getattr(b, "type", None) == "text"
-    ).strip()
+    def _attempt(model: str) -> tuple[str, int, int]:
+        """Make one LLM call and return (raw_response_text, tokens_in, tokens_out)."""
+        coro = llm_client.create(
+            model=model,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+            max_tokens=128,
+            temperature=0.0,
+        )
+        try:
+            response = _run_coro(coro)
+        except Exception as sdk_exc:
+            scrubbed = mask_observability_patterns(str(sdk_exc))
+            raise RuntimeError(f"Supervisor LLM call failed: {scrubbed}") from None
 
-    # Strip markdown fences if present.
-    if response_text.startswith("```"):
-        lines = response_text.splitlines()
-        inner = lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:]
-        response_text = "\n".join(inner).strip()
+        response_text = "".join(
+            getattr(b, "text", "") for b in response.content
+            if getattr(b, "type", None) == "text"
+        ).strip()
 
+        # Strip markdown fences if present.
+        if response_text.startswith("```"):
+            lines = response_text.splitlines()
+            inner = lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:]
+            response_text = "\n".join(inner).strip()
+
+        # Extract token counts for observability (decision #14).
+        usage = getattr(response, "usage", None)
+        tokens_in = getattr(usage, "input_tokens", 0) if usage else 0
+        tokens_out = getattr(usage, "output_tokens", 0) if usage else 0
+
+        return response_text, tokens_in, tokens_out
+
+    # First attempt: Haiku 4.5 (model_workhorse).
+    haiku_model = settings.model_workhorse
+    response_text, tok_in, tok_out = _attempt(haiku_model)
+
+    # Try to parse.
     try:
         parsed = json.loads(response_text)
+        route = str(parsed.get("route", "none")).strip().lower()
+        if route in _ALLOWED_ROUTES:
+            return route, tok_in, tok_out, False
+        # Unrecognised route — fall through to Sonnet escalation.
+        logger.info(
+            "supervisor_node: Haiku returned unrecognised route '%s' — escalating to Sonnet",
+            mask_observability_patterns(route[:32]),
+        )
     except json.JSONDecodeError:
-        logger.warning("supervisor_node: LLM returned non-JSON — defaulting to 'none'")
-        return "none"
+        logger.info("supervisor_node: Haiku returned non-JSON — escalating to Sonnet")
 
-    route = str(parsed.get("route", "none")).strip().lower()
-    # Rationale is parsed but never logged (PHI-adjacent).
-    return route
+    # Decision #4b: retry once with Sonnet 4.6 on bad JSON or unrecognised route.
+    sonnet_model = settings.model_reasoning
+    response_text2, tok_in2, tok_out2 = _attempt(sonnet_model)
+
+    try:
+        parsed2 = json.loads(response_text2)
+        route2 = str(parsed2.get("route", "none")).strip().lower()
+    except json.JSONDecodeError:
+        logger.warning("supervisor_node: Sonnet also returned non-JSON — defaulting to 'none'")
+        route2 = "none"
+
+    # Return escalated=True; token counts from Sonnet call.
+    return route2, tok_in2, tok_out2, True
 
 
 class _langfuse_span:
@@ -227,6 +322,8 @@ class _langfuse_span:
     when Langfuse is available, and is a no-op otherwise.
 
     W2_ARCHITECTURE.md §3.3: every supervisor routing decision is a span.
+    Span metadata includes rationale text only at DEBUG level — the rationale
+    may echo the user query and is PHI-adjacent (§8.3).
     """
 
     def __init__(self, lf: Any, available: bool, hops_taken: int) -> None:

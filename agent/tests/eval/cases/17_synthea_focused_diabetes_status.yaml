@@ -1,4 +1,5 @@
 name: synthea_focused_diabetes_status
+endpoint: /chat
 category: happy_path
 description: |
   Analytical question ("is this patient's diabetes well-controlled?")

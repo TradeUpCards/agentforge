@@ -19,7 +19,7 @@ from typing import Literal, Optional
 
 from typing_extensions import TypedDict
 
-from agent.schemas import Citation
+from agent.schemas import AgentResponse, Citation, RefusalResponse
 
 
 class SupervisorState(TypedDict):
@@ -30,6 +30,11 @@ class SupervisorState(TypedDict):
     query : str
         The incoming clinical query from the user. Used by the supervisor to
         choose a route and by workers to scope their tool calls.
+
+    patient_id : int | None
+        Top-level patient context for this graph run. Set by the /graph_chat
+        handler from the ChatRequest body. evidence_retriever_node reads this
+        directly (decision #7 — no longer buried in tool_calls_accumulated).
 
     tool_calls_accumulated : list[dict]
         Structural metadata about each tool call made so far in this graph
@@ -53,20 +58,35 @@ class SupervisorState(TypedDict):
                                   logged as SUPERVISOR_MAX_HOPS_REACHED; used
                                   by agent_log aggregation queries (§3.2)
           "no_route"            — supervisor returned an unrecognised or null route
+          "responded"           — responder node completed synthesis successfully
         None while the graph is still running.
 
     worker_results : list[dict]
-        Structured summaries returned by each worker. Each entry includes
-        ``worker_name``, ``chunk_ids`` or ``field_count``, ``latency_ms``.
-        Structural only — no chunk text or extracted field values.
+        Structured summaries returned by each worker. Shape aligns to
+        ToolCallSummary (decision #10): tool_name, params, latency_ms,
+        success, record_count, error. Structural only — no chunk text or
+        extracted field values.
+
+    final_response : AgentResponse | RefusalResponse | None
+        Written by the responder node after synthesis. The /graph_chat handler
+        reads this after graph.invoke() completes. None until the responder runs.
+
+    node_observability : list[dict]
+        Per-node 7-field observability records (decision #14). Each entry:
+        node_name, latency_ms, tokens_input, tokens_output,
+        cost_estimate_usd, retrieval_hits, extraction_confidence.
+        Appended by each node that incurs LLM or retrieval cost.
     """
 
     query: str
+    patient_id: Optional[int]
     tool_calls_accumulated: list[dict]
     citations: list[Citation]
     hops_taken: int
     terminal_reason: Optional[str]
     worker_results: list[dict]
+    final_response: Optional[AgentResponse | RefusalResponse]
+    node_observability: list[dict]
 
     # Internal routing signal: set by supervisor_node so _supervisor_router
     # can determine which worker to dispatch to without a second LLM call.

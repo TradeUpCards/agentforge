@@ -1,4 +1,5 @@
 name: progression_recognition_diet_to_pharmacotherapy
+endpoint: /chat
 category: happy_path
 description: |
   Pre-visit brief against synthetic patient 999103 — a T2DM chart

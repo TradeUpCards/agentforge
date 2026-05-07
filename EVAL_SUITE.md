@@ -525,3 +525,56 @@ The `no_phi_in_logs` rubric (tracked in `baseline.json`) is evaluated by the run
 - **"How do you know the eval suite itself isn't broken?"** — *`expected_to_fail: true` flag — designed-to-fail cases pass when they fire. Plus every case has a unique `failure_mode` slug; the runner reports duplicates so a typo doesn't masquerade as new coverage.*
 - **"What's the false-positive rate on the verifier?"** — *Untracked. Closing the value-date tuple gap (test 14, 15) was driven by *finding* a false negative in live testing, not measurement. A tracked false-positive / false-negative rate is week-2+ instrumentation work.*
 - **"Why so many synthetic patients?"** — *12 sentinel patients in the `999100-999114` range, each engineered for one failure mode (sparse data, polypharmacy DDI, free-text heavy, pediatric, contradictory progression, 4 prompt-injection variants, leakage lure). Synthea's random-seeded patients are good for chart depth but don't reliably exercise specific failure modes — a synthetic fixture for "polypharmacy with hidden DDI" deterministically does. All fixtures pass a no-PII validator at load time.*
+
+---
+
+## 11. Endpoint dispatch — `endpoint:` field on eval cases (Week 2 graph phase)
+
+### 11.1 The field
+
+Each eval case YAML now carries an `endpoint:` field that controls which FastAPI route the runner calls. This field was added in the graph phase (planned per DECISIONS.md entry 2026-05-07, Decision #13) when `/graph_chat` became a distinct endpoint from `/chat`.
+
+```yaml
+endpoint: /chat               # default for cases 01-30 and most W2 cases
+endpoint: /attach_and_extract # for extraction cases (doc_type present)
+endpoint: /graph_chat         # for new graph-phase cases 49-58 and 65-67
+```
+
+**Precedence rules (evaluated in order by the runner):**
+
+1. **Explicit `endpoint:` field wins** — if the YAML specifies it, the runner uses it exactly.
+2. **`doc_type:` implies `/attach_and_extract`** — if no explicit `endpoint:` is set but `doc_type:` is present, the runner dispatches to `/attach_and_extract`.
+3. **Default is `/chat`** — if neither condition applies, the runner dispatches to `/chat`.
+
+This means existing cases without an `endpoint:` field continue to route to `/chat` with no behavior change. The back-annotation of `endpoint: /chat` on cases 01-30 is explicit documentation of the existing behavior, not a change.
+
+### 11.2 Case-to-endpoint mapping
+
+| Cases | Endpoint | Reason |
+|---|---|---|
+| 01–30 | `/chat` | Existing W1 golden set; back-annotated `endpoint: /chat` |
+| 31–48 | `/chat` (W2 lab/intake/evidence/no-phi cases without `doc_type`) | Default applies |
+| Cases with `doc_type:` present (lab extraction, intake extraction cases) | `/attach_and_extract` | `doc_type:` presence → extraction dispatch |
+| 49–58 | `/graph_chat` | Evidence-retrieval cases that exercise the supervisor graph path |
+| 59–64 | `/chat` or `/graph_chat` | Chat-shaped no-PHI cases: if they have `doc_type` they go to `/attach_and_extract`; chat-shaped no-PHI with no `doc_type` stay on `/chat` unless explicitly annotated |
+| 65–67 | `/graph_chat` | New graph UC1/UC2/UC3 cases added in the graph phase (planned) |
+
+### 11.3 New cases 65–67 (planned per DECISIONS.md 2026-05-07)
+
+Three new YAML cases cover the `/graph_chat` endpoint specifically. They are planned per the 17-decision lock list (Decision #13) and are being authored by the quality-lead teammate on `agentforge/w2-graph-supervisor`. Once committed they will carry:
+
+| Case | Slug | Assertion |
+|---|---|---|
+| 65 | `graph_uc1_*` | Supervisor routes to evidence-retriever; response contains at least 1 guideline citation |
+| 66 | `graph_uc2_*` | Supervisor routes to intake-extractor; extracted fields appear in response with bbox citation |
+| 67 | `graph_uc3_*` | Supervisor → evidence-retriever → responder path; `claims_passed_count >= 1` |
+
+These cases require `endpoint: /graph_chat` and will have `tier: full` so they run in CI without requiring a live LLM.
+
+### 11.4 Observability cross-reference
+
+The per-node Langfuse funnel (requests → intake_extractor → evidence_retriever → responder → escalations → refusals) is documented in `OBSERVABILITY.md`. That file is the operator's reference for:
+
+- Confirming the Sonnet escalation rate is low across `/graph_chat` traces
+- Verifying per-node token usage and cost tallies against the 7-field observability spec (Decision #14)
+- Slicing the funnel by node to surface where latency or cost is concentrated

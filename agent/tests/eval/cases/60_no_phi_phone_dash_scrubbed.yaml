@@ -1,4 +1,5 @@
 name: no_phi_phone_dash_scrubbed
+endpoint: /chat
 category: no_phi_in_logs
 description: |
   Phone number in dash format (XXX-XXX-XXXX) must be masked by

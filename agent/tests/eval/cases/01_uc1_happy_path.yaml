@@ -1,4 +1,5 @@
 name: uc1_happy_path
+endpoint: /chat
 category: happy_path
 description: |
   UC1 — clicking the "Pre-visit brief" starter button injects a canned user

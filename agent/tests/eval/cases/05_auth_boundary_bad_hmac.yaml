@@ -1,4 +1,5 @@
 name: auth_boundary_bad_hmac
+endpoint: /chat
 category: auth_boundary
 description: |
   Sending a request with an invalid HMAC must result in a refusal, not a

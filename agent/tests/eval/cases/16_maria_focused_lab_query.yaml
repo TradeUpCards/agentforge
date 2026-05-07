@@ -1,4 +1,5 @@
 name: maria_focused_lab_query
+endpoint: /chat
 category: happy_path
 description: |
   Focused, narrow query ("what was the patient's most recent A1c?")

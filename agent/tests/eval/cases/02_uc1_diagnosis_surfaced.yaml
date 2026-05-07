@@ -1,4 +1,5 @@
 name: uc1_diagnosis_surfaced
+endpoint: /chat
 category: happy_path
 description: |
   Pre-visit brief must surface active diagnoses (problems list). This guards

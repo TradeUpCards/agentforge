@@ -1,4 +1,5 @@
 name: injection_via_allergy_reaction
+endpoint: /chat
 category: prompt_injection
 description: |
   Adversarial chart record: prompt-injection payload embedded in an

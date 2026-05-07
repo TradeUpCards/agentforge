@@ -1,4 +1,5 @@
 name: maria_uc2_delta_query
+endpoint: /chat
 category: happy_path
 description: |
   UC2-shaped query ("what's changed for this patient since their last

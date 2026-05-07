@@ -126,6 +126,13 @@ class EvalCase:
     phi_log_scan: list[str] = field(default_factory=list)
     """Strings the PHI scrubber must mask. Each entry is asserted to be absent
     from mask_observability_patterns(entry) output."""
+    endpoint: str | None = None
+    """Explicit endpoint override (W2 graph phase, decision #13).
+    Allowed values: /chat | /graph_chat | /attach_and_extract | None.
+    Precedence: explicit endpoint field wins; doc_type presence implies
+    /attach_and_extract; default is /chat.  Cases 01-30 → /chat;
+    cases 49-58 + 65-67 → /graph_chat; extraction cases stay on
+    /attach_and_extract (enforced by doc_type)."""
 
     @classmethod
     def load_all(cls) -> list[EvalCase]:
@@ -158,6 +165,7 @@ class EvalCase:
                     rubric=list(data.get("rubric", []) or []),
                     doc_type=data.get("doc_type"),
                     phi_log_scan=list(data.get("phi_log_scan", []) or []),
+                    endpoint=data.get("endpoint"),
                 )
             )
         return cases
@@ -204,6 +212,10 @@ _KNOWN_CASE_KEYS: set[str] = {
     "rubric",        # list[str] — PRD §6 rubric categories this case exercises
     "doc_type",      # str | None — if set, case calls /attach_and_extract instead of /chat
     "phi_log_scan",  # list[str] — PHI strings that must be masked by the scrubber
+    # W2 graph-phase addition
+    "endpoint",      # str | None — explicit endpoint override: /chat | /graph_chat | /attach_and_extract
+                     # Precedence: explicit endpoint wins; doc_type presence implies /attach_and_extract;
+                     # default is /chat.  W2_ARCHITECTURE.md §5.5 (decision #13).
 }
 
 _KNOWN_DIFFICULTIES: set[str] = {"smoke", "basic", "intermediate", "advanced"}
@@ -212,6 +224,7 @@ _KNOWN_RUBRICS: set[str] = {
     "schema_valid", "citation_present", "factually_consistent",
     "safe_refusal", "no_phi_in_logs",
 }
+_KNOWN_ENDPOINTS: set[str] = {"/chat", "/graph_chat", "/attach_and_extract"}
 
 _DSL_CHECKS: set[str] = {
     "min_claims",
@@ -264,6 +277,14 @@ def _validate_case_schema(path: Path, data: dict[str, Any]) -> None:
             raise ValueError(
                 f"{path.name}: unknown rubric {r!r}. Known: {sorted(_KNOWN_RUBRICS)!r}"
             )
+
+    # Validate endpoint value against the closed set (when present).
+    endpoint_val = data.get("endpoint")
+    if endpoint_val is not None and endpoint_val not in _KNOWN_ENDPOINTS:
+        raise ValueError(
+            f"{path.name}: unknown endpoint {endpoint_val!r}. "
+            f"Known: {sorted(_KNOWN_ENDPOINTS)!r}"
+        )
 
     expected = data.get("expected", {}) or {}
     # phi_log_scan at top level also satisfies the deterministic-check requirement
@@ -578,10 +599,62 @@ def _run_extraction_case(client: TestClient, case: EvalCase, secret: str) -> Cas
     return result
 
 
-def _run_case_once(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
+def _resolve_endpoint(case: EvalCase) -> str:
+    """Resolve the target endpoint for a case.
+
+    Precedence (W2 graph phase, decision #13):
+      1. Explicit ``endpoint:`` YAML field wins.
+      2. ``doc_type:`` presence implies ``/attach_and_extract``.
+      3. Default is ``/chat``.
+
+    Allowed values: ``/chat``, ``/graph_chat``, ``/attach_and_extract``.
+    """
+    if case.endpoint is not None:
+        return case.endpoint
     if case.doc_type is not None:
+        return "/attach_and_extract"
+    return "/chat"
+
+
+def _run_graph_chat_case(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
+    """Dispatch to POST /graph_chat for cases with endpoint: /graph_chat.
+
+    Uses the same ChatRequest body as /chat. The /graph_chat endpoint must be
+    implemented by the agent-rag teammate; until it lands this will return a
+    404 or 500 which the runner records as a failure (expected when /graph_chat
+    isn't implemented yet).
+    """
+    timestamp = int(time.time())
+    sig = "deadbeef" * 8 if case.bad_hmac else _sign(case, secret, timestamp)
+    body = {
+        "user_id": case.user_id,
+        "patient_id": case.patient_id,
+        "timestamp": timestamp,
+        "hmac": sig,
+        "messages": case.messages,
+    }
+    t0 = time.perf_counter()
+    r = client.post("/graph_chat", json=body)
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    try:
+        payload = r.json()
+    except json.JSONDecodeError:
+        payload = {"status": "error", "raw_body": r.text}
+    result = _evaluate(case, r.status_code, payload)
+    result.latency_ms = elapsed_ms
+    return result
+
+
+def _run_case_once(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
+    endpoint = _resolve_endpoint(case)
+
+    if endpoint == "/attach_and_extract":
         return _run_extraction_case(client, case, secret)
-    # --- existing /chat path (unchanged) ---
+
+    if endpoint == "/graph_chat":
+        return _run_graph_chat_case(client, case, secret)
+
+    # --- /chat path (default, unchanged) ---
     # Sign with current timestamp so the request stays inside the agent's
     # 30s freshness window. Replay-protection coverage proper lives in the
     # verify_hmac unit tests; here we just need the sig + body to validate.

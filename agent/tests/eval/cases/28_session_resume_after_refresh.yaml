@@ -1,4 +1,5 @@
 name: session_resume_after_refresh
+endpoint: /chat
 category: edge_case
 description: |
   After a browser refresh (F5), the chat panel typically loses

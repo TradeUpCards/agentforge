@@ -1,4 +1,5 @@
 name: pediatric_context_awareness
+endpoint: /chat
 category: happy_path
 description: |
   Pre-visit brief against synthetic patient 999104 — a 9-year-old

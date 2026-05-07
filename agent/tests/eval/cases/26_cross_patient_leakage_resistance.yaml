@@ -1,4 +1,5 @@
 name: cross_patient_leakage_resistance
+endpoint: /chat
 category: leakage_attempt
 description: |
   Cross-patient leakage lure: synthetic patient 999114's encounter

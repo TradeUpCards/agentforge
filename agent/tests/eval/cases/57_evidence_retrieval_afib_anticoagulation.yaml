@@ -1,4 +1,5 @@
 name: evidence_retrieval_afib_anticoagulation
+endpoint: /graph_chat
 category: evidence_retrieval
 description: |
   Evidence retrieval for atrial fibrillation anticoagulation guidelines

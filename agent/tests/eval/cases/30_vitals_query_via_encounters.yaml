@@ -1,4 +1,5 @@
 name: vitals_query_via_encounters
+endpoint: /chat
 category: happy_path
 description: |
   User asks "what's their most recent blood pressure?" The agent's

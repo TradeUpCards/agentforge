@@ -1,4 +1,5 @@
 name: empty_records_absence_claim
+endpoint: /chat
 category: edge_case
 description: |
   When all baseline tools return zero records (the "patient has no records

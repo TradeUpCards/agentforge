@@ -1,0 +1,44 @@
+name: graph_uc3_guideline_question
+endpoint: /graph_chat
+category: evidence_retrieval
+description: |
+  UC3 — ADA A1c target guideline question via /graph_chat. Sentinel patient
+  999100. Query contains an ADA guideline keyword, which triggers the additive
+  search_guidelines call alongside the W1 patient tools (decision #3).
+
+  The responder must return at least one citation with source_type='guideline'
+  (a guideline_corpus: citation) plus claims_passed_count >= 1 asserting the
+  ADA recommendation landed in the verified claim set.
+
+  Primary regression classes guarded:
+    - guideline keyword not detected (additive path never fires)
+    - search_guidelines not called when patient_id is also present
+    - guideline citation stripped by verifier (citation_stripping regression)
+    - citation_present rubric drops (guideline chunk_id not in source_id)
+
+  The min_guideline_citations: 1 assertion is the primary trip-wire. If this
+  fires in CI it means: the evidence_retriever no longer calls search_guidelines
+  for ADA-keyword queries, or the guideline Citation object is malformed.
+
+patient_id: 999100
+user_id: 1
+synthetic: true
+fixture_data_required: false
+live_llm_required: true
+tier: nightly
+difficulty: intermediate
+failure_mode: graph_uc3_guideline_citation_missing
+tool_mix:
+  - search_guidelines
+  - get_recent_labs
+rubric: [citation_present, factually_consistent]
+messages:
+  - role: user
+    content: "What is the ADA-recommended A1c target for this patient with T2DM?"
+
+expected:
+  status: ok
+  min_claims: 1
+  min_guideline_citations: 1
+  must_mention:
+    - "A1c"

@@ -22,11 +22,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from .agent import record_score, run_chat, verify_attach_hmac, verify_score_hmac
+from .agent import record_score, run_chat, verify_attach_hmac, verify_hmac, verify_score_hmac
 from ._phi_scrubber import mask_observability_patterns
 from .config import get_settings
 from .document_schemas import IntakeForm, LabReport
 from .extractors import attach_and_extract_async
+from .graph.builder import build_supervisor_graph
 from .schemas import (
     AgentResponse,
     ChatRequest,
@@ -94,6 +95,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     yield
     # No shutdown work for week 1.
+
+
+# ---------------------------------------------------------------------------
+# Supervisor graph — compiled once at module load so /graph_chat calls are
+# cheap (no recompile per request).
+# ---------------------------------------------------------------------------
+
+_compiled_graph = build_supervisor_graph()
 
 
 app = FastAPI(
@@ -443,6 +452,151 @@ async def attach_and_extract_endpoint(
             "request_id": request_id,
         },
     )
+
+
+@app.post("/graph_chat", response_model=None)
+async def graph_chat(request: ChatRequest) -> AgentResponse | RefusalResponse:
+    """Multi-agent graph endpoint — supervisor → worker(s) → responder → END.
+
+    Accepts the same ChatRequest body as /chat. Verifies HMAC, checks rate
+    limits and token budget, then invokes the compiled LangGraph supervisor
+    graph. Returns AgentResponse on success or RefusalResponse on any failure.
+
+    Security controls mirror /chat:
+      - HMAC-SHA256 verification (same verify_hmac function)
+      - Replay-window gate (30s, enforced by verify_hmac)
+      - Per-user request rate + token budget checks
+      - Outbound PHI gate runs inside the responder node (defense-in-depth)
+
+    Graph routing (W2_ARCHITECTURE.md §3 / decision #2):
+      supervisor → {intake_extractor | evidence_retriever} → supervisor (loop)
+      supervisor (answered | supervisor_max_hops) → responder → END
+      supervisor (no_route) → END  [returns RefusalResponse directly]
+
+    Langfuse flush once after graph.invoke() per decision #8.
+    """
+    import uuid as _uuid
+    from agent._rate_limit import check_request_rate, check_token_budget
+
+    request_id = str(_uuid.uuid4())
+    settings = get_settings()
+
+    # --- HMAC verification (fail closed) -------------------------------------
+    hmac_failure = verify_hmac(request, settings.openemr_hmac_secret)
+    if hmac_failure is not None:
+        logger.info(
+            "/graph_chat: HMAC verification failed",
+            extra={"request_id": request_id, "reason": hmac_failure},
+        )
+        return RefusalResponse(
+            reason="Request integrity check failed.",
+            searched=[],
+            request_id=request_id,
+            trace_id=None,
+        )
+
+    # --- Per-user request rate check (post-HMAC) -----------------------------
+    if not check_request_rate(
+        request.user_id,
+        settings.rate_limit_requests_per_minute,
+        60,
+    ):
+        return RefusalResponse(
+            reason=(
+                "Request rate limit exceeded for this user. "
+                "Please wait a minute before retrying."
+            ),
+            searched=[],
+            request_id=request_id,
+            trace_id=None,
+        )
+
+    # --- Per-user token budget check -----------------------------------------
+    budget_ok, current_tokens = check_token_budget(
+        request.user_id,
+        settings.token_budget_per_hour,
+        3600,
+    )
+    if not budget_ok:
+        return RefusalResponse(
+            reason=(
+                "This user has reached the hourly token budget. "
+                "Please retry in an hour."
+            ),
+            searched=[],
+            request_id=request_id,
+            trace_id=None,
+        )
+
+    # --- Extract last user message as the supervisor query -------------------
+    last_user_message = ""
+    for m in reversed(request.messages):
+        if m.role.value == "user":
+            last_user_message = m.content
+            break
+
+    # --- Build initial supervisor state (decision #7: patient_id top-level) --
+    initial_state = {
+        "query": last_user_message,
+        "patient_id": request.patient_id,
+        "tool_calls_accumulated": [],
+        "citations": [],
+        "hops_taken": 0,
+        "terminal_reason": None,
+        "worker_results": [],
+        "final_response": None,
+        "node_observability": [],
+        "_pending_route": None,
+    }
+
+    # --- Invoke graph --------------------------------------------------------
+    try:
+        final_state = _compiled_graph.invoke(initial_state)
+    except Exception as exc:
+        logger.exception("/graph_chat: graph.invoke() raised unexpectedly")
+        raise HTTPException(
+            status_code=500,
+            detail="The agent encountered an internal error. Please retry.",
+        ) from exc
+
+    # --- Decision #8: Langfuse flush after graph.invoke() --------------------
+    try:
+        from langfuse import get_client as _get_lf_client
+        _get_lf_client().flush()
+    except Exception:
+        pass
+
+    # --- Inspect terminal_reason and return ----------------------------------
+    terminal_reason = final_state.get("terminal_reason")
+
+    # "no_route" → bypass responder, return RefusalResponse directly.
+    if terminal_reason == "no_route":
+        return RefusalResponse(
+            reason="no_route",
+            searched=[],
+            request_id=request_id,
+            trace_id=None,
+        )
+
+    # Responder wrote final_response into state.
+    final_response = final_state.get("final_response")
+    if final_response is None:
+        # Defensive: graph terminated without a final_response (shouldn't happen
+        # in normal operation — supervisor_max_hops → responder → END).
+        logger.warning(
+            "/graph_chat: final_response is None after graph completion "
+            "(terminal_reason=%s, request_id=%s)",
+            terminal_reason,
+            request_id,
+        )
+        return RefusalResponse(
+            reason="The agent graph completed without producing a response.",
+            searched=[],
+            request_id=request_id,
+            trace_id=None,
+        )
+
+    return final_response
 
 
 @app.exception_handler(HTTPException)
