@@ -24,22 +24,25 @@ separate task tracker) so the defense doc itself proves coverage.
 
 | # | PDF requirement | Status | Implementation |
 |---|---|---|---|
-| 1 | **Authentication** — OAuth2/OpenID Connect login | code complete, awaiting acceptance test | `patient-dashboard/src/auth/` — `oidcConfig.ts`, `CallbackPage.tsx`, `ProtectedRoute.tsx`. Authorization Code + PKCE against `${VITE_OPENEMR_BASE_URL}/oauth2/default`, wired in `src/main.tsx`. |
-| 2 | **Patient header** — name, DOB, sex, MRN, active status | code complete, awaiting acceptance test | `patient-dashboard/src/components/layout/PatientHeader.tsx`, fed by `usePatient()` against `GET /fhir/Patient/{id}`. Sticky bar, mirrors the existing dashboard's identity strip. |
-| 3a | Clinical card: **Allergies** | code complete, awaiting acceptance test | `components/cards/AllergiesCard.tsx` ← `GET /fhir/AllergyIntolerance?patient={id}&clinical-status=active`. Severity → badge variant matches existing Twig logic. |
-| 3b | Clinical card: **Problem List** | code complete, awaiting acceptance test | `components/cards/ProblemsCard.tsx` ← `GET /fhir/Condition?patient={id}&category=problem-list-item&clinical-status=active`. |
-| 3c | Clinical card: **Medications** | code complete, awaiting acceptance test | `components/cards/MedicationsCard.tsx` ← `GET /fhir/MedicationRequest?patient={id}&status=active`. |
-| 3d | Clinical card: **Prescriptions** | code complete, awaiting acceptance test | `components/cards/PrescriptionsCard.tsx` ← `GET /fhir/MedicationDispense?patient={id}&_sort=-whenHandedOver`. |
-| 3e | Clinical card: **Care Team** | code complete, awaiting acceptance test | `components/cards/CareTeamCard.tsx` ← `GET /fhir/CareTeam?patient={id}&status=active`. |
-| 4 | **Additional section** — Encounter History | code complete, awaiting acceptance test | `components/cards/EncountersCard.tsx` ← `GET /fhir/Encounter?patient={id}&_sort=-date&_count=10`. Title "Encounter History" matches legacy `interface/patient_file/history/encounters.php`. Choice rationale in §7. |
-| 5 | **Working reimplementation, feature parity** | code complete, awaiting acceptance test | Composed at `pages/DashboardPage.tsx`. Visual language mirrors existing Bootstrap 4 cards (see `templates/patient/card/*.html.twig`) but in Tailwind v4. Parity checklist in §9. Manual acceptance against OpenEMR demo data + screenshots → `patient-dashboard/docs/parity/` is the remaining work. |
+| 1 | **Authentication** — OAuth2/OpenID Connect login | live-verified | `patient-dashboard/src/auth/` — `oidcConfig.ts`, `CallbackPage.tsx`, `ProtectedRoute.tsx`. Authorization Code + PKCE against `${VITE_OPENEMR_BASE_URL}/oauth2/default`, wired in `src/main.tsx`. |
+| 2 | **Patient header** — name, DOB, sex, MRN, active status | live-verified | `patient-dashboard/src/components/layout/PatientHeader.tsx`, fed by `usePatient()` against `GET /fhir/Patient/{id}`. Sticky bar, mirrors the existing dashboard's identity strip. |
+| 3a | Clinical card: **Allergies** | live-verified | `components/cards/AllergiesCard.tsx` ← `GET /fhir/AllergyIntolerance?patient={id}&clinical-status=active`. Severity → badge variant matches existing Twig logic. |
+| 3b | Clinical card: **Problem List** | live-verified | `components/cards/ProblemsCard.tsx` ← `GET /fhir/Condition?patient={id}&category=problem-list-item&clinical-status=active`. |
+| 3c | Clinical card: **Medications** | live-verified | `components/cards/MedicationsCard.tsx` ← `GET /fhir/MedicationRequest?patient={id}&status=active`. |
+| 3d | Clinical card: **Prescriptions** | live-verified | `components/cards/PrescriptionsCard.tsx` ← `GET /fhir/MedicationDispense?patient={id}&_sort=-whenHandedOver`. |
+| 3e | Clinical card: **Care Team** | live-verified | `components/cards/CareTeamCard.tsx` ← `GET /fhir/CareTeam?patient={id}&status=active`. |
+| 4 | **Additional section** — Encounter History | live-verified | `components/cards/EncountersCard.tsx` ← `GET /fhir/Encounter?patient={id}&_sort=-date&_count=10`. Title "Encounter History" matches legacy `interface/patient_file/history/encounters.php`. Choice rationale in §7. |
+| 5 | **Working reimplementation, feature parity** | live-verified | Composed at `pages/DashboardPage.tsx`. Visual language mirrors existing Bootstrap 4 cards (see `templates/patient/card/*.html.twig`) but in Tailwind v4. Parity checklist in §9. Manual acceptance against OpenEMR demo data + screenshots → `patient-dashboard/docs/parity/` is the remaining work. |
 | 6 | **This document** — framework defense | done (this file) | `PATIENT_DASHBOARD_MIGRATION.md` |
 
-Status legend: `planned` (designed only), `in progress` (actively being
-written), `code complete, awaiting acceptance test` (all source files
-written and self-consistent; not yet exercised against a live OpenEMR
-instance), `done` (manually exercised against running OpenEMR with
-demo data; parity screenshots committed).
+Status legend: `planned` (designed only), `in progress` (actively
+being written), `code complete, awaiting acceptance test` (all source
+files written and self-consistent; not yet exercised against a live
+OpenEMR instance), `live-verified` (code complete + manually exercised
+end-to-end against running OpenEMR with demo data — Phil Belford
+walkthrough on 2026-05-06; pending only parity-screenshot capture),
+`done` (live-verified + parity screenshots committed under
+`patient-dashboard/docs/parity/`).
 
 ---
 
