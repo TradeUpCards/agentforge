@@ -59,6 +59,40 @@ AGENTFORGE_ROOT="${AGENTFORGE_ROOT:-/c/Dev/GauntletAI/AgentForge}"
 AGENTFORGE_PARENT="$(dirname "$AGENTFORGE_ROOT")"
 
 # ---------------------------------------------------------------------------
+# Path canonicalization
+# ---------------------------------------------------------------------------
+# Windows produces paths in two forms in this environment:
+#   - MSYS form:    /c/Dev/GauntletAI/AgentForge-hitl   (from realpath, $PWD)
+#   - Drive form:   C:/Dev/GauntletAI/AgentForge-hitl   (from `git worktree
+#                                                        list --porcelain`,
+#                                                        `git rev-parse --show-toplevel`)
+#
+# Bare `realpath -m` is a passthrough — it does NOT convert between these
+# forms, so a string equality compare between a path from one source and a
+# path from the other will silently mismatch, even though they reference the
+# same on-disk directory.
+#
+# `cygpath -u` reliably normalizes both forms to MSYS form (and is idempotent
+# on already-MSYS paths). Use this helper everywhere paths are compared.
+_canonical_path() {
+    local p="$1"
+    [ -z "$p" ] && return
+    # First pass: cygpath -u coerces drive-letter paths to MSYS form.
+    if command -v cygpath >/dev/null 2>&1; then
+        local cp
+        cp="$(cygpath -u "$p" 2>/dev/null)"
+        [ -n "$cp" ] && p="$cp"
+    fi
+    # Second pass: realpath -m resolves . / .. and trailing slashes.
+    if command -v realpath >/dev/null 2>&1; then
+        local rp
+        rp="$(realpath -m "$p" 2>/dev/null)"
+        [ -n "$rp" ] && p="$rp"
+    fi
+    printf '%s\n' "$p"
+}
+
+# ---------------------------------------------------------------------------
 # Kickoff parsing
 # ---------------------------------------------------------------------------
 
@@ -167,15 +201,16 @@ _parse_kickoff() {
         return 1
     fi
 
-    # Resolve to absolute path.
+    # Resolve to absolute path. _canonical_path normalizes drive-letter
+    # to MSYS form, then resolves . / .. via realpath -m. If neither
+    # cygpath nor realpath are available, fall back to the shell-native
+    # pwd -W pattern (step 5 above forbids embedded `..`, so pwd -W's
+    # lack of `..` normalization doesn't matter).
     local rel="$AGENTFORGE_PARENT/${worktree_raw#../}"
     local abs
-    if command -v realpath >/dev/null 2>&1; then
-        abs="$(realpath -m "$rel" 2>/dev/null)"
+    if command -v realpath >/dev/null 2>&1 || command -v cygpath >/dev/null 2>&1; then
+        abs="$(_canonical_path "$rel")"
     else
-        # Shell-native fallback for environments without GNU coreutils.
-        # Step 5 above forbids embedded `..`, so pwd -W's lack of `..`
-        # normalization doesn't matter here.
         abs="$(cd "$(dirname "$rel")" 2>/dev/null && printf '%s/%s' "$(pwd -W 2>/dev/null || pwd)" "$(basename "$rel")")"
     fi
     if [ -z "$abs" ]; then
@@ -864,16 +899,14 @@ EOF
     local worktree="$_PARSED_WORKTREE"
 
     # Step 2: Refuse if standing inside the worktree being torn down.
+    # Both sides go through _canonical_path so MSYS-form (from $worktree)
+    # and drive-letter-form (from `git rev-parse --show-toplevel`)
+    # compare correctly.
     local cur_top cur_top_abs worktree_abs
+    worktree_abs="$(_canonical_path "$worktree")"
     cur_top=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)
     if [ -n "$cur_top" ]; then
-        if command -v realpath >/dev/null 2>&1; then
-            cur_top_abs="$(realpath -m "$cur_top" 2>/dev/null)"
-            worktree_abs="$(realpath -m "$worktree" 2>/dev/null)"
-        else
-            cur_top_abs="$cur_top"
-            worktree_abs="$worktree"
-        fi
+        cur_top_abs="$(_canonical_path "$cur_top")"
         if [ "$cur_top_abs" = "$worktree_abs" ]; then
             echo "finish_lead: refuse — current shell is inside $worktree. cd to the main checkout first." >&2
             return 1
@@ -881,17 +914,16 @@ EOF
     fi
 
     # Step 3: Verify path is a registered git worktree (and not the main checkout).
+    # `git worktree list --porcelain` emits drive-letter-form paths on Windows
+    # while $worktree_abs is MSYS-form; both go through _canonical_path before
+    # comparison.
     local registered=0
     while IFS= read -r line; do
         case "$line" in
             "worktree "*)
                 local wt_path="${line#worktree }"
                 local wt_abs
-                if command -v realpath >/dev/null 2>&1; then
-                    wt_abs="$(realpath -m "$wt_path" 2>/dev/null)"
-                else
-                    wt_abs="$wt_path"
-                fi
+                wt_abs="$(_canonical_path "$wt_path")"
                 if [ "$wt_abs" = "$worktree_abs" ]; then
                     registered=1
                 fi
@@ -904,11 +936,7 @@ EOF
         return 1
     fi
     local main_abs
-    if command -v realpath >/dev/null 2>&1; then
-        main_abs="$(realpath -m "$AGENTFORGE_ROOT" 2>/dev/null)"
-    else
-        main_abs="$AGENTFORGE_ROOT"
-    fi
+    main_abs="$(_canonical_path "$AGENTFORGE_ROOT")"
     if [ "$worktree_abs" = "$main_abs" ]; then
         echo "finish_lead: refuse — $worktree is the main checkout, not a lead worktree" >&2
         return 1
