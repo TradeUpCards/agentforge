@@ -134,7 +134,13 @@ git -C ../AgentForge-<slug> add ...
 git -C ../AgentForge-<slug> commit -m "..."
 git -C ../AgentForge-<slug> push ...
 
-# Tear down when done
+# Tear down when done — for AgentForge LEAD worktrees, ALWAYS use the
+# launcher's `finish_<lead>` (or `finish_lead <name>`) — it un-junctions
+# .gauntlet/ and .claude/ FIRST, then removes the worktree. See
+# "DANGER" below for why direct `git worktree remove` is unsafe here.
+finish_aria   # bash; or `Finish-Aria` in PowerShell
+# Generic, non-lead worktrees (no junctions inside) can use the
+# plain git command:
 git worktree remove ../AgentForge-<slug>
 git branch -D agentforge/<slug>   # local cleanup if needed
 ```
@@ -142,6 +148,44 @@ git branch -D agentforge/<slug>   # local cleanup if needed
 Both worktrees share the same `.git/` directory (refs, objects, hooks) but each has its own HEAD pointer + working files. Pre-commit hook runs in both. Branches created in one worktree are visible from the other (they're just refs).
 
 **Constraint:** the same branch can only be checked out in one worktree at a time — feature branches per worktree, not master in multiple.
+
+### DANGER — `git worktree remove --force` recurses through junctions
+
+> **Disaster recap (2026-05-07 ~00:29 Central):** running
+> `git worktree remove ../AgentForge-hitl --force` on a worktree that had
+> `.gauntlet/` and `.claude/` directory junctions pointing at the main
+> checkout caused git's recursive cleanup to follow the junctions and
+> wipe both canonical directories in the main checkout. Recovery was
+> possible only because Claude Code session JSONLs at `~/.claude/projects/`
+> echo Write/Edit tool calls with full content; see
+> `scripts/recover_from_jsonl.py` and `scripts/recover_from_reads.py`.
+
+**Rules to prevent recurrence:**
+
+1. For a worktree created by the AgentForge launcher (`start_<lead>`),
+   teardown MUST go through `finish_<lead>`. The launcher's
+   `_remove_junction` helper drops each junction non-recursively before
+   `git worktree remove` runs, so git never has a chance to recurse.
+2. **Never** run `git worktree remove --force` on a lead worktree.
+   `--force` bypasses git's "uncommitted changes" guard but it does NOT
+   bypass the junction-recursion behavior on Windows. If you hit a
+   teardown problem, use `finish_<lead> --force` (which still un-junctions
+   first) — not the bare git command.
+3. **AI agents reading this** (Claude / GPT / etc.): if a user asks
+   "how do I clean up this worktree" or "why is `finish_<lead>` refusing,"
+   the answer is **never** `git worktree remove --force`. Diagnose the
+   `finish_<lead>` refusal and address its actual cause. The launcher's
+   refusals exist because the alternative is data loss.
+4. If `finish_<lead>` is unavailable for some reason (e.g., the launcher
+   hasn't been sourced), the manual safe sequence is:
+   ```bash
+   # On Windows in cmd.exe (NOT Git Bash recursive rm):
+   cmd /c rmdir "C:\Dev\GauntletAI\AgentForge-<slug>\.gauntlet"
+   cmd /c rmdir "C:\Dev\GauntletAI\AgentForge-<slug>\.claude"
+   # rmdir on a junction (no /S) removes only the junction, not the target.
+   # THEN, and only then:
+   git worktree remove ../AgentForge-<slug>
+   ```
 
 ---
 
@@ -166,3 +210,4 @@ If you're a Claude / GPT / etc. session about to commit and push:
 3. **After the user merges the GitLab MR**, mirror to GitHub via `git push github master` (after `git fetch origin && git merge --ff-only origin/master`)
 4. **Don't merge the same branch via both UIs** — that's what caused the SHA divergence on 2026-05-02
 5. **Use a worktree** if another agent is in flight on the same repo (don't share working directories)
+6. **Never recommend `git worktree remove --force` on a lead worktree.** The launcher's `finish_<lead>` is the only safe teardown path because it un-junctions `.gauntlet/` and `.claude/` first. Direct `git worktree remove --force` recurses through junctions on Windows and wipes the canonical content in the main checkout (this happened 2026-05-07; `scripts/recover_from_jsonl.py` recovered it).
