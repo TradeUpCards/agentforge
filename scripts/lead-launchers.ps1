@@ -17,7 +17,7 @@
 #   1. Edit .gauntlet/week2/kickoff/<name>.md — update the Branch and
 #      Worktree lines (and the rest of the kickoff content)
 #   2. Edit .gauntlet/week2/in-flight.md — update the Leads table row
-#   3. (optional) git worktree remove <old-worktree> if you're done with it
+#   3. (optional) Finish-<Name> if you're done with the old worktree
 #   4. Next call to Start-<Name> creates the new worktree if missing
 #
 # ---------------------------------------------------------------------------
@@ -40,6 +40,8 @@
 #   Start-Aria / Start-Bram / Start-Cleo
 #   Stop-Lead -Name <name>    # generic stopper (workspace untrack + title reset)
 #   Stop-Aria  / Stop-Bram  / Stop-Cleo
+#   Finish-Lead -Name <name>  # safe teardown: junctions, worktree, branch, workspace
+#   Finish-Aria / Finish-Bram / Finish-Cleo
 
 $AgentForgeRoot   = "C:\Dev\GauntletAI\AgentForge"
 $AgentForgeParent = Split-Path $AgentForgeRoot -Parent
@@ -69,6 +71,64 @@ function _Resolve-WorktreePath {
     return Join-Path $AgentForgeParent $Raw
 }
 
+# Hardened kickoff resolver used by Start-Lead and Finish-Lead. Validates
+# the branch and worktree fields with strict regex and resolves the
+# worktree to an absolute Windows path. Returns a hashtable with Branch,
+# Worktree (raw, as written), and AbsWorktree (canonical absolute).
+#
+# Throws (rather than returning $null) on any validation failure — this
+# is the safe-resolution helper for destructive operations.
+function _Parse-Kickoff {
+    param([Parameter(Mandatory=$true)][string]$Name)
+
+    $promptPath = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff\$Name.md"
+    if (-not (Test-Path -LiteralPath $promptPath)) {
+        throw "Kickoff prompt not found at $promptPath."
+    }
+
+    $lines = Get-Content -LiteralPath $promptPath
+
+    $branchPattern   = "^\*\*Branch:\*\* ``([^``]*)``"
+    $worktreePattern = "^\*\*Worktree:\*\* ``([^``]*)``"
+
+    $branchMatches   = @()
+    $worktreeMatches = @()
+    foreach ($line in $lines) {
+        if ($line -match $branchPattern)   { $branchMatches   += $Matches[1] }
+        if ($line -match $worktreePattern) { $worktreeMatches += $Matches[1] }
+    }
+
+    if ($branchMatches.Count -eq 0)   { throw "Kickoff $promptPath has no **Branch:** line." }
+    if ($branchMatches.Count -gt 1)   { throw "Kickoff $promptPath has $($branchMatches.Count) **Branch:** lines (expected exactly 1)." }
+    if ($worktreeMatches.Count -eq 0) { throw "Kickoff $promptPath has no **Worktree:** line." }
+    if ($worktreeMatches.Count -gt 1) { throw "Kickoff $promptPath has $($worktreeMatches.Count) **Worktree:** lines (expected exactly 1)." }
+
+    $branch   = $branchMatches[0]
+    $worktree = $worktreeMatches[0]
+
+    if ($branch -notmatch '^[A-Za-z0-9/_.-]+$') {
+        throw "Kickoff ${promptPath}: branch '$branch' contains illegal characters (allowed: A-Z a-z 0-9 / _ . -)."
+    }
+
+    # Strict shape: relative-up-one-then-single-segment. Forbids absolute
+    # paths, embedded '..', sideways traversal, nested directories, and
+    # shell metacharacters. Side-effect: makes GetFullPath() canonical
+    # without ambiguity.
+    if ($worktree -notmatch '^\.\./[A-Za-z0-9._-]+$') {
+        throw "Kickoff ${promptPath}: worktree '$worktree' must match '^\.\./[A-Za-z0-9._-]+\$' (single sibling segment)."
+    }
+
+    # Resolve relative to AgentForgeRoot — '..' walks up to the parent.
+    $combined    = Join-Path $AgentForgeRoot $worktree
+    $absWorktree = [System.IO.Path]::GetFullPath($combined)
+
+    return @{
+        Branch      = $branch
+        Worktree    = $worktree
+        AbsWorktree = $absWorktree
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Cross-worktree directory junctions
 # ---------------------------------------------------------------------------
@@ -87,12 +147,64 @@ function _Resolve-WorktreePath {
 # disk; edits in any worktree are immediately visible everywhere; nothing
 # leaks to public mirrors; no manual sync.
 #
-# WARNING: before `git worktree remove <worktree>`, remove BOTH junctions
-# first to avoid any risk of recursing into the canonical content:
-#   cmd /c rmdir <worktree>\.gauntlet
-#   cmd /c rmdir <worktree>\.claude
-# (non-recursive rmdir on a junction removes only the junction, not the
-# target — but `git worktree remove` may still recurse, so unjunction first.)
+# Teardown: don't `rmdir` junctions by hand — use Finish-<Name>, which
+# verifies junction identity (LinkType + canonical target match) before
+# removal so you can never accidentally delete the canonical content
+# under the main checkout.
+
+# Returns $true if $Path exists and is a Junction or SymbolicLink.
+# Returns $false for missing paths, real directories, or files.
+function _Test-Junction {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $false }
+    return ($item.LinkType -eq 'Junction' -or $item.LinkType -eq 'SymbolicLink')
+}
+
+# Removes the junction at $Target only if it points to $ExpectedSource.
+# Canonicalises both sides via GetFullPath + ToLowerInvariant before
+# comparing — Windows paths are case-insensitive, and forcing lowercase
+# makes the invariant resilient to anyone later swapping the comparison
+# operator. Throws on any mismatch; the caller's destructive flow halts
+# rather than silently deleting the wrong link.
+function _Remove-Junction {
+    param(
+        [Parameter(Mandatory=$true)][string]$Target,
+        [Parameter(Mandatory=$true)][string]$ExpectedSource
+    )
+
+    if (-not (Test-Path -LiteralPath $Target)) {
+        return  # Already gone, nothing to do.
+    }
+
+    $item = Get-Item -LiteralPath $Target -Force -ErrorAction Stop
+
+    if ($item.LinkType -ne 'Junction' -and $item.LinkType -ne 'SymbolicLink') {
+        throw "Refusing: $Target is not a junction (LinkType=$($item.LinkType))."
+    }
+
+    # Junction Target ships as an array on PS 5+.
+    $actual = @($item.Target)[0]
+    if ([string]::IsNullOrWhiteSpace($actual)) {
+        throw "Refusing: $Target is a link with no resolvable target."
+    }
+
+    $actualFull   = [System.IO.Path]::GetFullPath($actual).ToLowerInvariant()
+    $expectedFull = [System.IO.Path]::GetFullPath($ExpectedSource).ToLowerInvariant()
+
+    if ($actualFull -ne $expectedFull) {
+        throw "Refusing: $Target points to '$actualFull', not the expected canonical source '$expectedFull'."
+    }
+
+    # Use [System.IO.Directory]::Delete on the reparse point. This calls
+    # the Win32 RemoveDirectory API, which removes the junction's
+    # reparse point only — the link target is never followed or
+    # touched. PowerShell 5.1's Remove-Item prompts interactively on
+    # junctions in NonInteractive sessions even with -Force; this
+    # bypasses that by going through .NET directly.
+    [System.IO.Directory]::Delete($Target)
+}
 
 function _Ensure-Junction {
     param(
@@ -104,26 +216,50 @@ function _Ensure-Junction {
     # Sentinel-file check: if a known file is readable through $Target,
     # the junction is already in place.
     $sentinelPath = Join-Path $Target $Sentinel
-    if (Test-Path $sentinelPath) { return }
+    if (Test-Path -LiteralPath $sentinelPath) { return }
 
-    # Empty dir? Remove so junction can take its place.
-    if (Test-Path $Target) {
-        $isEmpty = -not (Get-ChildItem -Path $Target -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
-        if ($isEmpty) {
-            Remove-Item $Target -Force -ErrorAction SilentlyContinue
+    # Existing path — figure out what's there and whether we can replace it.
+    if (Test-Path -LiteralPath $Target) {
+        if (_Test-Junction -Path $Target) {
+            # Stale junction (sentinel unreachable). Remove via the
+            # identity-checked helper before recreating. If the link
+            # points at something we don't own, _Remove-Junction will
+            # throw and abort the recreate.
+            try {
+                _Remove-Junction -Target $Target -ExpectedSource $Source
+            } catch {
+                Write-Error "Cannot recreate junction at ${Target}: $_"
+                return
+            }
         } else {
-            Write-Warning "Cannot create junction at ${Target} - path exists with content."
-            Write-Warning "Resolve manually: ensure ${Target} is empty or a junction to ${Source}."
-            return
+            $isEmpty = -not (Get-ChildItem -Path $Target -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($isEmpty) {
+                Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue
+            } else {
+                Write-Warning "Cannot create junction at ${Target} - path exists with content."
+                Write-Warning "Resolve manually: ensure ${Target} is empty or a junction to ${Source}."
+                return
+            }
         }
     }
 
-    # Create directory junction (no admin needed). cmd /c is the simplest path.
-    & cmd /c mklink /J "`"$Target`"" "`"$Source`"" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to junction ${Target} -> ${Source} via mklink /J (exit $LASTEXITCODE)"
+    # Create directory junction (no admin needed). Use the native
+    # New-Item cmdlet — no cmd.exe shell-out, no quoting hazards.
+    try {
+        New-Item -ItemType Junction -Path $Target -Target $Source -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Error "Failed to junction ${Target} -> ${Source}: $_"
         return
     }
+
+    # Verify the junction is reachable via the sentinel before declaring
+    # success. If the link was created but the sentinel still isn't
+    # readable, something is wrong with the source — bail loudly.
+    if (-not (Test-Path -LiteralPath $sentinelPath)) {
+        Write-Error "Junction created at ${Target} but sentinel ${Sentinel} is not reachable. Manual fallback: open a real cmd.exe (Win+R -> cmd) and run 'mklink /J `"${Target}`" `"${Source}`"'."
+        return
+    }
+
     Write-Host "Junctioned ${Target} -> ${Source}" -ForegroundColor Cyan
 }
 
@@ -154,40 +290,123 @@ function _Get-WorkspaceFile {
 
 function _Ensure-WorkspaceFile {
     param([string]$Path)
-    if (Test-Path $Path) { return }
+    if (Test-Path -LiteralPath $Path) { return }
     $initial = [PSCustomObject]@{
         folders = @(
             [PSCustomObject]@{ path = $AgentForgeRoot }
         )
         settings = [PSCustomObject]@{}
     }
-    $initial | ConvertTo-Json -Depth 10 | Set-Content $Path -Encoding UTF8
+    $initial | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding UTF8
     Write-Host "Created Cursor workspace at $Path" -ForegroundColor Cyan
+}
+
+# Atomic write of the workspace JSON file:
+#  1. Validate input file (if it exists) is parseable JSON. Refuse if not
+#     — never overwrite a corrupted file with more corruption.
+#  2. Snapshot to .bak (overwriting any prior backup).
+#  3. Serialize new content to a temp file in the same directory.
+#  4. Validate the temp file parses as JSON.
+#  5. Move-Item -Force (atomic rename within the same filesystem).
+#  6. On any failure between 2 and 5: tempfile is cleaned up; original is
+#     intact; .bak is the rollback.
+function _Write-WorkspaceFileAtomic {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)]$Content
+    )
+
+    $parent = [System.IO.Path]::GetDirectoryName($Path)
+    if ([string]::IsNullOrEmpty($parent) -or -not (Test-Path -LiteralPath $parent)) {
+        throw "Workspace parent directory does not exist: $parent"
+    }
+
+    if (Test-Path -LiteralPath $Path) {
+        try {
+            Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json | Out-Null
+        } catch {
+            throw "Refusing to overwrite $Path - file is not valid JSON. Fix or delete it manually."
+        }
+        # Take a backup snapshot. -Force overwrites any prior .bak.
+        Copy-Item -LiteralPath $Path -Destination ($Path + '.bak') -Force -ErrorAction Stop
+    }
+
+    $tmp = Join-Path $parent ([System.IO.Path]::GetRandomFileName())
+    try {
+        $json = $Content | ConvertTo-Json -Depth 10
+        Set-Content -LiteralPath $tmp -Value $json -Encoding UTF8 -ErrorAction Stop
+
+        # Validate temp file parses as JSON before promoting it.
+        try {
+            Get-Content -Raw -LiteralPath $tmp | ConvertFrom-Json | Out-Null
+        } catch {
+            throw "Generated workspace JSON failed validation: $_"
+        }
+
+        Move-Item -LiteralPath $tmp -Destination $Path -Force -ErrorAction Stop
+        $tmp = $null  # Successfully moved; nothing to clean up.
+    } finally {
+        if ($null -ne $tmp -and (Test-Path -LiteralPath $tmp)) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function _Add-WorkspaceFolder {
     param([string]$WorkspacePath, [string]$FolderPath)
     _Ensure-WorkspaceFile -Path $WorkspacePath
-    $ws = Get-Content -Raw $WorkspacePath | ConvertFrom-Json
+    $ws = Get-Content -Raw -LiteralPath $WorkspacePath | ConvertFrom-Json
     if (-not $ws.folders) {
         $ws | Add-Member -NotePropertyName folders -NotePropertyValue @() -Force
     }
-    $existing = @($ws.folders | Where-Object { $_.path -eq $FolderPath })
+
+    # Case-insensitive, slash-variant-tolerant dedup. Prevents a folder
+    # being added under both AgentForge-eval and AgentForge-eval/, or
+    # under both forward- and back-slash forms.
+    $fwdLower = ($FolderPath -replace '\\','/').ToLowerInvariant()
+    $bwdLower = ($FolderPath -replace '/','\').ToLowerInvariant()
+    $existing = @($ws.folders | Where-Object {
+        $p = ([string]$_.path).ToLowerInvariant()
+        $p -eq $fwdLower -or $p -eq $bwdLower
+    })
     if ($existing.Count -gt 0) { return }
+
     $ws.folders = @($ws.folders) + @([PSCustomObject]@{ path = $FolderPath })
-    $ws | ConvertTo-Json -Depth 10 | Set-Content $WorkspacePath -Encoding UTF8
+    _Write-WorkspaceFileAtomic -Path $WorkspacePath -Content $ws
     Write-Host "Added $FolderPath to Cursor workspace" -ForegroundColor Cyan
 }
 
+# Removes ALL entries matching the target path in either slash variant
+# (case-insensitive). Cleans up the historic dupes the launcher used to
+# create before the case-/slash-aware dedup was added to _Add-WorkspaceFolder.
+function _Remove-WorkspaceFolderAllVariants {
+    param([string]$WorkspacePath, [string]$FolderPath)
+    if (-not (Test-Path -LiteralPath $WorkspacePath)) { return }
+    $ws = Get-Content -Raw -LiteralPath $WorkspacePath | ConvertFrom-Json
+    if (-not $ws.folders) { return }
+
+    $fwdLower = ($FolderPath -replace '\\','/').ToLowerInvariant()
+    $bwdLower = ($FolderPath -replace '/','\').ToLowerInvariant()
+
+    $newFolders = @($ws.folders | Where-Object {
+        $p = ([string]$_.path).ToLowerInvariant()
+        $p -ne $fwdLower -and $p -ne $bwdLower
+    })
+
+    # Short-circuit if nothing matched — no point rewriting the file.
+    if ($newFolders.Count -eq @($ws.folders).Count) { return }
+
+    $ws.folders = $newFolders
+    _Write-WorkspaceFileAtomic -Path $WorkspacePath -Content $ws
+    Write-Host "Removed $FolderPath (all variants) from Cursor workspace" -ForegroundColor Cyan
+}
+
+# Backward-compat alias for the simpler exact-match remover. Delegates
+# to the all-variants version since stale callers should benefit from
+# the slash-tolerant matching anyway.
 function _Remove-WorkspaceFolder {
     param([string]$WorkspacePath, [string]$FolderPath)
-    if (-not (Test-Path $WorkspacePath)) { return }
-    $ws = Get-Content -Raw $WorkspacePath | ConvertFrom-Json
-    if (-not $ws.folders) { return }
-    $newFolders = @($ws.folders | Where-Object { $_.path -ne $FolderPath })
-    $ws.folders = $newFolders
-    $ws | ConvertTo-Json -Depth 10 | Set-Content $WorkspacePath -Encoding UTF8
-    Write-Host "Removed $FolderPath from Cursor workspace" -ForegroundColor Cyan
+    _Remove-WorkspaceFolderAllVariants -WorkspacePath $WorkspacePath -FolderPath $FolderPath
 }
 
 # ---------------------------------------------------------------------------
@@ -204,7 +423,7 @@ function _Set-TerminalTitle {
 }
 
 # ---------------------------------------------------------------------------
-# Public API: Start-Lead / Stop-Lead
+# Public API: Start-Lead / Stop-Lead / Finish-Lead
 # ---------------------------------------------------------------------------
 
 function Start-Lead {
@@ -258,21 +477,17 @@ function Start-Lead {
         return
     }
 
+    try {
+        $kickoff = _Parse-Kickoff -Name $Name
+    } catch {
+        Write-Error $_
+        return
+    }
+    $branch     = $kickoff.Branch
+    $worktree   = $kickoff.AbsWorktree
     $promptPath = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff\$Name.md"
-    if (-not (Test-Path $promptPath)) {
-        Write-Error "Kickoff prompt not found at $promptPath. Create it before launching this lead."
-        return
-    }
 
-    $branch      = _Get-KickoffField -Field "Branch"   -PromptPath $promptPath
-    $worktreeRaw = _Get-KickoffField -Field "Worktree" -PromptPath $promptPath
-    if (-not $branch -or -not $worktreeRaw) {
-        Write-Error "Kickoff $promptPath is missing **Branch:** or **Worktree:** metadata line."
-        return
-    }
-    $worktree = _Resolve-WorktreePath -Raw $worktreeRaw
-
-    if (-not (Test-Path $worktree)) {
+    if (-not (Test-Path -LiteralPath $worktree)) {
         Write-Host "Creating worktree at $worktree on branch $branch..." -ForegroundColor Cyan
         git -C $AgentForgeRoot rev-parse --verify $branch *>$null
         if ($LASTEXITCODE -eq 0) {
@@ -298,7 +513,7 @@ function Start-Lead {
     # back to the wrong identity.
     _Ensure-ClaudeJunction -WorktreePath $worktree
 
-    # Add to Cursor workspace (idempotent).
+    # Add to Cursor workspace (idempotent, slash-/case-tolerant).
     $workspacePath = _Get-WorkspaceFile
     _Add-WorkspaceFolder -WorkspacePath $workspacePath -FolderPath $worktree
 
@@ -315,7 +530,7 @@ function Start-Lead {
     # still works for ad-hoc lead names.
     $agentId = $Name
     $agentFile = Join-Path $AgentForgeRoot ".claude\agents\$Name.md"
-    if (-not (Test-Path $agentFile)) {
+    if (-not (Test-Path -LiteralPath $agentFile)) {
         Write-Warning "No agent file at .claude\agents\$Name.md - falling back to gauntlet-team-lead."
         $agentId = "gauntlet-team-lead"
     }
@@ -327,7 +542,7 @@ function Start-Lead {
     $claudeArgs = @("--agent", $agentId, "--teammate-mode", "in-process")
     if ($Fork) { $claudeArgs += "--fork-session" }
 
-    $prompt = Get-Content -Raw $promptPath
+    $prompt = Get-Content -Raw -LiteralPath $promptPath
     Push-Location $worktree
     try {
         if ($Continue) {
@@ -361,24 +576,299 @@ function Start-Lead {
 function Stop-Lead {
     param([Parameter(Mandatory=$true)][string]$Name)
 
-    $promptPath = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff\$Name.md"
-    if (-not (Test-Path $promptPath)) {
-        Write-Error "Kickoff prompt not found at $promptPath. Cannot determine which worktree to untrack."
+    try {
+        $kickoff = _Parse-Kickoff -Name $Name
+    } catch {
+        Write-Error $_
         return
     }
-    $worktreeRaw = _Get-KickoffField -Field "Worktree" -PromptPath $promptPath
-    if (-not $worktreeRaw) {
-        Write-Error "Kickoff $promptPath is missing **Worktree:** metadata line."
-        return
-    }
-    $worktree = _Resolve-WorktreePath -Raw $worktreeRaw
+    $worktree = $kickoff.AbsWorktree
 
     $workspacePath = _Get-WorkspaceFile
-    _Remove-WorkspaceFolder -WorkspacePath $workspacePath -FolderPath $worktree
+    _Remove-WorkspaceFolderAllVariants -WorkspacePath $workspacePath -FolderPath $worktree
 
     _Set-TerminalTitle -Title "AgentForge"
 
-    Write-Host "Stopped tracking $Name. Worktree at $worktree is untouched — run Start-$((Get-Culture).TextInfo.ToTitleCase($Name.ToLower())) to resume." -ForegroundColor Green
+    Write-Host "Stopped tracking $Name. Worktree at $worktree is untouched - run Start-$((Get-Culture).TextInfo.ToTitleCase($Name.ToLower())) to resume." -ForegroundColor Green
+}
+
+function Finish-Lead {
+    <#
+    .SYNOPSIS
+    Safe teardown of a lead's worktree, junctions, and branch.
+
+    .DESCRIPTION
+    Walks the safety checklist in order. Each step refuses with an
+    explicit error and skips subsequent destructive steps if any prior
+    step failed. The full checklist:
+
+      1. Resolve target via _Parse-Kickoff (validated branch + abs worktree).
+      2. Refuse if standing inside the worktree being torn down.
+      3. Verify path is a registered git worktree (not the main checkout).
+      4. Verify worktree is clean (no uncommitted/untracked content).
+      5. Fetch origin (unless -NoFetch) so merge/push checks see fresh state.
+      6. Verify branch is merged into origin/master (override with -Force).
+      7. Verify branch is fully pushed to its upstream / origin (override
+         with -Force; warns if branch has no upstream and no origin/<branch>).
+      8. Verify .gauntlet and .claude inside the worktree are junctions
+         (not real directories — that footgun has no -Force override).
+      9. Remove the two junctions via identity-checked _Remove-Junction.
+     10. git worktree remove (adds --force only if -Force was passed and
+         all prior safety checks have already passed).
+     11. git branch -d (or -D with -Force); skipped with -KeepBranch.
+     12. Atomic edit of the Cursor workspace JSON, dropping all variants.
+     13. Reset terminal title.
+     14. Print a one-block summary.
+
+    .PARAMETER Name
+    Lead identifier (aria, bram, cleo, ...).
+
+    .PARAMETER Force
+    Allow unmerged branch, unpushed commits, git branch -D, and
+    git worktree remove --force. Does NOT bypass the junction-not-real-dir
+    refusal; that check is structural.
+
+    .PARAMETER KeepBranch
+    Tear down worktree + junctions + workspace entry, but preserve the
+    branch.
+
+    .PARAMETER NoFetch
+    Skip the git fetch step (offline use). Without this, default behavior
+    fetches before the merged/pushed checks because stale origin/master
+    is the failure mode this tool is designed to prevent.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [switch]$Force,
+        [switch]$KeepBranch,
+        [switch]$NoFetch
+    )
+
+    $errored = $false
+
+    # --- Step 1: resolve target ---------------------------------------
+    try {
+        $kickoff = _Parse-Kickoff -Name $Name
+    } catch {
+        Write-Error "Step 1 (resolve kickoff): $_"
+        return
+    }
+    $branch   = $kickoff.Branch
+    $worktree = $kickoff.AbsWorktree
+
+    # --- Step 2: refuse if standing inside the target worktree --------
+    if (-not $errored) {
+        $cwdToplevel = (& git -C $PWD rev-parse --show-toplevel 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $cwdToplevel) {
+            $cwdCanon  = [System.IO.Path]::GetFullPath($cwdToplevel.Trim()).TrimEnd('\','/').ToLowerInvariant()
+            $treeCanon = [System.IO.Path]::GetFullPath($worktree).TrimEnd('\','/').ToLowerInvariant()
+            if ($cwdCanon -eq $treeCanon) {
+                Write-Error "Step 2: refusing to teardown $worktree from inside it. cd to the main checkout first ($AgentForgeRoot)."
+                $errored = $true
+            }
+        }
+    }
+
+    # --- Step 3: verify worktree is registered (and not the main checkout) ---
+    if (-not $errored) {
+        $wtListLines = & git -C $AgentForgeRoot worktree list --porcelain 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Step 3: 'git worktree list --porcelain' failed."
+            $errored = $true
+        } else {
+            $registered = @()
+            foreach ($line in $wtListLines) {
+                if ($line -match '^worktree\s+(.+)$') {
+                    $registered += [System.IO.Path]::GetFullPath($Matches[1]).TrimEnd('\','/').ToLowerInvariant()
+                }
+            }
+            $treeCanon = [System.IO.Path]::GetFullPath($worktree).TrimEnd('\','/').ToLowerInvariant()
+            $mainCanon = [System.IO.Path]::GetFullPath($AgentForgeRoot).TrimEnd('\','/').ToLowerInvariant()
+            if ($registered -notcontains $treeCanon) {
+                Write-Error "Step 3: $worktree is not a registered git worktree (per 'git worktree list')."
+                $errored = $true
+            } elseif ($treeCanon -eq $mainCanon) {
+                Write-Error "Step 3: $worktree is the main checkout. Refusing to remove."
+                $errored = $true
+            }
+        }
+    }
+
+    # --- Step 4: verify worktree is clean -----------------------------
+    if (-not $errored) {
+        if (Test-Path -LiteralPath $worktree) {
+            $statusOut = & git -C $worktree status --porcelain 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Step 4: 'git status --porcelain' failed in $worktree."
+                $errored = $true
+            } elseif ($statusOut) {
+                Write-Error "Step 4: worktree $worktree is not clean. Commit, stash, or reset before finishing. Output:`n$statusOut"
+                $errored = $true
+            }
+        } else {
+            Write-Error "Step 4: worktree path $worktree does not exist on disk."
+            $errored = $true
+        }
+    }
+
+    # --- Step 5: fetch origin ----------------------------------------
+    if (-not $errored -and -not $NoFetch) {
+        & git -C $AgentForgeRoot fetch origin --quiet 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Step 5: 'git fetch origin' failed. Use -NoFetch if you are offline (and accept that origin/master may be stale)."
+            $errored = $true
+        }
+    }
+
+    # --- Step 6: verify branch merged into origin/master --------------
+    if (-not $errored) {
+        $branchSha = (& git -C $AgentForgeRoot rev-parse $branch 2>$null)
+        $masterSha = (& git -C $AgentForgeRoot rev-parse origin/master 2>$null)
+        & git -C $AgentForgeRoot merge-base --is-ancestor $branch origin/master 2>$null
+        $isMerged = ($LASTEXITCODE -eq 0)
+        if (-not $isMerged) {
+            if ($Force) {
+                Write-Warning "Step 6: $branch ($branchSha) is NOT merged into origin/master ($masterSha). Proceeding because -Force was passed."
+            } else {
+                Write-Error "Step 6: $branch ($branchSha) is NOT merged into origin/master ($masterSha). Pass -Force to override."
+                $errored = $true
+            }
+        }
+    }
+
+    # --- Step 7: verify push state -----------------------------------
+    if (-not $errored) {
+        $upstream = & git -C $AgentForgeRoot rev-parse --abbrev-ref --symbolic-full-name "$branch@{u}" 2>$null
+        $hasUpstream = ($LASTEXITCODE -eq 0 -and $upstream)
+
+        if ($hasUpstream) {
+            $unpushed = & git -C $AgentForgeRoot log "$upstream..$branch" --oneline 2>$null
+            if ($unpushed) {
+                if ($Force) {
+                    Write-Warning "Step 7: $branch has unpushed commits relative to $upstream. Proceeding because -Force was passed.`n$unpushed"
+                } else {
+                    Write-Error "Step 7: $branch has unpushed commits relative to $upstream. Pass -Force to override.`n$unpushed"
+                    $errored = $true
+                }
+            }
+        } else {
+            # No upstream — try origin/<branch> as a fallback.
+            & git -C $AgentForgeRoot rev-parse --verify "origin/$branch" *>$null
+            if ($LASTEXITCODE -eq 0) {
+                $unpushed = & git -C $AgentForgeRoot log "origin/$branch..$branch" --oneline 2>$null
+                if ($unpushed) {
+                    if ($Force) {
+                        Write-Warning "Step 7: $branch has unpushed commits relative to origin/$branch. Proceeding because -Force was passed.`n$unpushed"
+                    } else {
+                        Write-Error "Step 7: $branch has unpushed commits relative to origin/$branch. Pass -Force to override.`n$unpushed"
+                        $errored = $true
+                    }
+                }
+            } else {
+                Write-Warning "Step 7: $branch has no upstream and no origin/$branch ref; treating as local-only. Step 6 (merged-into-master) is the gate."
+            }
+        }
+    }
+
+    # --- Step 8: verify junctions are junctions (not real dirs) -------
+    $gauntletPath = Join-Path $worktree ".gauntlet"
+    $claudePath   = Join-Path $worktree ".claude"
+    if (-not $errored) {
+        if (Test-Path -LiteralPath $gauntletPath) {
+            if (-not (_Test-Junction -Path $gauntletPath)) {
+                Write-Error "Step 8: $gauntletPath is a real directory, not a junction. Refusing (no -Force override - that's the footgun this tool guards against). Investigate and remove manually if appropriate."
+                $errored = $true
+            }
+        }
+        if (-not $errored -and (Test-Path -LiteralPath $claudePath)) {
+            if (-not (_Test-Junction -Path $claudePath)) {
+                Write-Error "Step 8: $claudePath is a real directory, not a junction. Refusing (no -Force override - that's the footgun this tool guards against). Investigate and remove manually if appropriate."
+                $errored = $true
+            }
+        }
+    }
+
+    # --- Step 9: remove junctions (identity-checked) ------------------
+    if (-not $errored) {
+        $gauntletSrc = Join-Path $AgentForgeRoot ".gauntlet"
+        $claudeSrc   = Join-Path $AgentForgeRoot ".claude"
+        try {
+            _Remove-Junction -Target $gauntletPath -ExpectedSource $gauntletSrc
+        } catch {
+            Write-Error "Step 9 (.gauntlet): $_"
+            $errored = $true
+        }
+        if (-not $errored) {
+            try {
+                _Remove-Junction -Target $claudePath -ExpectedSource $claudeSrc
+            } catch {
+                Write-Error "Step 9 (.claude): $_"
+                $errored = $true
+            }
+        }
+    }
+
+    # --- Step 10: git worktree remove --------------------------------
+    if (-not $errored) {
+        if ($Force) {
+            & git -C $AgentForgeRoot worktree remove --force $worktree
+        } else {
+            & git -C $AgentForgeRoot worktree remove $worktree
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Step 10: 'git worktree remove' failed (exit $LASTEXITCODE)."
+            $errored = $true
+        }
+    }
+
+    # --- Step 11: branch delete --------------------------------------
+    $branchDeleted = $false
+    if (-not $errored -and -not $KeepBranch) {
+        if ($Force) {
+            & git -C $AgentForgeRoot branch -D $branch
+        } else {
+            & git -C $AgentForgeRoot branch -d $branch
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Step 11: 'git branch -d $branch' failed (exit $LASTEXITCODE). Worktree removed; branch preserved."
+            $errored = $true
+        } else {
+            $branchDeleted = $true
+        }
+    }
+
+    # --- Step 12: workspace JSON edit (always attempt) ----------------
+    # Best-effort even on prior errors so the file doesn't keep stale
+    # entries pointing at a worktree we already cleaned up.
+    $workspacePath = _Get-WorkspaceFile
+    try {
+        _Remove-WorkspaceFolderAllVariants -WorkspacePath $workspacePath -FolderPath $worktree
+    } catch {
+        Write-Error "Step 12 (workspace JSON edit): $_"
+    }
+
+    # --- Step 13: terminal title --------------------------------------
+    _Set-TerminalTitle -Title "AgentForge"
+
+    # --- Step 14: summary --------------------------------------------
+    Write-Host ""
+    Write-Host "=== Finish-Lead summary ($Name) ===" -ForegroundColor Cyan
+    Write-Host ("  Worktree:        {0}" -f $worktree)
+    Write-Host ("  Branch:          {0}" -f $branch)
+    if ($errored) {
+        Write-Host "  Status:          INCOMPLETE (see errors above)" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Junctions:       removed (.gauntlet, .claude)"
+        Write-Host "  Worktree state:  removed via 'git worktree remove'"
+        if ($KeepBranch) {
+            Write-Host "  Branch state:    preserved (-KeepBranch)"
+        } elseif ($branchDeleted) {
+            Write-Host ("  Branch state:    deleted (git branch {0} {1})" -f ($(if ($Force) {'-D'} else {'-d'})), $branch)
+        }
+        Write-Host "  Workspace JSON:  cleaned up (all path variants)"
+        Write-Host "  Status:          OK" -ForegroundColor Green
+    }
+    Write-Host ""
 }
 
 # ---------------------------------------------------------------------------
@@ -387,7 +877,7 @@ function Stop-Lead {
 
 function Get-Leads {
     $kickoffDir = Join-Path $AgentForgeRoot ".gauntlet\week2\kickoff"
-    if (-not (Test-Path $kickoffDir)) {
+    if (-not (Test-Path -LiteralPath $kickoffDir)) {
         Write-Error "No kickoff directory at $kickoffDir"
         return
     }
@@ -399,7 +889,7 @@ function Get-Leads {
             Lead     = $_.BaseName
             Branch   = $branch
             Worktree = $worktreeRaw
-            Exists   = if ($worktree) { Test-Path $worktree } else { $false }
+            Exists   = if ($worktree) { Test-Path -LiteralPath $worktree } else { $false }
         }
     } | Format-Table -AutoSize
 }
@@ -413,3 +903,8 @@ function Start-Cleo { Start-Lead -Name "cleo" @args }
 function Stop-Aria { Stop-Lead -Name "aria" }
 function Stop-Bram { Stop-Lead -Name "bram" }
 function Stop-Cleo { Stop-Lead -Name "cleo" }
+
+# @args splat forwards -Force / -KeepBranch / -NoFetch to Finish-Lead.
+function Finish-Aria { Finish-Lead -Name "aria" @args }
+function Finish-Bram { Finish-Lead -Name "bram" @args }
+function Finish-Cleo { Finish-Lead -Name "cleo" @args }
