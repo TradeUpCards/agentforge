@@ -36,6 +36,7 @@ use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\DocumentSavedSubscriber;
 use OpenEMR\Modules\ClinicalCopilot\Events\DocumentCreatedEvent;
 use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
 use OpenEMR\Modules\ClinicalCopilot\Service\DocumentPathResolver;
+use OpenEMR\Modules\ClinicalCopilot\Service\RoundtripService;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -355,9 +356,18 @@ final class DocumentSavedSubscriberTest extends TestCase
         $pathResolver = $this->createMock(DocumentPathResolver::class);
         $pathResolver->method('resolve')->willReturn('/fake/path/document.pdf');
 
+        // P3 IS_ACTIVE INVARIANT FIX moved markPriorAttemptsInactive() to
+        // step 5 (before file I/O) — it's invoked BEFORE persistExtractionRow.
+        // The default RoundtripService constructed by the parent class would
+        // hit QueryUtils on a real DB; in unit tests we inject a mock whose
+        // markPriorAttemptsInactive() and roundtrip() methods are no-ops.
+        /** @var RoundtripService&MockObject $roundtripService */
+        $roundtripService = $this->createMock(RoundtripService::class);
+
         $subscriber = new TestableDocumentSavedSubscriber(
             $agentClient,
             new NullLogger(),
+            roundtripService: $roundtripService,
             pathResolver: $pathResolver,
         );
         $subscriber->categoryNameToReturn    = 'Lab Result (auto-extract)';

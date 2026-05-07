@@ -63,8 +63,13 @@ use Throwable;
 /**
  * Persists derived facts from a co_pilot_extractions row into OpenEMR's
  * clinical tables.  Idempotent via cross-attempt natural-key lookup.
+ *
+ * Not declared `final` so DocumentSavedSubscriber unit tests can supply
+ * a mocked instance via PHPUnit createMock() — no DB needed for the
+ * subscriber-level event-flow assertions.  Production callers depend
+ * on the public API only.
  */
-final class RoundtripService
+class RoundtripService
 {
     private readonly LoggerInterface $logger;
 
