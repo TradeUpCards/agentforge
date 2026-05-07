@@ -1,0 +1,379 @@
+/**
+ * HITL Review Modal — scoped styles.
+ *
+ * All selectors are prefixed `.hitl-` to avoid collisions with
+ * chart-bootstrap.js / Bootstrap 4.6 global styles.
+ *
+ * Modal dimensions: modal-xl, 85vh height, 55/45 left/right split.
+ *
+ * @package   OpenEMR
+ * @link      https://www.open-emr.org
+ * @author    AgentForge Team
+ * @copyright Copyright (c) 2026 AgentForge
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ */
+
+/* ---- Modal shell -------------------------------------------------------- */
+
+#hitl-review-modal .modal-dialog {
+    max-width: 90vw;
+    width: 90vw;
+}
+
+#hitl-review-modal .modal-content {
+    height: 85vh;
+    display: flex;
+    flex-direction: column;
+}
+
+#hitl-review-modal .modal-header {
+    flex-shrink: 0;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0.6rem 1rem;
+}
+
+#hitl-review-modal .modal-body {
+    flex: 1 1 0;
+    overflow: hidden;
+    padding: 0;
+}
+
+#hitl-review-modal .modal-footer {
+    flex-shrink: 0;
+    background: #f9fafb;
+    border-top: 1px solid #e5e7eb;
+    padding: 0.5rem 1rem;
+    min-height: 52px;
+}
+
+/* ---- Title bar metadata chips ------------------------------------------- */
+
+.hitl-modal-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #111827;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    line-height: 1.4;
+}
+
+.hitl-chip {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 7px;
+    border-radius: 10px;
+    background: #e5e7eb;
+    color: #374151;
+    letter-spacing: 0.2px;
+}
+
+.hitl-chip--doc-type {
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+.hitl-chip--attempt {
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
+.hitl-chip--model {
+    background: #d1fae5;
+    color: #065f46;
+    font-family: monospace;
+    font-size: 10px;
+}
+
+/* ---- Two-pane body layout ----------------------------------------------- */
+
+.hitl-body {
+    display: flex;
+    height: 100%;
+    overflow: hidden;
+}
+
+.hitl-pane-left {
+    width: 55%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border-right: 1px solid #e5e7eb;
+    background: #1f2937;
+    position: relative;
+}
+
+.hitl-pane-right {
+    width: 45%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #ffffff;
+    padding: 12px;
+}
+
+/* ---- PDF canvas + SVG overlay ------------------------------------------- */
+
+.hitl-pdf-page-wrap {
+    position: relative;
+    display: block;
+    margin: 0 auto 8px;
+    /* width/height set dynamically by hitl-review.js */
+}
+
+.hitl-pdf-canvas {
+    display: block;
+}
+
+.hitl-pdf-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none; /* SVG itself transparent; rects opt-in */
+    overflow: visible;
+}
+
+.hitl-pdf-overlay rect {
+    pointer-events: auto;
+    cursor: pointer;
+    fill: transparent;
+    transition: fill 0.15s ease;
+}
+
+.hitl-pdf-overlay rect:hover,
+.hitl-pdf-overlay rect.is-highlighted {
+    fill: rgba(255, 255, 0, 0.18);
+}
+
+/* Bbox stroke colors per spec:
+   verified  → green-600  #16a34a  2px
+   stripped  → orange-600 #ea580c  2px
+   uncited   → gray-400   #9ca3af  1px
+*/
+.hitl-pdf-overlay rect[data-bbox-status="verified"] {
+    stroke: #16a34a;
+    stroke-width: 2;
+}
+
+.hitl-pdf-overlay rect[data-bbox-status="stripped"] {
+    stroke: #ea580c;
+    stroke-width: 2;
+}
+
+.hitl-pdf-overlay rect[data-bbox-status="uncited"] {
+    stroke: #9ca3af;
+    stroke-width: 1;
+}
+
+/* Loading state for the left pane */
+.hitl-pdf-loading {
+    color: #9ca3af;
+    font-size: 13px;
+    text-align: center;
+    padding: 32px 16px;
+}
+
+.hitl-pdf-error {
+    color: #dc2626;
+    font-size: 13px;
+    text-align: center;
+    padding: 32px 16px;
+    background: #fef2f2;
+    border-radius: 4px;
+    margin: 16px;
+}
+
+/* ---- Right pane — field list -------------------------------------------- */
+
+.hitl-section-heading {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #374151;
+    margin: 12px 0 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.hitl-section-heading:first-child {
+    margin-top: 0;
+}
+
+.hitl-count-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 10px;
+    min-width: 22px;
+    text-align: center;
+}
+
+.hitl-count-badge--captured {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.hitl-count-badge--missed {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.hitl-count-badge--possibly {
+    background: #e5e7eb;
+    color: #374151;
+}
+
+/* ---- Field rows --------------------------------------------------------- */
+
+.hitl-field-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 5px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    margin-bottom: 2px;
+    font-size: 13px;
+    line-height: 1.4;
+    transition: background 0.1s ease, border-color 0.1s ease;
+}
+
+.hitl-field-row:hover {
+    background: #f3f4f6;
+    border-color: #e5e7eb;
+}
+
+.hitl-field-row.is-highlighted {
+    background: #fef9c3;
+    border-color: #fde68a;
+}
+
+.hitl-field-path {
+    flex: 1 1 auto;
+    font-family: monospace;
+    font-size: 12px;
+    color: #1f2937;
+    word-break: break-all;
+}
+
+.hitl-field-value {
+    flex: 0 0 auto;
+    max-width: 160px;
+    font-size: 12px;
+    color: #374151;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hitl-reason {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: #9ca3af;
+    font-style: italic;
+    max-width: 120px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Block ID badge — clickable, matches Bootstrap badge-secondary shape */
+.hitl-blk-badge {
+    display: inline-block;
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: #e5e7eb;
+    color: #374151;
+    font-family: monospace;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.hitl-blk-badge:hover {
+    background: #d1d5db;
+}
+
+.hitl-blk-badge--verified {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.hitl-blk-badge--stripped {
+    background: #ffedd5;
+    color: #9a3412;
+}
+
+.hitl-blk-badge--null {
+    background: #fee2e2;
+    color: #7f1d1d;
+    cursor: default;
+}
+
+/* Possibly-missed block rows */
+.hitl-block-snippet {
+    font-size: 12px;
+    color: #6b7280;
+    font-family: monospace;
+    flex: 1 1 auto;
+    word-break: break-all;
+    margin-left: 4px;
+}
+
+/* ---- Footer actions ----------------------------------------------------- */
+
+.hitl-footer-msg {
+    font-size: 12px;
+    color: #6b7280;
+    margin-right: auto;
+}
+
+.hitl-footer-msg--error {
+    color: #dc2626;
+    font-weight: 500;
+}
+
+.hitl-footer-msg--success {
+    color: #059669;
+    font-weight: 500;
+}
+
+/* Spinner inline with button text */
+.hitl-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #e5e7eb;
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: hitl-spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 5px;
+}
+
+@keyframes hitl-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Empty-state placeholder inside section */
+.hitl-empty-section {
+    font-size: 12px;
+    color: #9ca3af;
+    padding: 4px 6px;
+    font-style: italic;
+}
+
+/* Divider between sections */
+.hitl-section-divider {
+    border: none;
+    border-top: 1px solid #e5e7eb;
+    margin: 10px 0;
+}

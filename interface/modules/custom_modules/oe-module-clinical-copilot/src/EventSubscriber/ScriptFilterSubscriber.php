@@ -55,9 +55,21 @@ final class ScriptFilterSubscriber implements EventSubscriberInterface
             return;
         }
         $scripts = $event->getScripts();
+
+        // Co-Pilot drawer + floating launcher (original).
         $scripts[] = OEGlobalsBag::getInstance()->getWebRoot()
             . self::MODULE_PUBLIC_PATH . '/chart-bootstrap.js'
             . $this->mtimeQuery('/chart-bootstrap.js');
+
+        // HITL extraction-quality banner for the Documents module preview pane.
+        // Injected on every authenticated page; the script self-suppresses when
+        // the Documents module preview area is not present, and stays silent
+        // (no banner, no console error) for pre-P3 documents that have no
+        // co_pilot_extracted_fields rows (GET returns 404).
+        $scripts[] = OEGlobalsBag::getInstance()->getWebRoot()
+            . self::MODULE_PUBLIC_PATH . '/hitl-banner.js'
+            . $this->mtimeQuery('/hitl-banner.js');
+
         $event->setScripts($scripts);
     }
 
