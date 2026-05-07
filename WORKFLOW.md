@@ -179,13 +179,33 @@ Both worktrees share the same `.git/` directory (refs, objects, hooks) but each 
 4. If `finish_<lead>` is unavailable for some reason (e.g., the launcher
    hasn't been sourced), the manual safe sequence is:
    ```bash
-   # On Windows in cmd.exe (NOT Git Bash recursive rm):
+   # On Windows, from cmd.exe (NOT Git Bash):
    cmd /c rmdir "C:\Dev\GauntletAI\AgentForge-<slug>\.gauntlet"
    cmd /c rmdir "C:\Dev\GauntletAI\AgentForge-<slug>\.claude"
    # rmdir on a junction (no /S) removes only the junction, not the target.
    # THEN, and only then:
    git worktree remove ../AgentForge-<slug>
    ```
+5. **Never use bash `rm` on a `.gauntlet/` or `.claude/` junction.** This
+   is a separate hazard from rule 2, and it has been proposed by AI
+   agents at least once already (2026-05-07 ~09:30 — Claude proposed
+   `rm <junction>` as part of orphan-worktree cleanup; the user caught
+   it before it ran). MSYS bash's `rm` can follow a Windows junction
+   and recursively delete the link target's content — wiping the
+   canonical `.gauntlet/` or `.claude/` in the main checkout. Same
+   data-loss class as `git worktree remove --force`. Safe alternatives,
+   in order of preference:
+   - The launcher's `_remove_junction` (bash) / `_Remove-Junction` (PS)
+     helpers — both verify `LinkType -eq 'Junction'` AND check that
+     the junction points at the canonical source before removing.
+   - `cmd /c rmdir "<path>"` — non-recursive removal of the reparse
+     point only.
+   - PowerShell `[System.IO.Directory]::Delete('<path>', $false)` —
+     same Win32 `RemoveDirectory` semantics; the `$false` is
+     "non-recursive."
+
+   `rm`, `rm -f`, `rm -rf` — all unsafe on these junctions. Use one
+   of the three above instead.
 
 ---
 
@@ -211,3 +231,4 @@ If you're a Claude / GPT / etc. session about to commit and push:
 4. **Don't merge the same branch via both UIs** — that's what caused the SHA divergence on 2026-05-02
 5. **Use a worktree** if another agent is in flight on the same repo (don't share working directories)
 6. **Never recommend `git worktree remove --force` on a lead worktree.** The launcher's `finish_<lead>` is the only safe teardown path because it un-junctions `.gauntlet/` and `.claude/` first. Direct `git worktree remove --force` recurses through junctions on Windows and wipes the canonical content in the main checkout (this happened 2026-05-07; `scripts/recover_from_jsonl.py` recovered it).
+7. **Never recommend bash `rm` on a `.gauntlet/` or `.claude/` junction** (or `rm -f`, `rm -rf`, etc.). MSYS bash's `rm` can follow Windows junctions and recursively delete the link target — same data-loss class as #6. Use `cmd /c rmdir <path>` (no `/S`) or PowerShell `[System.IO.Directory]::Delete(<path>, $false)`, both of which treat junctions as non-recursive reparse points. See the **DANGER** section above for the full guidance and a real near-miss (Claude proposed `rm <junction>` on 2026-05-07; the user caught it).
