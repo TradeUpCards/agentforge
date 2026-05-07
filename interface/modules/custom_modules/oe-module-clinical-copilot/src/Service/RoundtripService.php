@@ -8,7 +8,8 @@
  * Implements W2 PRD §1 + §43 requirements:
  *   - Derived facts persisted as OpenEMR records (PRD §1's "or OpenEMR records")
  *   - Round-trip traceable via co_pilot_fhir_links table (PRD §43)
- *   - No duplicate rows on retry (UNIQUE constraint on traceback table)
+ *   - No duplicate rows on retry (cross-attempt natural-key lookup via
+ *     co_pilot_extractions.doc_ref_id JOIN)
  *
  * SCOPE (this MR):
  *   - lab_pdf  → procedure_order + procedure_order_code + procedure_report
@@ -26,11 +27,14 @@
  *   - LOINC / RxNorm / SNOMED code lookups → text-only fields for now;
  *     code columns left null.
  *
- * IDEMPOTENCY:
- *   Every insert is preceded by a co_pilot_fhir_links lookup keyed on
- *   (co_pilot_extraction_id, target_table, source_block_id).  If a link
- *   row already exists, the insert is skipped.  Re-processing the same
- *   document never creates duplicate clinical rows.
+ * IDEMPOTENCY (P3 cross-attempt):
+ *   For each clinical row, this service computes a natural key via
+ *   FieldKeyExtractorFactory, then queries existing rows in the target
+ *   clinical table that were written from ANY prior extraction for the same
+ *   doc_ref_id (via JOIN through co_pilot_extractions.doc_ref_id).  If a
+ *   matching row is found it is updated in place; otherwise a new row is
+ *   inserted.  This replaces the P1/P2 approach of deduplicating only within
+ *   a single extraction via co_pilot_fhir_links.
  *
  * NO-PHI LOGGING:
  *   Logs only structural counters (n_results, n_allergies, n_medications,
@@ -50,20 +54,28 @@ namespace OpenEMR\Modules\ClinicalCopilot\Service;
 
 use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\SystemLogger;
+use OpenEMR\Modules\ClinicalCopilot\Service\FieldKeyExtractor\AllergyKeyExtractor;
+use OpenEMR\Modules\ClinicalCopilot\Service\FieldKeyExtractor\LabResultKeyExtractor;
+use OpenEMR\Modules\ClinicalCopilot\Service\FieldKeyExtractor\MedicationKeyExtractor;
 use Psr\Log\LoggerInterface;
 use Throwable;
 
 /**
  * Persists derived facts from a co_pilot_extractions row into OpenEMR's
- * clinical tables.  Idempotent via co_pilot_fhir_links.
+ * clinical tables.  Idempotent via cross-attempt natural-key lookup.
  */
 final class RoundtripService
 {
     private readonly LoggerInterface $logger;
 
-    public function __construct(?LoggerInterface $logger = null)
-    {
-        $this->logger = $logger ?? new SystemLogger();
+    private readonly FieldKeyExtractorFactory $extractorFactory;
+
+    public function __construct(
+        ?LoggerInterface $logger = null,
+        ?FieldKeyExtractorFactory $extractorFactory = null,
+    ) {
+        $this->logger           = $logger ?? new SystemLogger();
+        $this->extractorFactory = $extractorFactory ?? new FieldKeyExtractorFactory();
     }
 
     /**
@@ -74,10 +86,13 @@ final class RoundtripService
      * resource type do not cancel the others — best-effort partial
      * persistence with structured per-resource error logging.
      *
-     * @param int    $extractionId   co_pilot_extractions.id (FK target)
-     * @param int    $patientId      OpenEMR pid (NOT the sentinel)
-     * @param string $docType        "lab_pdf" | "intake_form"
-     * @param array  $extraction     Decoded extraction_json payload
+     * @param int                    $extractionId    co_pilot_extractions.id (FK target)
+     * @param int                    $patientId       OpenEMR pid (NOT the sentinel)
+     * @param string                 $docType         "lab_pdf" | "intake_form"
+     * @param array<string, mixed>   $extraction      Decoded extraction_json payload
+     * @param string                 $docRefId        OpenEMR documents.id (string)
+     * @param array<string, int>     $verifiedFieldMap field_path → ef_row_id from ExtractedFieldsWriter
+     * @param ExtractedFieldsWriter|null $fieldsWriter  For back-filling clinical pointers; null disables
      *
      * @return array{
      *     observations: int,
@@ -91,6 +106,9 @@ final class RoundtripService
         int $patientId,
         string $docType,
         array $extraction,
+        string $docRefId = '',
+        array $verifiedFieldMap = [],
+        ?ExtractedFieldsWriter $fieldsWriter = null,
     ): array {
         $counts = [
             'observations' => 0,
@@ -105,17 +123,26 @@ final class RoundtripService
                     $extractionId,
                     $patientId,
                     $extraction,
+                    $docRefId,
+                    $verifiedFieldMap,
+                    $fieldsWriter,
                 );
             } elseif ($docType === 'intake_form') {
                 $counts['allergies']   = $this->roundtripAllergies(
                     $extractionId,
                     $patientId,
                     (array) ($extraction['allergies'] ?? []),
+                    $docRefId,
+                    $verifiedFieldMap,
+                    $fieldsWriter,
                 );
                 $counts['medications'] = $this->roundtripMedications(
                     $extractionId,
                     $patientId,
                     (array) ($extraction['current_medications'] ?? []),
+                    $docRefId,
+                    $verifiedFieldMap,
+                    $fieldsWriter,
                 );
                 // family_history deferred — see file docblock
             }
@@ -152,8 +179,8 @@ final class RoundtripService
      *
      * Enforces the application-layer invariant that at most one row in
      * co_pilot_extractions has is_active = 1 per (doc_ref_id, doc_type).
-     * Called from DocumentSavedSubscriber immediately before persisting a new
-     * attempt row (initial extraction, auto-retry, or manual reprocess).
+     * Called from DocumentSavedSubscriber immediately BEFORE resolveFilePath
+     * and any agent call (not after), so the invariant holds even on error paths.
      *
      * For the very first attempt there are no prior rows, so the UPDATE
      * matches zero rows and is a no-op — this is safe and correct.
@@ -196,12 +223,22 @@ final class RoundtripService
      * PDF are grouped under one logical "order"), then ONE
      * procedure_result per LabReport.results[i].
      *
-     * @return int  number of procedure_result rows inserted
+     * Cross-attempt deduplication: for each result, we compute a natural key
+     * (doc_ref_id + ":lab:" + test_name) and check whether any procedure_result
+     * row linked to ANY prior extraction for the same doc_ref_id already exists.
+     * If so, we UPDATE the existing row; otherwise we INSERT a new one.
+     *
+     * @param array<string, int>     $verifiedFieldMap  field_path → ef_row_id
+     * @param ExtractedFieldsWriter|null $fieldsWriter
+     * @return int  number of procedure_result rows inserted or updated
      */
     private function roundtripLabReport(
         int $extractionId,
         int $patientId,
         array $extraction,
+        string $docRefId,
+        array $verifiedFieldMap,
+        ?ExtractedFieldsWriter $fieldsWriter,
     ): int {
         $results = (array) ($extraction['results'] ?? []);
         if ($results === []) {
@@ -269,20 +306,56 @@ final class RoundtripService
             );
         }
 
+        $labExtractor = new LabResultKeyExtractor();
+
         // Per-result inserts.  Each result_text comes from the extracted
         // test_name; the test_value goes into the `result` column.
-        $inserted = 0;
-        foreach ($results as $row) {
+        $upserted = 0;
+        foreach ($results as $idx => $row) {
             $row = (array) $row;
             $sourceBlockId = isset($row['source_block_id'])
                 ? (string) $row['source_block_id']
                 : null;
 
-            // Idempotency check — skip if this (extraction_id,
-            // procedure_result, source_block_id) already exists.
-            // We treat a per-result fingerprint as `block_id . ":" . test_name`
-            // because a single block can hold multiple results from the
-            // same table (e.g. all 5 lipid panel rows share a block_id).
+            // P3 cross-attempt deduplication via natural key.
+            $naturalKey = '';
+            if ($docRefId !== '') {
+                $naturalKey = $labExtractor->naturalKey($docRefId, $row);
+                $existingResultId = $this->findClinicalRowByNaturalKey(
+                    $docRefId,
+                    'procedure_result',
+                    $naturalKey,
+                );
+                if ($existingResultId !== null) {
+                    // Row already exists from a prior attempt — update in place.
+                    QueryUtils::sqlStatementThrowException(
+                        "UPDATE procedure_result
+                            SET units = ?, result = ?, `range` = ?,
+                                result_text = ?, result_status = 'final',
+                                abnormal = ?
+                          WHERE procedure_result_id = ?",
+                        [
+                            (string) ($row['unit'] ?? ''),
+                            (string) ($row['value'] ?? ''),
+                            (string) ($row['reference_range'] ?? ''),
+                            (string) ($row['test_name'] ?? ''),
+                            $this->mapAbnormal($row['abnormal'] ?? null),
+                            $existingResultId,
+                        ],
+                    );
+                    $this->updateFieldPointer(
+                        $fieldsWriter,
+                        $verifiedFieldMap,
+                        (string) $idx,
+                        'procedure_result',
+                        $existingResultId,
+                    );
+                    $upserted++;
+                    continue;
+                }
+            }
+
+            // Fallback P1/P2 idempotency: fingerprint within extraction.
             $fingerprint = $sourceBlockId !== null
                 ? $sourceBlockId . ':' . (string) ($row['test_name'] ?? '')
                 : null;
@@ -318,10 +391,27 @@ final class RoundtripService
                 sourceBlockId: $fingerprint,
                 resourceKind: 'observation',
             );
-            $inserted++;
+
+            if ($docRefId !== '' && $naturalKey !== '') {
+                $this->insertNaturalKeyIndex(
+                    $extractionId,
+                    'procedure_result',
+                    $resultId,
+                    $naturalKey,
+                );
+            }
+
+            $this->updateFieldPointer(
+                $fieldsWriter,
+                $verifiedFieldMap,
+                (string) $idx,
+                'procedure_result',
+                $resultId,
+            );
+            $upserted++;
         }
 
-        return $inserted;
+        return $upserted;
     }
 
     /**
@@ -396,16 +486,24 @@ final class RoundtripService
      * Modeled on Cda/CdaTemplateImportDispose.php InsertAllergies (lines 165-...).
      * No RXNORM lookup — `diagnosis` column left empty.
      *
-     * @param list<array<string,mixed>> $allergies
-     * @return int  number of rows inserted
+     * Cross-attempt deduplication: natural key is doc_ref_id + ":allergy:" + substance.
+     *
+     * @param list<array<string,mixed>>  $allergies
+     * @param array<string, int>         $verifiedFieldMap
+     * @return int  number of rows inserted or updated
      */
     private function roundtripAllergies(
         int $extractionId,
         int $patientId,
         array $allergies,
+        string $docRefId,
+        array $verifiedFieldMap,
+        ?ExtractedFieldsWriter $fieldsWriter,
     ): int {
-        $inserted = 0;
-        foreach ($allergies as $row) {
+        $allergyExtractor = new AllergyKeyExtractor();
+        $upserted = 0;
+
+        foreach ($allergies as $idx => $row) {
             $row = (array) $row;
             $sourceBlockId = isset($row['source_block_id'])
                 ? (string) $row['source_block_id']
@@ -413,6 +511,39 @@ final class RoundtripService
             $substance = (string) ($row['substance'] ?? '');
             if ($substance === '') {
                 continue;
+            }
+
+            // P3 cross-attempt deduplication.
+            $naturalKey = '';
+            if ($docRefId !== '') {
+                $naturalKey = $allergyExtractor->naturalKey($docRefId, $row);
+                $existingListId = $this->findClinicalRowByNaturalKey(
+                    $docRefId,
+                    'lists',
+                    $naturalKey,
+                );
+                if ($existingListId !== null) {
+                    QueryUtils::sqlStatementThrowException(
+                        "UPDATE lists
+                            SET title = ?, severity_al = ?, reaction = ?
+                          WHERE id = ?",
+                        [
+                            $substance,
+                            $this->mapSeverity((string) ($row['severity'] ?? '')),
+                            (string) ($row['reaction'] ?? ''),
+                            $existingListId,
+                        ],
+                    );
+                    $this->updateFieldPointer(
+                        $fieldsWriter,
+                        $verifiedFieldMap,
+                        (string) $idx,
+                        'lists',
+                        $existingListId,
+                    );
+                    $upserted++;
+                    continue;
+                }
             }
 
             // Per-row fingerprint so multiple allergies from the same
@@ -450,9 +581,26 @@ final class RoundtripService
                 sourceBlockId: $fingerprint,
                 resourceKind: 'allergy',
             );
-            $inserted++;
+
+            if ($docRefId !== '' && $naturalKey !== '') {
+                $this->insertNaturalKeyIndex(
+                    $extractionId,
+                    'lists',
+                    $listId,
+                    $naturalKey,
+                );
+            }
+
+            $this->updateFieldPointer(
+                $fieldsWriter,
+                $verifiedFieldMap,
+                (string) $idx,
+                'lists',
+                $listId,
+            );
+            $upserted++;
         }
-        return $inserted;
+        return $upserted;
     }
 
     // -----------------------------------------------------------------------
@@ -465,16 +613,24 @@ final class RoundtripService
      * Modeled on Cda/CdaTemplateImportDispose.php lines 1275+.  No
      * RXNORM lookup — `rxnorm_drugcode` column left empty.
      *
-     * @param list<array<string,mixed>> $medications
-     * @return int  number of rows inserted
+     * Cross-attempt deduplication: natural key is doc_ref_id + ":medication:" + name.
+     *
+     * @param list<array<string,mixed>>  $medications
+     * @param array<string, int>         $verifiedFieldMap
+     * @return int  number of rows inserted or updated
      */
     private function roundtripMedications(
         int $extractionId,
         int $patientId,
         array $medications,
+        string $docRefId,
+        array $verifiedFieldMap,
+        ?ExtractedFieldsWriter $fieldsWriter,
     ): int {
-        $inserted = 0;
-        foreach ($medications as $row) {
+        $medExtractor = new MedicationKeyExtractor();
+        $upserted = 0;
+
+        foreach ($medications as $idx => $row) {
             $row = (array) $row;
             $sourceBlockId = isset($row['source_block_id'])
                 ? (string) $row['source_block_id']
@@ -482,6 +638,38 @@ final class RoundtripService
             $name = (string) ($row['name'] ?? '');
             if ($name === '') {
                 continue;
+            }
+
+            // P3 cross-attempt deduplication.
+            $naturalKey = '';
+            if ($docRefId !== '') {
+                $naturalKey = $medExtractor->naturalKey($docRefId, $row);
+                $existingPrescriptionId = $this->findClinicalRowByNaturalKey(
+                    $docRefId,
+                    'prescriptions',
+                    $naturalKey,
+                );
+                if ($existingPrescriptionId !== null) {
+                    QueryUtils::sqlStatementThrowException(
+                        "UPDATE prescriptions
+                            SET drug = ?, dosage = ?
+                          WHERE id = ?",
+                        [
+                            $name,
+                            (string) ($row['dose'] ?? '') . ' ' . (string) ($row['frequency'] ?? ''),
+                            $existingPrescriptionId,
+                        ],
+                    );
+                    $this->updateFieldPointer(
+                        $fieldsWriter,
+                        $verifiedFieldMap,
+                        (string) $idx,
+                        'prescriptions',
+                        $existingPrescriptionId,
+                    );
+                    $upserted++;
+                    continue;
+                }
             }
 
             $fingerprint = $sourceBlockId !== null
@@ -517,9 +705,26 @@ final class RoundtripService
                 sourceBlockId: $fingerprint,
                 resourceKind: 'medication',
             );
-            $inserted++;
+
+            if ($docRefId !== '' && $naturalKey !== '') {
+                $this->insertNaturalKeyIndex(
+                    $extractionId,
+                    'prescriptions',
+                    $prescriptionId,
+                    $naturalKey,
+                );
+            }
+
+            $this->updateFieldPointer(
+                $fieldsWriter,
+                $verifiedFieldMap,
+                (string) $idx,
+                'prescriptions',
+                $prescriptionId,
+            );
+            $upserted++;
         }
-        return $inserted;
+        return $upserted;
     }
 
     // -----------------------------------------------------------------------
@@ -582,6 +787,115 @@ final class RoundtripService
             [$extractionId, $targetTable, $targetRecordId,
              $sourceBlockId, $resourceKind],
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-attempt natural-key helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Look up a clinical-table row id that was written from ANY extraction
+     * for the same doc_ref_id, identified by a stable natural key stored in
+     * co_pilot_fhir_links.natural_key.
+     *
+     * Returns the target_record_id (clinical row PK) if found, null otherwise.
+     *
+     * SCHEMA NOTE: co_pilot_fhir_links does not yet have a `natural_key`
+     * column — it is written by insertNaturalKeyIndex() below using the
+     * source_block_id slot as the carrier (prefixed with "nk:").  This avoids
+     * a schema migration for the P3 MR while keeping the cross-attempt lookup
+     * contained within the fhir_links table.
+     */
+    private function findClinicalRowByNaturalKey(
+        string $docRefId,
+        string $targetTable,
+        string $naturalKey,
+    ): ?int {
+        // The natural key is stored in source_block_id with a "nk:" prefix so
+        // it can be distinguished from real Docling block ids.
+        $storedKey = 'nk:' . $naturalKey;
+
+        $rows = QueryUtils::fetchRecords(
+            'SELECT cfl.target_record_id
+               FROM co_pilot_fhir_links cfl
+               JOIN co_pilot_extractions cpe
+                 ON cpe.id = cfl.co_pilot_extraction_id
+              WHERE cpe.doc_ref_id = ?
+                AND cfl.target_table = ?
+                AND cfl.source_block_id = ?
+              LIMIT 1',
+            [$docRefId, $targetTable, $storedKey],
+        );
+
+        if ($rows === [] || !isset($rows[0]['target_record_id'])) {
+            return null;
+        }
+
+        return (int) $rows[0]['target_record_id'];
+    }
+
+    /**
+     * Write a co_pilot_fhir_links row that carries the natural key.
+     *
+     * The natural key is stored in the source_block_id column with a "nk:"
+     * prefix.  The resource_kind is set to "natural_key_index" to
+     * distinguish it from real Docling-block link rows.
+     */
+    private function insertNaturalKeyIndex(
+        int $extractionId,
+        string $targetTable,
+        int $targetRecordId,
+        string $naturalKey,
+    ): void {
+        $storedKey = 'nk:' . $naturalKey;
+
+        // INSERT IGNORE so a concurrent duplicate (unlikely but possible) does
+        // not raise a duplicate-key error.
+        QueryUtils::sqlStatementThrowException(
+            "INSERT IGNORE INTO co_pilot_fhir_links
+                (co_pilot_extraction_id, target_table, target_record_id,
+                 source_block_id, resource_kind)
+             VALUES (?, ?, ?, ?, 'natural_key_index')",
+            [$extractionId, $targetTable, $targetRecordId, $storedKey],
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Clinical-pointer back-fill helper
+    // -----------------------------------------------------------------------
+
+    /**
+     * Attempt to back-fill the clinical_table + clinical_row_id columns on a
+     * co_pilot_extracted_fields row for the current result index.
+     *
+     * The verifiedFieldMap carries field_path → ef_row_id pairs written by
+     * ExtractedFieldsWriter::writeAll().  The field_path for result rows uses
+     * a "results[{idx}].*" pattern; we match on index prefix.
+     *
+     * This is best-effort: if no matching ef_row_id is found, we log a debug
+     * notice and continue without failing the round-trip.
+     *
+     * @param array<string, int> $verifiedFieldMap
+     */
+    private function updateFieldPointer(
+        ?ExtractedFieldsWriter $fieldsWriter,
+        array $verifiedFieldMap,
+        string $rowIndex,
+        string $clinicalTable,
+        int $clinicalRowId,
+    ): void {
+        if ($fieldsWriter === null || $verifiedFieldMap === []) {
+            return;
+        }
+
+        // Match any field_path that begins with "results[{rowIndex}]",
+        // "allergies[{rowIndex}]", or "current_medications[{rowIndex}]".
+        foreach ($verifiedFieldMap as $fieldPath => $efRowId) {
+            // Accept any path whose bracketed index matches $rowIndex.
+            if (preg_match('/\[' . preg_quote($rowIndex, '/') . '\]/', $fieldPath) === 1) {
+                $fieldsWriter->updateClinicalPointer($efRowId, $clinicalTable, $clinicalRowId);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

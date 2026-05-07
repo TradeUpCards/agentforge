@@ -55,13 +55,15 @@ class AgentClient
      * as a multipart form field.  The bytes are never written anywhere — they
      * live in memory only for the duration of this call.
      *
-     * @param int    $patientId  Sentinel patient_id (999101-999104 for demo personas).
-     * @param string $docRefId   OpenEMR documents.id (string); becomes a FHIR
-     *                           DocumentReference reference on Thursday.
-     * @param string $docType    "lab_pdf" | "intake_form"
-     * @param string $filePath   Absolute filesystem path to the stored document
-     *                           (resolved from `documents.url` by the subscriber).
-     * @param int    $userId     Uploading user's authUserID (front-desk actor).
+     * @param int         $patientId           Sentinel patient_id (999101-999104 for demo personas).
+     * @param string      $docRefId            OpenEMR documents.id (string); becomes a FHIR
+     *                                         DocumentReference reference on Thursday.
+     * @param string      $docType             "lab_pdf" | "intake_form"
+     * @param string      $filePath            Absolute filesystem path to the stored document
+     *                                         (resolved from `documents.url` by the subscriber).
+     * @param int         $userId              Uploading user's authUserID (front-desk actor).
+     * @param bool        $isReprocess         When true, adds X-OpenEMR-Reprocess: 1 header.
+     * @param int|null    $parentExtractionId  When set, adds X-OpenEMR-Parent-Extraction-Id header.
      * @return array<string, mixed>  Decoded JSON response from the agent.
      *
      * @throws RuntimeException on configuration error, transport failure, or
@@ -73,6 +75,8 @@ class AgentClient
         string $docType,
         string $filePath,
         int $userId,
+        bool $isReprocess = false,
+        ?int $parentExtractionId = null,
     ): array {
         $secret = $this->resolveHmacSecret();
         if ($secret === null) {
@@ -106,15 +110,17 @@ class AgentClient
 
         $startMs = (int) round(microtime(true) * 1000);
         $result  = $this->postMultipart(
-            url:        $url,
-            userId:     $userId,
-            timestamp:  $timestamp,
-            hmac:       $hmac,
-            patientId:  $patientId,
-            docRefId:   $docRefId,
-            docType:    $docType,
-            fileBytes:  $fileBytes,
-            filePath:   $filePath,
+            url:                $url,
+            userId:             $userId,
+            timestamp:          $timestamp,
+            hmac:               $hmac,
+            patientId:          $patientId,
+            docRefId:           $docRefId,
+            docType:            $docType,
+            fileBytes:          $fileBytes,
+            filePath:           $filePath,
+            isReprocess:        $isReprocess,
+            parentExtractionId: $parentExtractionId,
         );
         $latencyMs = (int) round(microtime(true) * 1000) - $startMs;
 
@@ -219,6 +225,8 @@ class AgentClient
         string $docType,
         string $fileBytes,
         string $filePath,
+        bool $isReprocess = false,
+        ?int $parentExtractionId = null,
     ): array {
         $ch = curl_init($url);
         if ($ch === false) {
@@ -259,16 +267,26 @@ class AgentClient
                 'file'       => new \CURLFile($tmp, 'application/octet-stream', $displayName),
             ];
 
+            $httpHeaders = [
+                'X-OpenEMR-User-Id: '   . $userId,
+                'X-OpenEMR-Timestamp: ' . $timestamp,
+                'X-OpenEMR-HMAC: '      . $hmac,
+                'Accept: application/json',
+            ];
+
+            if ($isReprocess) {
+                $httpHeaders[] = 'X-OpenEMR-Reprocess: 1';
+            }
+
+            if ($parentExtractionId !== null) {
+                $httpHeaders[] = 'X-OpenEMR-Parent-Extraction-Id: ' . $parentExtractionId;
+            }
+
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_POST           => true,
                 CURLOPT_POSTFIELDS     => $postFields,
-                CURLOPT_HTTPHEADER     => [
-                    'X-OpenEMR-User-Id: '   . $userId,
-                    'X-OpenEMR-Timestamp: ' . $timestamp,
-                    'X-OpenEMR-HMAC: '      . $hmac,
-                    'Accept: application/json',
-                ],
+                CURLOPT_HTTPHEADER     => $httpHeaders,
                 CURLOPT_TIMEOUT        => self::CURL_TIMEOUT_SECONDS,
                 CURLOPT_CONNECTTIMEOUT => self::CURL_CONNECT_TIMEOUT_SECONDS,
                 CURLOPT_FAILONERROR    => false,
