@@ -14,6 +14,7 @@ tool_mix:
   - get_recent_labs
 failure_mode: lab_value_citation
 tier: smoke
+rubric: [citation_present, factually_consistent]
 messages:
   - role: user
     content: "Generate a pre-visit brief for this patient."

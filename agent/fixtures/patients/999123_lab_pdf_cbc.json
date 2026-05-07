@@ -1,0 +1,52 @@
+{
+  "patient_id": 999123,
+  "document_reference_id": "docref-999123-lab_pdf",
+  "results": [
+    {
+      "test_name": "Hemoglobin",
+      "value": 10.2,
+      "unit": "g/dL",
+      "reference_range": "12.0-16.0",
+      "abnormal": true,
+      "collection_date": "2026-03-22",
+      "source_block_id": "block-999123-001",
+      "confidence": 0.97
+    },
+    {
+      "test_name": "Hematocrit",
+      "value": 31.5,
+      "unit": "%",
+      "reference_range": "36.0-46.0",
+      "abnormal": true,
+      "collection_date": "2026-03-22",
+      "source_block_id": "block-999123-002",
+      "confidence": 0.96
+    },
+    {
+      "test_name": "White Blood Cell Count",
+      "value": 7.2,
+      "unit": "10^3/uL",
+      "reference_range": "4.5-11.0",
+      "abnormal": false,
+      "collection_date": "2026-03-22",
+      "source_block_id": "block-999123-003",
+      "confidence": 0.97
+    },
+    {
+      "test_name": "Platelet Count",
+      "value": 210.0,
+      "unit": "10^3/uL",
+      "reference_range": "150-400",
+      "abnormal": false,
+      "collection_date": "2026-03-22",
+      "source_block_id": "block-999123-004",
+      "confidence": 0.96
+    }
+  ],
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 1,
+    "extraction_confidence_avg": 0.965
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "patient_id": 999128,
+  "document_reference_id": "docref-999128-lab_pdf",
+  "results": [
+    {
+      "test_name": "Urine Protein",
+      "value": 2.0,
+      "unit": "+",
+      "reference_range": "negative",
+      "abnormal": true,
+      "collection_date": "2026-04-05",
+      "source_block_id": "block-999128-001",
+      "confidence": 0.95
+    },
+    {
+      "test_name": "Urine Glucose",
+      "value": 1.0,
+      "unit": "+",
+      "reference_range": "negative",
+      "abnormal": true,
+      "collection_date": "2026-04-05",
+      "source_block_id": "block-999128-002",
+      "confidence": 0.94
+    },
+    {
+      "test_name": "RBC",
+      "value": 8.0,
+      "unit": "/hpf",
+      "reference_range": "0-2",
+      "abnormal": true,
+      "collection_date": "2026-04-05",
+      "source_block_id": "block-999128-003",
+      "confidence": 0.93
+    },
+    {
+      "test_name": "WBC",
+      "value": 3.0,
+      "unit": "/hpf",
+      "reference_range": "0-5",
+      "abnormal": false,
+      "collection_date": "2026-04-05",
+      "source_block_id": "block-999128-004",
+      "confidence": 0.95
+    }
+  ],
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 1,
+    "extraction_confidence_avg": 0.943
+  }
+}

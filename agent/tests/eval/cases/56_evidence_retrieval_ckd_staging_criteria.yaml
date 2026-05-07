@@ -1,0 +1,25 @@
+name: evidence_retrieval_ckd_staging_criteria
+category: evidence_retrieval
+description: |
+  Evidence retrieval for CKD staging criteria (KDIGO guidelines). The agent
+  must return at least one guideline citation and mention GFR in the response.
+  Tests that the retriever surfaces KDIGO staging criteria when queried about
+  CKD classification. Complements case 50 (HTN+CKD BP target) by testing the
+  diagnostic staging pathway rather than the treatment target.
+patient_id: 1
+user_id: 1
+live_llm_required: true
+fixture_data_required: true
+tier: nightly
+difficulty: intermediate
+failure_mode: guideline_citation_missing
+rubric: [citation_present, factually_consistent]
+messages:
+  - role: user
+    content: "How is chronic kidney disease staging determined?"
+
+expected:
+  status: ok
+  min_guideline_citations: 1
+  must_mention:
+    - "GFR"

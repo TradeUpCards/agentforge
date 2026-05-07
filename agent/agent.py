@@ -46,6 +46,7 @@ from .llm_client import LLMClient, build_llm_client
 from .schemas import (
     AgentResponse,
     ChatRequest,
+    Citation,
     Claim,
     ClaimType,
     Message,
@@ -1198,6 +1199,31 @@ async def run_chat(
     audit.claims_passed = len(verdict.claims_passed)
     audit.claims_failed = len(verdict.claims_failed)
     audit.final_response = prose
+    # Derive Citation objects from verified claim source_record_ids.
+    # W2_ARCHITECTURE.md §7.3 — source_type discriminates patient_record vs guideline.
+    # quote_or_value left empty here; full threading is a week-3 enhancement.
+    _derived_citations: list[Citation] = []
+    _seen_source_ids: set[str] = set()
+    for _claim in verdict.claims_passed:
+        for _raw_id in (_claim.source_record_ids or []):
+            if _raw_id in _seen_source_ids:
+                continue
+            _seen_source_ids.add(_raw_id)
+            if _raw_id.startswith("guideline_corpus:"):
+                _chunk_id = _raw_id[len("guideline_corpus:"):]
+                _derived_citations.append(Citation(
+                    source_type="guideline",
+                    source_id=_chunk_id,
+                    field_or_chunk_id=_chunk_id,
+                    quote_or_value="",
+                ))
+            else:
+                _derived_citations.append(Citation(
+                    source_type="patient_record",
+                    source_id=_raw_id,
+                    field_or_chunk_id=_raw_id,
+                    quote_or_value="",
+                ))
     return _close_audit(audit, started_at, AgentResponse(
         message=Message(role=Role.ASSISTANT, content=prose),
         claims=verdict.claims_passed,
@@ -1206,6 +1232,7 @@ async def run_chat(
         request_id=request_id,
         trace_id=trace_id,
         claims_stripped=len(verdict.claims_failed),
+        citations=_derived_citations,
     ))
 
 

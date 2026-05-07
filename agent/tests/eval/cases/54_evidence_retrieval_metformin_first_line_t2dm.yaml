@@ -1,0 +1,25 @@
+name: evidence_retrieval_metformin_first_line_t2dm
+category: evidence_retrieval
+description: |
+  Evidence retrieval for metformin as first-line T2DM therapy (ADA / AACE
+  guidelines). The agent must return at least one guideline citation and
+  mention metformin. This query is directly relevant to the Maria fixture
+  patient (patient_id=1) who is on metformin. Tests that the retriever surfaces
+  first-line therapy rationale when prompted with a treatment-selection query.
+patient_id: 1
+user_id: 1
+live_llm_required: true
+fixture_data_required: true
+tier: nightly
+difficulty: intermediate
+failure_mode: guideline_citation_missing
+rubric: [citation_present, factually_consistent]
+messages:
+  - role: user
+    content: "Should metformin be first-line therapy for T2DM?"
+
+expected:
+  status: ok
+  min_guideline_citations: 1
+  must_mention:
+    - "metformin"

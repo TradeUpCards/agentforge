@@ -1,0 +1,58 @@
+{
+  "patient_id": 999133,
+  "document_reference_id": "docref-999133-intake_form",
+  "demographics": {
+    "name": "Test Patient 999133",
+    "dob": "1960-07-19",
+    "sex": "M",
+    "source_block_id": "block-999133-demo-001"
+  },
+  "chief_concern": "Diabetes management and shortness of breath on exertion",
+  "current_medications": [
+    {
+      "name": "Metformin",
+      "dose": "1000mg",
+      "frequency": "twice daily",
+      "source_block_id": "block-999133-med-001"
+    },
+    {
+      "name": "Atorvastatin",
+      "dose": "40mg",
+      "frequency": "nightly",
+      "source_block_id": "block-999133-med-002"
+    }
+  ],
+  "allergies": [
+    {
+      "substance": "Penicillin",
+      "reaction": "anaphylaxis",
+      "severity": "severe",
+      "source_block_id": "block-999133-allergy-001"
+    },
+    {
+      "substance": "Codeine",
+      "reaction": "nausea and vomiting",
+      "severity": "moderate",
+      "source_block_id": "block-999133-allergy-002"
+    }
+  ],
+  "family_history": [
+    {
+      "condition": "Type 2 Diabetes",
+      "relation": "mother",
+      "source_block_id": "block-999133-fhx-001"
+    },
+    {
+      "condition": "Coronary Artery Disease",
+      "relation": "father",
+      "source_block_id": "block-999133-fhx-002"
+    }
+  ],
+  "source_citations": {},
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 3,
+    "extraction_confidence_avg": 0.95
+  }
+}

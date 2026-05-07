@@ -1,0 +1,22 @@
+{
+  "patient_id": 999120,
+  "document_reference_id": "docref-999120-lab_pdf",
+  "results": [
+    {
+      "test_name": "Hemoglobin A1c",
+      "value": 8.2,
+      "unit": "%",
+      "reference_range": "<5.7",
+      "abnormal": true,
+      "collection_date": "2026-03-15",
+      "source_block_id": "block-999120-001",
+      "confidence": 0.97
+    }
+  ],
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 1,
+    "extraction_confidence_avg": 0.97
+  }
+}

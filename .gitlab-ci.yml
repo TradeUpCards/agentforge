@@ -90,6 +90,7 @@ agent-eval:
     # Both fixture flags ON — keeps the run deterministic + free.
     USE_FIXTURE_LLM: "true"
     USE_FIXTURE_DATA: "true"
+    USE_FIXTURE_EXTRACTION: "true"
     # HMAC secret needs *some* value for the eval runner to compute
     # signatures. Actual content doesn't matter in fixture mode —
     # verify_hmac runs against this same env value.
@@ -115,6 +116,12 @@ agent-eval:
     - python -m pytest agent/tests/unit/ -v --tb=short
     - echo "--- Eval Golden Set (smoke + full tier, fixture mode) ---"
     - python -m pytest agent/tests/eval/ -v --tb=short
+    - echo "--- Rubric meta-tests ---"
+    - python -m pytest agent/tests/eval/meta/ -v --tb=short
+    - echo "--- Generate eval JSON for rubric gate ---"
+    - python -m agent.tests.eval.runner --output-json /tmp/eval_results.json
+    - echo "--- PR-blocking rubric regression gate ---"
+    - python scripts/run_eval_gate.py --baseline agent/tests/eval/baseline.json --current /tmp/eval_results.json --max-regression 0.05
   artifacts:
     # Always upload the eval run report (success or failure) for post-mortem.
     when: always

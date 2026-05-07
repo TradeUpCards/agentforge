@@ -1,0 +1,22 @@
+name: lab_extraction_two_a1c_same_doc
+category: lab_extraction
+description: |
+  Two Hemoglobin A1c results extracted from patient 999125 — a single document
+  containing A1c drawn on two different dates (2026-01-10 and 2026-03-10). Asserts
+  extraction recovers >= 2 results without deduplication. A regression where the
+  pipeline collapses duplicate test_name entries to a single result would fire
+  this case.
+patient_id: 999125
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: nightly
+difficulty: intermediate
+failure_mode: extraction_duplicate_result_collapsed
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 2

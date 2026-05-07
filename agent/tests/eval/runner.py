@@ -19,6 +19,10 @@ Assertion DSL (in each case YAML's `expected:` block):
     must_not_mention: [substr1, ...]
     expect_refusal_reason_contains: <substr> # only when status: refused
     expect_tools_called: [name1, name2, ...] # tools whose `success: true` must appear
+    phi_log_scan: [str, ...]                 # PHI strings that must be masked by the scrubber
+    min_guideline_citations: <int>           # citations with source_type == "guideline" >= N
+    expect_extraction_n_results_gte: <int>   # extraction.results list length >= N
+    expect_extraction_field: {...}           # named field in extraction equals a value
 
 Cases that intentionally fail their assertions (so the runner reports
 non-trivial findings) should set `expected_to_fail: true` so the report
@@ -112,6 +116,16 @@ class EvalCase:
     """True when the case references a synthetic patient fixture (sentinel
     range 999000-999999). Used by the no-real-PHI validator to know which
     fixtures to scan."""
+    rubric: list[str] = field(default_factory=list)
+    """PRD §6 boolean rubric categories this case exercises. Closed set:
+    schema_valid, citation_present, factually_consistent, safe_refusal, no_phi_in_logs.
+    Runner aggregates per-rubric pass rates for baseline.json comparison."""
+    doc_type: str | None = None
+    """If set, runner calls POST /attach_and_extract instead of POST /chat.
+    Must be one of: lab_pdf, intake_form."""
+    phi_log_scan: list[str] = field(default_factory=list)
+    """Strings the PHI scrubber must mask. Each entry is asserted to be absent
+    from mask_observability_patterns(entry) output."""
 
     @classmethod
     def load_all(cls) -> list[EvalCase]:
@@ -127,7 +141,7 @@ class EvalCase:
                     description=data.get("description", ""),
                     patient_id=int(data.get("patient_id", 1)),
                     user_id=int(data.get("user_id", 1)),
-                    messages=data["messages"],
+                    messages=data.get("messages") or [],
                     expected=data.get("expected", {}),
                     category=str(data.get("category", "uncategorized")),
                     bad_hmac=bool(data.get("bad_hmac", False)),
@@ -141,6 +155,9 @@ class EvalCase:
                     source_incident_id=data.get("source_incident_id"),
                     tier=str(data.get("tier", "full")),
                     synthetic=bool(data.get("synthetic", False)),
+                    rubric=list(data.get("rubric", []) or []),
+                    doc_type=data.get("doc_type"),
+                    phi_log_scan=list(data.get("phi_log_scan", []) or []),
                 )
             )
         return cases
@@ -183,10 +200,18 @@ _KNOWN_CASE_KEYS: set[str] = {
     "source_incident_id",
     "tier",
     "synthetic",
+    # W2 additions
+    "rubric",        # list[str] — PRD §6 rubric categories this case exercises
+    "doc_type",      # str | None — if set, case calls /attach_and_extract instead of /chat
+    "phi_log_scan",  # list[str] — PHI strings that must be masked by the scrubber
 }
 
 _KNOWN_DIFFICULTIES: set[str] = {"smoke", "basic", "intermediate", "advanced"}
 _KNOWN_TIERS: set[str] = {"smoke", "full", "nightly"}
+_KNOWN_RUBRICS: set[str] = {
+    "schema_valid", "citation_present", "factually_consistent",
+    "safe_refusal", "no_phi_in_logs",
+}
 
 _DSL_CHECKS: set[str] = {
     "min_claims",
@@ -196,6 +221,10 @@ _DSL_CHECKS: set[str] = {
     "must_not_mention",
     "expect_refusal_reason_contains",
     "expect_tools_called",
+    "phi_log_scan",
+    "min_guideline_citations",
+    "expect_extraction_n_results_gte",
+    "expect_extraction_field",
 }
 
 
@@ -205,8 +234,10 @@ def _validate_case_schema(path: Path, data: dict[str, Any]) -> None:
     Enforces SYNTHETIC_DATA_PLAN.md validation rules 1, 2, and 5:
     - unknown top-level keys are rejected (catches typos)
     - difficulty and tier must be in their closed enums
+    - rubric values must be in the closed set of known rubric names
     - tool_mix must be a superset of expect_tools_called when both non-empty
     - expected{} must include at least one deterministic check beyond status
+      (or phi_log_scan at top level when doc_type is set)
     """
     extra = set(data.keys()) - _KNOWN_CASE_KEYS
     if extra:
@@ -227,13 +258,26 @@ def _validate_case_schema(path: Path, data: dict[str, Any]) -> None:
             f"{path.name}: tier {tier!r} not in {sorted(_KNOWN_TIERS)!r}"
         )
 
+    # Validate rubric values against the closed set.
+    for r in data.get("rubric", []) or []:
+        if r not in _KNOWN_RUBRICS:
+            raise ValueError(
+                f"{path.name}: unknown rubric {r!r}. Known: {sorted(_KNOWN_RUBRICS)!r}"
+            )
+
     expected = data.get("expected", {}) or {}
-    has_deterministic = any(k in expected for k in _DSL_CHECKS)
+    # phi_log_scan at top level also satisfies the deterministic-check requirement
+    # (it is not inside expected{}, but it is a meaningful assertion).
+    has_top_level_phi_scan = bool(data.get("phi_log_scan"))
+    has_deterministic = any(k in expected for k in _DSL_CHECKS) or has_top_level_phi_scan
     if not has_deterministic:
         raise ValueError(
             f"{path.name}: expected{{}} must include at least one of "
             f"{sorted(_DSL_CHECKS)!r}; status alone is not sufficient."
         )
+
+    # When doc_type is present, messages is optional (defaults to []).
+    # No extra validation needed here — messages absence is handled in load_all().
 
     declared_mix = set(data.get("tool_mix", []) or [])
     asserted_tools = set(expected.get("expect_tools_called", []) or [])
@@ -264,6 +308,24 @@ def _sign(case: EvalCase, secret: str, timestamp: int) -> str:
     ).hexdigest()
 
 
+def _sign_attach(
+    user_id: int,
+    patient_id: int,
+    doc_ref_id: str,
+    doc_type: str,
+    timestamp: int,
+    file_sha256_hex: str,
+    secret: str,
+) -> str:
+    """HMAC for /attach_and_extract — distinct payload from /chat.
+    Mirrors the verification logic in agent/main.py:attach_and_extract_endpoint.
+    """
+    payload = f"{user_id}|{patient_id}|{doc_ref_id}|{doc_type}|{timestamp}|{file_sha256_hex}"
+    return hmac.new(
+        secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Assertion evaluation
 # ---------------------------------------------------------------------------
@@ -282,6 +344,9 @@ class CaseResult:
     `_run_case_once`. 0 for skipped cases. Surfaced in the eval report
     so per-case latency regressions are visible without leaving the
     runner output."""
+    rubric_results: dict[str, bool] = field(default_factory=dict)
+    """Per-rubric pass/fail for this case. Keys are rubric names from case.rubric.
+    True = passed, False = failed. Populated by _evaluate()."""
 
     @property
     def passed(self) -> bool:
@@ -351,7 +416,89 @@ def _evaluate(case: EvalCase, status_code: int, response: dict[str, Any]) -> Cas
         if missing:
             failures.append(f"expect_tools_called: missing {missing}")
 
-    return CaseResult(case=case, status_code=status_code, response=response, failures=failures)
+    # --- W2 DSL additions ---
+
+    # phi_log_scan: assert each string is masked by the outbound PHI scrubber
+    if case.phi_log_scan:
+        from agent._phi_scrubber import mask_observability_patterns
+        for phi_string in case.phi_log_scan:
+            scrubbed = mask_observability_patterns(phi_string)
+            if phi_string.lower() in scrubbed.lower():
+                failures.append(
+                    f"phi_log_scan: {phi_string!r} not masked by scrubber "
+                    f"(got: {scrubbed!r})"
+                )
+
+    # min_guideline_citations: assert AgentResponse.citations has N+ guideline entries
+    if "min_guideline_citations" in expected:
+        citations = response.get("citations") or []
+        guideline_cites = [
+            c for c in citations
+            if isinstance(c, dict) and c.get("source_type") == "guideline"
+        ]
+        if len(guideline_cites) < expected["min_guideline_citations"]:
+            failures.append(
+                f"min_guideline_citations: expected >= {expected['min_guideline_citations']}, "
+                f"got {len(guideline_cites)}"
+            )
+
+    # expect_extraction_n_results_gte: assert extraction.results has >= N entries (lab_pdf)
+    if "expect_extraction_n_results_gte" in expected:
+        extraction = response.get("extraction") or {}
+        results_list = extraction.get("results") or []
+        n = expected["expect_extraction_n_results_gte"]
+        if len(results_list) < n:
+            failures.append(
+                f"expect_extraction_n_results_gte: expected >= {n} results, "
+                f"got {len(results_list)}"
+            )
+
+    # expect_extraction_field: assert a named field in extraction equals a value
+    # Format: {"field_path": "results.0.value", "expected_value": 7.8}
+    # OR:     {"field_path": "allergies.0.substance", "expected_value": "Penicillin"}
+    if "expect_extraction_field" in expected:
+        extraction = response.get("extraction") or {}
+        field_checks = expected["expect_extraction_field"]
+        if not isinstance(field_checks, list):
+            field_checks = [field_checks]
+        for field_check in field_checks:
+            field_path: str = field_check.get("field_path", "")
+            expected_val = field_check.get("expected_value")
+            # Navigate the path: "results.0.value" → extraction["results"][0]["value"]
+            obj: Any = extraction
+            ok = True
+            for part in field_path.split("."):
+                if obj is None:
+                    ok = False
+                    break
+                if isinstance(obj, list):
+                    try:
+                        obj = obj[int(part)]
+                    except (IndexError, ValueError):
+                        ok = False
+                        break
+                elif isinstance(obj, dict):
+                    obj = obj.get(part)
+                else:
+                    ok = False
+                    break
+            if not ok or obj != expected_val:
+                failures.append(
+                    f"expect_extraction_field: {field_path!r} expected {expected_val!r}, "
+                    f"got {obj!r}"
+                )
+
+    # Compute per-rubric pass/fail
+    rubric_results: dict[str, bool] = {}
+    case_passed = not failures
+    for r in case.rubric:
+        rubric_results[r] = case_passed
+
+    result = CaseResult(
+        case=case, status_code=status_code, response=response,
+        failures=failures, rubric_results=rubric_results,
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +528,60 @@ def _looks_transient(result: CaseResult) -> bool:
     return not any(t.get("success") for t in tools)
 
 
+def _run_extraction_case(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
+    """Dispatch to POST /attach_and_extract for doc_type cases.
+
+    In test environments, the extractor is mocked via conftest.py's
+    mock_extraction_async fixture, so no real Docling/Haiku call happens.
+    The mock reads from agent/fixtures/patients/<patient_id>_<doc_type>.json
+    and returns the parsed LabReport or IntakeForm directly.
+    """
+    import hashlib as _hashlib
+    # Use a minimal synthetic PDF bytes (just a PDF header) so file_sha256_hex
+    # is stable and deterministic in fixture mode.
+    _FIXTURE_PDF_BYTES = b"%PDF-1.4 fixture"
+    file_sha256_hex = _hashlib.sha256(_FIXTURE_PDF_BYTES).hexdigest()
+    doc_ref_id = f"docref-{case.patient_id}-{case.doc_type}"
+
+    timestamp = int(time.time())
+    sig = _sign_attach(
+        user_id=case.user_id,
+        patient_id=case.patient_id,
+        doc_ref_id=doc_ref_id,
+        doc_type=case.doc_type,
+        timestamp=timestamp,
+        file_sha256_hex=file_sha256_hex,
+        secret=secret,
+    )
+    t0 = time.perf_counter()
+    r = client.post(
+        "/attach_and_extract",
+        data={
+            "patient_id": str(case.patient_id),
+            "doc_ref_id": doc_ref_id,
+            "doc_type": case.doc_type,
+        },
+        files={"file": ("fixture.pdf", _FIXTURE_PDF_BYTES, "application/pdf")},
+        headers={
+            "X-OpenEMR-User-Id": str(case.user_id),
+            "X-OpenEMR-Timestamp": str(timestamp),
+            "X-OpenEMR-HMAC": sig,
+        },
+    )
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    try:
+        payload = r.json()
+    except json.JSONDecodeError:
+        payload = {"status": "error", "raw_body": r.text}
+    result = _evaluate(case, r.status_code, payload)
+    result.latency_ms = elapsed_ms
+    return result
+
+
 def _run_case_once(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
+    if case.doc_type is not None:
+        return _run_extraction_case(client, case, secret)
+    # --- existing /chat path (unchanged) ---
     # Sign with current timestamp so the request stays inside the agent's
     # 30s freshness window. Replay-protection coverage proper lives in the
     # verify_hmac unit tests; here we just need the sig + body to validate.
@@ -424,6 +624,67 @@ def run_case(
     return result
 
 
+def _apply_extraction_mock_if_needed():
+    """Context manager that applies the fixture-extraction mock when
+    USE_FIXTURE_EXTRACTION=true.  Mirrors conftest.py's autouse fixture so
+    the CLI runner (``python -m agent.tests.eval.runner``) honours the same
+    env flag as the pytest path.
+
+    Usage::
+
+        with _apply_extraction_mock_if_needed():
+            results = run_all()
+    """
+    import contextlib
+    import os
+
+    if os.environ.get("USE_FIXTURE_EXTRACTION", "").lower() != "true":
+        return contextlib.nullcontext()
+
+    from unittest.mock import patch
+    import json as _json
+    from pathlib import Path as _Path
+    from agent.document_schemas import LabReport as _LabReport, IntakeForm as _IntakeForm
+
+    _fixtures_dir = _Path(__file__).parent.parent.parent / "fixtures" / "patients"
+
+    async def _mock_async(
+        patient_id: int,
+        doc_ref_id: str,
+        doc_type: str,
+        pdf_path: object = None,
+        *,
+        stage1_only: bool = False,
+    ) -> _LabReport | _IntakeForm:
+        pattern = f"{patient_id}_{doc_type}*.json"
+        matches = sorted(_fixtures_dir.glob(pattern))
+        if not matches:
+            raise FileNotFoundError(
+                f"No extraction fixture for patient_id={patient_id}, doc_type={doc_type!r}"
+            )
+        data = _json.loads(matches[0].read_text(encoding="utf-8"))
+        if doc_type == "lab_pdf":
+            return _LabReport.model_validate(data)
+        if doc_type == "intake_form":
+            return _IntakeForm.model_validate(data)
+        raise ValueError(f"Unknown doc_type {doc_type!r}")
+
+    import contextlib as _contextlib
+
+    @_contextlib.contextmanager
+    def _ctx():
+        with patch(
+            "agent.extractors.attach_and_extract_async",
+            side_effect=_mock_async,
+        ), patch(
+            "agent.main.attach_and_extract_async",
+            side_effect=_mock_async,
+        ):
+            yield
+
+    return _ctx()
+
+
 def run_all(tier: str | None = None) -> list[CaseResult]:
     """Run the eval suite, optionally filtered by tier.
 
@@ -431,41 +692,47 @@ def run_all(tier: str | None = None) -> list[CaseResult]:
     `nightly`) filters to cases whose `tier` field matches — useful for
     pre-commit (smoke), CI (smoke+full via two passes), and nightly
     (full + nightly via two passes) workflows.
+
+    When USE_FIXTURE_EXTRACTION=true, applies the extraction fixture mock
+    (same as conftest.py's autouse fixture) so CLI-mode runs and pytest
+    runs behave identically for doc_type cases.
     """
     settings = get_settings()
     client = TestClient(app)
     cases = EvalCase.load_all()
     results: list[CaseResult] = []
-    for case in cases:
-        skip_reason: str | None = None
-        if tier is not None and case.tier != tier:
-            skip_reason = f"tier={case.tier!r} does not match --tier {tier!r}"
-        # Skip cases that require a live LLM in fixture-LLM mode, or
-        # require live DB data in fixture-data mode. Mirrors the pytest
-        # conftest skip logic — without this, Synthea-targeted cases
-        # would fail in CI because patient_id 92 returns the Maria
-        # fixture (or empty), not Guadalupe's actual chart.
-        elif case.live_llm_required and settings.use_fixture_llm:
-            skip_reason = "requires live LLM (USE_FIXTURE_LLM=true)"
-        elif case.live_db_required and settings.use_fixture_data:
-            skip_reason = "requires live DB data (USE_FIXTURE_DATA=true)"
-        elif case.fixture_data_required and not settings.use_fixture_data:
-            skip_reason = "calibrated against fixture data (USE_FIXTURE_DATA=false)"
-        if skip_reason:
-            results.append(CaseResult(
-                case=case,
-                status_code=0,
-                response={},
-                skipped=True,
-                skip_reason=skip_reason,
-            ))
-            continue
-        # Nightly cases hit a live LLM and can flake with the
-        # transient signature (see _looks_transient). One retry on
-        # that specific shape; smoke and full are deterministic
-        # fixture-mode and get no retries.
-        retries = 1 if case.tier == "nightly" else 0
-        results.append(run_case(client, case, settings.openemr_hmac_secret, max_retries=retries))
+
+    with _apply_extraction_mock_if_needed():
+        for case in cases:
+            skip_reason: str | None = None
+            if tier is not None and case.tier != tier:
+                skip_reason = f"tier={case.tier!r} does not match --tier {tier!r}"
+            # Skip cases that require a live LLM in fixture-LLM mode, or
+            # require live DB data in fixture-data mode. Mirrors the pytest
+            # conftest skip logic — without this, Synthea-targeted cases
+            # would fail in CI because patient_id 92 returns the Maria
+            # fixture (or empty), not Guadalupe's actual chart.
+            elif case.live_llm_required and settings.use_fixture_llm:
+                skip_reason = "requires live LLM (USE_FIXTURE_LLM=true)"
+            elif case.live_db_required and settings.use_fixture_data:
+                skip_reason = "requires live DB data (USE_FIXTURE_DATA=true)"
+            elif case.fixture_data_required and not settings.use_fixture_data:
+                skip_reason = "calibrated against fixture data (USE_FIXTURE_DATA=false)"
+            if skip_reason:
+                results.append(CaseResult(
+                    case=case,
+                    status_code=0,
+                    response={},
+                    skipped=True,
+                    skip_reason=skip_reason,
+                ))
+                continue
+            # Nightly cases hit a live LLM and can flake with the
+            # transient signature (see _looks_transient). One retry on
+            # that specific shape; smoke and full are deterministic
+            # fixture-mode and get no retries.
+            retries = 1 if case.tier == "nightly" else 0
+            results.append(run_case(client, case, settings.openemr_hmac_secret, max_retries=retries))
     return results
 
 
@@ -606,6 +873,27 @@ def write_report(results: list[CaseResult], path: Path | None = None) -> Path:
             lines.append(f"| `{fm}` | {failure_modes[fm]} |")
         lines.append("")
 
+    # Per-rubric pass rates (PRD §6 boolean rubric categories).
+    rubric_totals: dict[str, int] = {}
+    rubric_passes: dict[str, int] = {}
+    for r in results:
+        for rubric_name, passed in r.rubric_results.items():
+            rubric_totals[rubric_name] = rubric_totals.get(rubric_name, 0) + 1
+            if passed:
+                rubric_passes[rubric_name] = rubric_passes.get(rubric_name, 0) + 1
+
+    if rubric_totals:
+        lines.append("## Pass rate by rubric (PRD §6)")
+        lines.append("")
+        lines.append("| Rubric | Pass | Total | Rate |")
+        lines.append("|---|---:|---:|---:|")
+        for rubric_name in sorted(rubric_totals):
+            total_r = rubric_totals[rubric_name]
+            passes_r = rubric_passes.get(rubric_name, 0)
+            rate = passes_r / total_r if total_r else 0.0
+            lines.append(f"| `{rubric_name}` | {passes_r} | {total_r} | {rate:.1%} |")
+        lines.append("")
+
     # Latency — surfaces per-case wall-time so regressions are visible
     # without leaving the runner output. Skipped cases are excluded
     # because their latency is 0 (request never fired).
@@ -674,6 +962,37 @@ def write_report(results: list[CaseResult], path: Path | None = None) -> Path:
     return path
 
 
+def write_baseline(results: list[CaseResult], path: Path | None = None) -> Path:
+    """Write per-rubric pass rates to baseline.json.
+
+    Called by --update-baseline. CI compares each run's rubric pass rates
+    against this file and fails if any rubric regresses by > 5% (W2_ARCHITECTURE.md §5.1).
+    """
+    baseline_path = path or (Path(__file__).parent / "baseline.json")
+
+    rubric_totals: dict[str, int] = {}
+    rubric_passes: dict[str, int] = {}
+    for r in results:
+        for rubric_name, passed in r.rubric_results.items():
+            rubric_totals[rubric_name] = rubric_totals.get(rubric_name, 0) + 1
+            if passed:
+                rubric_passes[rubric_name] = rubric_passes.get(rubric_name, 0) + 1
+
+    rubric_pass_rates: dict[str, float] = {}
+    for rubric_name, total in rubric_totals.items():
+        passes = rubric_passes.get(rubric_name, 0)
+        rubric_pass_rates[rubric_name] = round(passes / total, 4) if total else 0.0
+
+    non_skipped = [r for r in results if not r.skipped]
+    payload = {
+        "generated": dt.datetime.now().strftime("%Y-%m-%d"),
+        "total_cases": len(non_skipped),
+        "rubric_pass_rates": rubric_pass_rates,
+    }
+    baseline_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return baseline_path
+
+
 # Pytest entry lives in test_eval_cases.py (file-name discovery).
 #
 # ---------------------------------------------------------------------------
@@ -689,6 +1008,22 @@ def main() -> None:
         choices=("smoke", "full", "nightly"),
         default=None,
         help="Run only cases at this tier. Default: all tiers.",
+    )
+    parser.add_argument(
+        "--output-json",
+        metavar="PATH",
+        default=None,
+        help="Write full results as JSON to this path (in addition to the markdown report).",
+    )
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        default=False,
+        help=(
+            "Write per-rubric pass rates to agent/tests/eval/baseline.json. "
+            "Use after a known-good run to update the CI regression threshold baseline. "
+            "W2_ARCHITECTURE.md §5.1 / §5.3."
+        ),
     )
     args = parser.parse_args()
 
@@ -710,6 +1045,34 @@ def main() -> None:
         print(f"\n{len(real_failures)} real failure(s):")
         for r in real_failures:
             print(f"  - {r.case.name}: {r.failures}")
+
+    if args.output_json:
+        import dataclasses
+        output_path = Path(args.output_json)
+        # Serialize results to JSON — skip non-serialisable case reference,
+        # emit only what downstream tooling needs.
+        rows = []
+        for r in results:
+            rows.append({
+                "name": r.case.name,
+                "category": r.case.category,
+                "tier": r.case.tier,
+                "rubric": r.case.rubric,
+                "passed": r.passed,
+                "skipped": r.skipped,
+                "skip_reason": r.skip_reason,
+                "failures": r.failures,
+                "rubric_results": r.rubric_results,
+                "latency_ms": r.latency_ms,
+            })
+        output_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        print(f"Wrote JSON results: {output_path}")
+
+    if args.update_baseline:
+        baseline_path = write_baseline(results)
+        print(f"Updated baseline: {baseline_path}")
+
+    if real_failures:
         raise SystemExit(1)
 
 

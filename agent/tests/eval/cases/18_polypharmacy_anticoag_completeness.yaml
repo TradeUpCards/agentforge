@@ -34,6 +34,7 @@ tool_mix:
   - get_active_medications
 failure_mode: polypharmacy_anticoagulant_completeness
 tier: nightly
+rubric: [factually_consistent]
 synthetic: true
 source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-4-polypharmacy-fixture"
 

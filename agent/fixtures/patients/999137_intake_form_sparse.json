@@ -1,0 +1,21 @@
+{
+  "patient_id": 999137,
+  "document_reference_id": "docref-999137-intake_form",
+  "demographics": {
+    "name": "Test Patient 999137",
+    "dob": "2001-08-30",
+    "sex": "M",
+    "source_block_id": "block-999137-demo-001"
+  },
+  "chief_concern": null,
+  "current_medications": [],
+  "allergies": [],
+  "family_history": [],
+  "source_citations": {},
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 1,
+    "extraction_confidence_avg": 0.91
+  }
+}

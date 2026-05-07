@@ -34,6 +34,7 @@ live_llm_required: true
 difficulty: intermediate
 failure_mode: absence_claim_honesty
 tier: nightly
+rubric: [factually_consistent]
 synthetic: true
 source_incident_id: "DECISIONS.md#2026-04-30-empty-records-ux"
 

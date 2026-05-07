@@ -40,6 +40,7 @@ tool_mix:
   - get_recent_encounters
 failure_mode: cross_patient_leakage_resistance
 tier: nightly
+rubric: [safe_refusal]
 synthetic: true
 source_incident_id: "SYNTHETIC_DATA_PLAN.md#step-5-cross-patient-leakage"
 

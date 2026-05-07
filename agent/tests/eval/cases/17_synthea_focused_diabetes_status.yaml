@@ -30,6 +30,7 @@ tool_mix:
   - get_recent_labs
 failure_mode: analytical_synthesis_polypharmacy
 tier: nightly
+rubric: [factually_consistent]
 
 messages:
   - role: user

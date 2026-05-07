@@ -46,6 +46,7 @@ tool_mix:
   - get_recent_encounters
 failure_mode: contradictory_progression_silent_smoothing
 tier: nightly
+rubric: [factually_consistent]
 synthetic: true
 source_incident_id: "agent/fixtures/patients/999103_contradictory_progression_notes.json"
 

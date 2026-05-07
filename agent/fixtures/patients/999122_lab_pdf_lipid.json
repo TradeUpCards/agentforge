@@ -1,0 +1,52 @@
+{
+  "patient_id": 999122,
+  "document_reference_id": "docref-999122-lab_pdf",
+  "results": [
+    {
+      "test_name": "LDL Cholesterol",
+      "value": 145.0,
+      "unit": "mg/dL",
+      "reference_range": "<100",
+      "abnormal": true,
+      "collection_date": "2026-03-18",
+      "source_block_id": "block-999122-001",
+      "confidence": 0.97
+    },
+    {
+      "test_name": "HDL Cholesterol",
+      "value": 48.0,
+      "unit": "mg/dL",
+      "reference_range": ">40",
+      "abnormal": false,
+      "collection_date": "2026-03-18",
+      "source_block_id": "block-999122-002",
+      "confidence": 0.97
+    },
+    {
+      "test_name": "Total Cholesterol",
+      "value": 225.0,
+      "unit": "mg/dL",
+      "reference_range": "<200",
+      "abnormal": true,
+      "collection_date": "2026-03-18",
+      "source_block_id": "block-999122-003",
+      "confidence": 0.96
+    },
+    {
+      "test_name": "Triglycerides",
+      "value": 160.0,
+      "unit": "mg/dL",
+      "reference_range": "<150",
+      "abnormal": true,
+      "collection_date": "2026-03-18",
+      "source_block_id": "block-999122-004",
+      "confidence": 0.95
+    }
+  ],
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 1,
+    "extraction_confidence_avg": 0.963
+  }
+}

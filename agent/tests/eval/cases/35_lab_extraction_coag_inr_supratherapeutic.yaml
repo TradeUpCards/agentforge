@@ -1,0 +1,27 @@
+name: lab_extraction_coag_inr_supratherapeutic
+category: lab_extraction
+description: |
+  Coagulation panel extraction from patient 999124. INR = 4.1 (supratherapeutic,
+  reference 0.8-1.2). Asserts extraction recovers >= 1 result and correctly marks
+  INR as abnormal. INR = 4.1 is a clinically significant safety value — a pipeline
+  that silently drops the abnormal flag would fail to surface a warfarin over-
+  anticoagulation risk to the clinician.
+patient_id: 999124
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: nightly
+difficulty: intermediate
+failure_mode: extraction_abnormal_flag_wrong
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 1
+  expect_extraction_field:
+    - field_path: "results.0.test_name"
+      expected_value: "INR"
+    - field_path: "results.0.abnormal"
+      expected_value: true

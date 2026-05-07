@@ -1,0 +1,26 @@
+name: lab_extraction_cbc_low_hgb
+category: lab_extraction
+description: |
+  CBC extraction from patient 999123. Hemoglobin = 10.2 g/dL (abnormal, below
+  normal range 12.0-16.0). Asserts extraction recovers >= 3 CBC results and
+  correctly flags the hemoglobin result as abnormal. A regression where the
+  abnormal field is stripped or defaulted to false would fire this case.
+patient_id: 999123
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_abnormal_flag_wrong
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 3
+  expect_extraction_field:
+    - field_path: "results.0.test_name"
+      expected_value: "Hemoglobin"
+    - field_path: "results.0.abnormal"
+      expected_value: true

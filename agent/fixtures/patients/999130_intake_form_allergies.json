@@ -1,0 +1,35 @@
+{
+  "patient_id": 999130,
+  "document_reference_id": "docref-999130-intake_form",
+  "demographics": {
+    "name": "Test Patient 999130",
+    "dob": "1972-04-15",
+    "sex": "F",
+    "source_block_id": "block-999130-demo-001"
+  },
+  "chief_concern": "Annual check-up",
+  "current_medications": [
+    {
+      "name": "Lisinopril",
+      "dose": "10mg",
+      "frequency": "daily",
+      "source_block_id": "block-999130-med-001"
+    }
+  ],
+  "allergies": [
+    {
+      "substance": "Penicillin",
+      "reaction": "rash",
+      "severity": "moderate",
+      "source_block_id": "block-999130-allergy-001"
+    }
+  ],
+  "family_history": [],
+  "source_citations": {},
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 2,
+    "extraction_confidence_avg": 0.94
+  }
+}

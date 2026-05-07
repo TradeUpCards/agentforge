@@ -51,6 +51,7 @@ tool_mix:
   - get_active_medications
 failure_mode: session_id_observability_only_post_refresh
 tier: nightly
+rubric: [citation_present, factually_consistent]
 synthetic: true
 source_incident_id: "grader-feedback-2026-05-02-derek-peters#refresh-behavior"
 

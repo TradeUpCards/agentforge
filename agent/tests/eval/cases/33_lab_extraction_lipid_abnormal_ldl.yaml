@@ -1,0 +1,27 @@
+name: lab_extraction_lipid_abnormal_ldl
+category: lab_extraction
+description: |
+  Lipid panel extraction from patient 999122. LDL = 145 mg/dL (abnormal, >100
+  reference). Asserts extraction recovers >= 3 results and correctly identifies
+  LDL Cholesterol as the first result with abnormal = true. Tests that the
+  abnormal flag is correctly propagated — a verifier-strictness reduction
+  regression would flip this to false.
+patient_id: 999122
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: full
+difficulty: basic
+failure_mode: extraction_abnormal_flag_wrong
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 3
+  expect_extraction_field:
+    - field_path: "results.0.test_name"
+      expected_value: "LDL Cholesterol"
+    - field_path: "results.0.abnormal"
+      expected_value: true

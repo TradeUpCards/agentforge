@@ -87,11 +87,40 @@ jobs:
         env:
           USE_FIXTURE_LLM: 'true'
           USE_FIXTURE_DATA: 'true'
+          USE_FIXTURE_EXTRACTION: 'true'
           OPENEMR_HMAC_SECRET: 'ci-fixture-mode-not-a-real-secret'
           DB_AUDIT_USER: ''
           DB_AUDIT_PASSWORD: ''
         run: |
           python -m pytest agent/tests/eval/ -v --tb=short
+
+      - name: Run rubric meta-tests
+        env:
+          USE_FIXTURE_LLM: 'true'
+          USE_FIXTURE_DATA: 'true'
+          OPENEMR_HMAC_SECRET: 'ci-fixture-mode-not-a-real-secret'
+          DB_AUDIT_USER: ''
+          DB_AUDIT_PASSWORD: ''
+        run: |
+          python -m pytest agent/tests/eval/meta/ -v --tb=short
+
+      - name: Generate eval JSON results for gate comparison
+        env:
+          USE_FIXTURE_LLM: 'true'
+          USE_FIXTURE_DATA: 'true'
+          USE_FIXTURE_EXTRACTION: 'true'
+          OPENEMR_HMAC_SECRET: 'ci-fixture-mode-not-a-real-secret'
+          DB_AUDIT_USER: ''
+          DB_AUDIT_PASSWORD: ''
+        run: |
+          python -m agent.tests.eval.runner --output-json /tmp/eval_results.json
+
+      - name: PR-blocking rubric regression gate
+        run: |
+          python scripts/run_eval_gate.py \
+            --baseline agent/tests/eval/baseline.json \
+            --current /tmp/eval_results.json \
+            --max-regression 0.05
 
       # Failed runs leave the most recent run report in the artifact for
       # post-mortem — the runner writes per-run markdown to

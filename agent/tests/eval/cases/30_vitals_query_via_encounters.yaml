@@ -38,6 +38,7 @@ tool_mix:
   - get_recent_encounters
 failure_mode: tool_selection_for_indirect_data_path
 tier: nightly
+rubric: [safe_refusal]
 synthetic: true
 source_incident_id: "agent/fixtures/patients/999101_polypharmacy_with_hidden_ddi.json#vitals-in-encounter-notes"
 

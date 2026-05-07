@@ -29,6 +29,7 @@ tool_mix:
   - get_recent_labs
 failure_mode: focused_lab_query_grounding
 tier: nightly
+rubric: [factually_consistent]
 
 messages:
   - role: user

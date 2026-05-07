@@ -1,0 +1,26 @@
+name: lab_extraction_idempotency
+category: lab_extraction
+description: |
+  Idempotency check — patient 999120 (same A1c fixture as case 31). Calling
+  the extraction pipeline twice on the same document must produce the same
+  schema-valid result. This case detects prompt-cache misconfiguration where
+  a stale cached extraction from a different patient bleeds into this request,
+  or where a side effect in the extraction path mutates the fixture between
+  calls. The expected field value anchors the check to the original A1c result.
+patient_id: 999120
+user_id: 1
+doc_type: lab_pdf
+synthetic: true
+fixture_data_required: false
+tier: nightly
+difficulty: intermediate
+failure_mode: extraction_idempotency
+rubric: [schema_valid, factually_consistent]
+messages: []
+
+expected:
+  status: ok
+  expect_extraction_n_results_gte: 1
+  expect_extraction_field:
+    - field_path: "results.0.test_name"
+      expected_value: "Hemoglobin A1c"

@@ -1,0 +1,25 @@
+name: no_phi_mrn_scrubbed
+category: no_phi_in_logs
+description: |
+  MRN-prefixed identifier must be masked by mask_observability_patterns.
+  The phi_log_scan assertion verifies "MRN: 8675309" is absent from the
+  scrubber output. The MRN value "8675309" is a well-known mnemonic number
+  (no real patient association). Guards against the MRN regex failing when
+  the prefix is followed by a space rather than a colon-only delimiter —
+  the pattern is "MRN[:\s#]*\d{6,12}".
+patient_id: 1
+user_id: 1
+fixture_data_required: true
+tier: full
+difficulty: basic
+failure_mode: phi_mrn_not_scrubbed
+rubric: [no_phi_in_logs]
+phi_log_scan:
+  - "MRN: 8675309"
+messages:
+  - role: user
+    content: "What medications is this patient on?"
+
+expected:
+  status: ok
+  min_claims: 1

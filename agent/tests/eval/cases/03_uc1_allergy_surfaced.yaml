@@ -12,6 +12,7 @@ tool_mix:
   - get_allergies
 failure_mode: allergy_omission
 tier: smoke
+rubric: [factually_consistent]
 messages:
   - role: user
     content: "Generate a pre-visit brief for this patient."

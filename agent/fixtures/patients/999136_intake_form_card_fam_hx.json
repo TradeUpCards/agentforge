@@ -1,0 +1,39 @@
+{
+  "patient_id": 999136,
+  "document_reference_id": "docref-999136-intake_form",
+  "demographics": {
+    "name": "Test Patient 999136",
+    "dob": "1955-03-07",
+    "sex": "M",
+    "source_block_id": "block-999136-demo-001"
+  },
+  "chief_concern": "Chest pain evaluation",
+  "current_medications": [
+    {
+      "name": "Aspirin",
+      "dose": "81mg",
+      "frequency": "daily",
+      "source_block_id": "block-999136-med-001"
+    }
+  ],
+  "allergies": [],
+  "family_history": [
+    {
+      "condition": "Myocardial Infarction",
+      "relation": "father",
+      "source_block_id": "block-999136-fhx-001"
+    },
+    {
+      "condition": "Stroke",
+      "relation": "mother",
+      "source_block_id": "block-999136-fhx-002"
+    }
+  ],
+  "source_citations": {},
+  "extraction_metadata": {
+    "docling_version": "2.x.fixture",
+    "extraction_model": "claude-haiku-4-5",
+    "page_count": 2,
+    "extraction_confidence_avg": 0.95
+  }
+}
