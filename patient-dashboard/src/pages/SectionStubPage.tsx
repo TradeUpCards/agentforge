@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { MainNav } from '../components/layout/MainNav'
 import { OpenTabBar } from '../components/layout/OpenTabBar'
@@ -38,6 +39,7 @@ const LABELS: Record<string, string> = {
 export function SectionStubPage() {
   const { patientId, section } = useParams<{ patientId: string; section: string }>()
   const label = (section && LABELS[section]) ?? 'Section'
+  const [headerCollapsed, setHeaderCollapsed] = useState(false)
 
   if (!patientId) {
     return (
@@ -50,8 +52,12 @@ export function SectionStubPage() {
   return (
     <div className="min-h-screen bg-white">
       <MainNav />
-      <PatientHeader patientId={patientId} />
-      <OpenTabBar active="Dashboard" />
+      <PatientHeader patientId={patientId} collapsed={headerCollapsed} />
+      <OpenTabBar
+        active="Dashboard"
+        headerCollapsed={headerCollapsed}
+        onToggleHeader={() => setHeaderCollapsed((s) => !s)}
+      />
       <MedicalRecordHeading patientId={patientId} />
       <SubNav patientId={patientId} />
       <main className="px-4 py-8 max-w-3xl mx-auto">

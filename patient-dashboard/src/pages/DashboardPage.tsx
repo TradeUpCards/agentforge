@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { MainNav } from '../components/layout/MainNav'
 import { OpenTabBar } from '../components/layout/OpenTabBar'
@@ -28,6 +29,8 @@ import { EncountersCard } from '../components/cards/EncountersCard'
  */
 export function DashboardPage() {
   const { patientId } = useParams<{ patientId: string }>()
+  // Desktop-only header collapse state, toggled by OpenTabBar's chevron.
+  const [headerCollapsed, setHeaderCollapsed] = useState(false)
 
   if (!patientId) {
     return (
@@ -42,8 +45,12 @@ export function DashboardPage() {
   return (
     <div className="min-h-screen bg-white">
       <MainNav />
-      <PatientHeader patientId={patientId} />
-      <OpenTabBar active="Dashboard" />
+      <PatientHeader patientId={patientId} collapsed={headerCollapsed} />
+      <OpenTabBar
+        active="Dashboard"
+        headerCollapsed={headerCollapsed}
+        onToggleHeader={() => setHeaderCollapsed((s) => !s)}
+      />
       <MedicalRecordHeading patientId={patientId} />
       <SubNav patientId={patientId} />
       <DashboardGrid>

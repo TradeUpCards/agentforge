@@ -11,6 +11,13 @@ import { EncounterSelector } from './EncounterSelector'
 
 interface PatientHeaderProps {
   patientId: string
+  /**
+   * Desktop-only — when true, the lg+ variant renders a thin compact bar
+   * (just name + Active + MRN) instead of the full inline layout. Toggled
+   * by the chevron in OpenTabBar. Mobile variants ignore this prop;
+   * they have their own size logic by orientation.
+   */
+  collapsed?: boolean
 }
 
 /**
@@ -49,7 +56,7 @@ interface PatientHeaderProps {
  * DOB/Sex/MRN behind a tap, but they remain reachable without leaving
  * the page.
  */
-export function PatientHeader({ patientId }: PatientHeaderProps) {
+export function PatientHeader({ patientId, collapsed = false }: PatientHeaderProps) {
   const { data: patient, isLoading, error } = usePatient(patientId)
   const age = patient?.birthDate ? calculateAge(patient.birthDate) : undefined
   const [landscapeExpanded, setLandscapeExpanded] = useState(false)
@@ -84,40 +91,60 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
 
   return (
     <>
-      {/* ≥lg: full inline layout (desktop / tablet landscape) */}
-      <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-3">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="flex items-start gap-3">
-            <Avatar />
-            <div>
-              <h1 className="text-xl font-bold text-blue-700 m-0 leading-tight flex items-baseline gap-1.5">
-                <span>{name}</span>
-                <span className="text-gray-500 text-sm font-normal">({idShort})</span>
-                <span className="text-gray-400 text-sm font-normal">×</span>
-              </h1>
-              <p className="text-sm text-gray-700 mt-1">
-                <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
-                {age !== undefined && (
-                  <>
-                    {' '}
-                    <span className="font-semibold">Age:</span> {age}
-                  </>
-                )}
-                {' · '}
-                <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
-                {' · '}
-                <span className="font-semibold">MRN:</span>{' '}
-                <span className="font-mono">{mrn}</span>
-                {' · '}
-                <ActiveBadge active={active} />
-              </p>
+      {/* ≥lg, collapsed: thin bar (toggled by OpenTabBar's chevron) */}
+      {collapsed && (
+        <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-1.5">
+          <div className="flex items-center gap-3">
+            <Avatar small />
+            <h1 className="text-base font-bold text-blue-700 m-0 truncate">{name}</h1>
+            <ActiveBadge active={active} />
+            <span className="text-xs text-gray-600 ml-2">
+              <span className="font-semibold">MRN:</span>{' '}
+              <span className="font-mono">{mrn}</span>
+            </span>
+            <span className="ml-auto">
+              <EncounterSelector patientId={patient.id ?? ''} />
+            </span>
+          </div>
+        </header>
+      )}
+
+      {/* ≥lg, expanded: full inline layout (default) */}
+      {!collapsed && (
+        <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-3">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="flex items-start gap-3">
+              <Avatar />
+              <div>
+                <h1 className="text-xl font-bold text-blue-700 m-0 leading-tight flex items-baseline gap-1.5">
+                  <span>{name}</span>
+                  <span className="text-gray-500 text-sm font-normal">({idShort})</span>
+                  <span className="text-gray-400 text-sm font-normal">×</span>
+                </h1>
+                <p className="text-sm text-gray-700 mt-1">
+                  <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
+                  {age !== undefined && (
+                    <>
+                      {' '}
+                      <span className="font-semibold">Age:</span> {age}
+                    </>
+                  )}
+                  {' · '}
+                  <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
+                  {' · '}
+                  <span className="font-semibold">MRN:</span>{' '}
+                  <span className="font-mono">{mrn}</span>
+                  {' · '}
+                  <ActiveBadge active={active} />
+                </p>
+              </div>
+            </div>
+            <div className="mt-1">
+              <EncounterSelector patientId={patient.id ?? ''} />
             </div>
           </div>
-          <div className="mt-1">
-            <EncounterSelector patientId={patient.id ?? ''} />
-          </div>
-        </div>
-      </header>
+        </header>
+      )}
 
       {/* <lg portrait: full stacked + sticky (phone portrait, tablet portrait) */}
       <header className="hidden max-lg:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-2 shadow-sm">
