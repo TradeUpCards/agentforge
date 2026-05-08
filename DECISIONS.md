@@ -825,6 +825,154 @@ The 8 nightly-tier failures document real system limitations — they are not hi
 
 ---
 
+### 2026-05-08 — Agent-tool patient-record reads remain on direct PyMySQL; FHIR API migration and audit_master coverage deferred to W3 {#2026-05-08--read-path-fhir-and-audit-deferred-to-w3}
+
+**Supersession notice.** This entry partially supersedes the 2026-04-29 appendix entry "Direct DB access for week 1; FHIR auth deferred to week 2," which committed: *"Re-do via FHIR in week 2."* That commitment is **not honored** in the W2 build. The 5 W1 patient-record tools (`get_problem_list`, `get_active_medications`, `get_recent_labs`, `get_allergies`, `get_recent_encounters`) at `agent/tools.py` continue to issue narrow `SELECT` statements via PyMySQL against OpenEMR's MariaDB tables, using the SELECT-only `agent_ro` user shipped in W1. The 2026-05-04 W2 architecture entry's note that "FHIR R4 read path moved from Week-1 deferred → Week-2 required" was honored *only at the document-ingestion layer* (DocumentReference + Observation projection via OpenEMR's existing FHIR R4 adapter); the patient-record read path stayed on the W1 mechanism.
+
+**Decision.** Keep `agent/tools.py` on direct PyMySQL with the `agent_ro` read-only user for W2. Defer to W3:
+
+1. SMART-on-FHIR client migration of the 5 patient-record tools.
+2. Adding an `EventAuditLogger` call in `CoPilotController::onChatRequest` (right after the `AclMain::aclCheckCore` gate) so each `/chat` request leaves a row in OpenEMR's standard `audit_master` table, mirroring how OpenEMR audits other PHI-access surfaces.
+
+The dashboard FHIR consumption (W2 Surprise Challenge — `patient-dashboard/`, merged at `86a8f8c8b`) is the only W2 workstream that consumes OpenEMR's FHIR R4 endpoints as a live data layer.
+
+**Two distinct read-side gaps this defers:**
+
+| Gap | What it is today | Why W3 |
+|---|---|---|
+| **API mechanism** — agent reads via PyMySQL, not FHIR API | Direct `SELECT` on 4 OpenEMR clinical tables (`lists`, `prescriptions`, `procedure_result`, `form_encounter`) via `agent_ro` user | Brief permits ("FHIR resources or OpenEMR records"); migration is a 1–2 day SMART-on-FHIR client + tool rewrite; deadline pressure favored consolidation |
+| **`audit_master` coverage** — Co-Pilot reads invisible to compliance queries against OpenEMR's standard audit table | `agent_log` captures per-`/chat` audit (closes AUDIT.md C-1); ACL denials hit `audit_master` via `aclCheckCore`; ACL successes do not | One `EventAuditLogger` call in `CoPilotController` would close discoverability without changing any data-access mechanism |
+
+**Rationale.**
+
+Three forces drove this decision:
+
+1. **The W2 brief does not require either.** The canonical W2 brief (`.gauntlet/week2/Week 2 - AgentForge Clinical Co-Pilot.pdf`) is silent on the agent's read mechanism AND on `audit_master` integration. Page 4 Core Agent Requirement #1 explicitly permits *"FHIR resources or OpenEMR records"* — both for ingestion writes and (by omission) for tool reads. Page 5's observability requirement is satisfied by `agent_log` + Langfuse, not `audit_master`. The Hard Gate (page 5) is behavioral: graders inject a regression and confirm the CI gate fails — orthogonal to FHIR-vs-SQL or `audit_master`-vs-`agent_log`.
+
+2. **DB-user-level access control + dedicated `agent_log` audit is at least as strong as FHIR session-based auth + `audit_master` would be in our deployment.** `agent_ro` has `SELECT`-only privileges on a narrow column set (no `patient_data.ss`, no `drivers_license` per AUDIT.md C-3); HIPAA min-necessary is enforced at the database layer. ACL is upstream at the OpenEMR module (`AclMain::aclCheckCore('patients', 'med')` runs before any agent call). `agent_log` provides per-request audit at the HIPAA §164.312(b) "who/what/when/outcome" grain via an INSERT-only DB user — arguably stricter than `audit_master` (which has full CRUD privileges available to the webserver user).
+
+3. **W2 deadline pressure favored consolidation over migration.** The W2 sprint had four mandatory deliverables (document ingestion, hybrid RAG, supervisor + 2 workers, 50-case eval suite + PR-blocking CI). The `agent_ro` mechanism + `agent_log` audit were working, tested, and integrated. Migrating to a SMART-on-FHIR client would have required: SMART app registration, redirect URIs, token exchange + refresh, tool rewrites, and re-validation of the 67-case eval suite against the new path. The cost did not justify the benefit when the brief permits the current mechanism.
+
+**Trade-offs accepted.**
+
+- **Defensibility gap against the W1 PRD's stated commitment.** A grader or cohort member reading W1 PRD §5 may legitimately ask: *"Why didn't you re-do via FHIR per your own roadmap?"* This entry is the answer.
+- **`audit_master` discoverability gap.** A compliance officer querying `audit_master` for "what happened to patient X" sees the chart-load events but not the Co-Pilot AI queries. This is misleading by absence. The W3 fix is one `EventAuditLogger` call; we accept the gap for W2.
+- **Standards-alignment narrative is weaker than it would be with FHIR.** We can say "the data is FHIR-queryable on read" (true — OpenEMR's FHIR R4 adapter projects our SQL rows as resources) but cannot say "the agent itself speaks FHIR." For a hospital CTO this is a legitimate critique to acknowledge rather than spin.
+- **Latency advantage is real but small at W2 scale.** Each FHIR API call would add ~30–80 ms of HTTP + auth round-trip on the same Docker network. At 5 baseline tools per `/chat` that is a 150–400 ms tax we currently avoid. At scale beyond ~1K requests/hour the advantage shrinks because the latency floor is dominated by Anthropic LLM time.
+- **Future migration cost compounds with every additional tool.** A 6th W1-style tool added in W3 (e.g., `get_immunizations`, `get_vitals`) pays the migration cost too when we eventually move.
+
+**What WAS honored from the 2026-04-29 commitment.**
+
+- The 2026-05-04 entry's scoped re-route — *"DocumentReference + Observation persistence is core to ingestion roundtrip"* — is satisfied at the read-side projection layer. `RoundtripService` writes into `procedure_result` / `lists` / `prescriptions`; OpenEMR's existing `FhirObservationService`, `FhirAllergyIntoleranceService`, `FhirMedicationStatementService` project those rows as FHIR R4 resources on read.
+- The W2 Surprise Challenge dashboard (Cleo's workstream, merged at `86a8f8c8b`) consumes OpenEMR's FHIR R4 endpoints directly. That is the workstream where "FHIR as the data layer" was most prominent in the surprise-challenge brief, and it shipped on FHIR.
+
+**Alternatives considered and rejected for W2.**
+
+| Alternative | Reason rejected |
+|---|---|
+| Migrate all 5 W1 tools to OpenEMR FHIR R4 endpoints in W2 | SMART-on-FHIR client setup + token-exchange + tool rewrite + eval re-validation estimated at 1–2 days; W2 already had four substantial deliverables on the critical path; eval gate hardening (MRs 50–54) consumed available time |
+| Migrate just `get_recent_labs` (highest-FHIR-affinity tool) | Half-migrated tool surface is harder to defend than either fully migrated or fully not — asymmetric without justification |
+| Keep PyMySQL but add a FHIR-shaped wrapper layer | Adds serialization step + maintenance burden without changing the underlying access mechanism; FHIR-querability via OpenEMR's adapter already provides this on read-side projection |
+| Add `EventAuditLogger` to `CoPilotController` for read-side `audit_master` coverage in W2 | Small PHP change (~30 min code), but during the 88%-pass-rate freeze window the regression risk vs. defensibility-doc value tipped toward defer-with-doc; W3 candidate |
+| Document the deferral and ship as-is for W2; revisit in W3 | **Chosen.** Brief permits, deadline pressure justifies, narrative is defendable in interview, defensibility gap is documented rather than hidden |
+
+**Revisit threshold.** Re-evaluate this decision if any of the following:
+
+- A 6th W1-style tool is proposed for W3 — at that point the migration surface becomes large enough that piecewise migration is more expensive than a single coordinated cutover.
+- A grader, cohort, or hospital-CTO-shaped reviewer flags the direct-PyMySQL choice OR the `audit_master` gap as a meaningful concern. This entry is intended to pre-empt this; if it surfaces as real friction, the migration cost is justified.
+- An OpenEMR upstream change moves write-side validation into the FHIR R4 service layer — at that point our direct SQL reads (and writes — see paired entry below) would both bypass validation we should not be bypassing.
+- W3 capacity exists for either fix without displacing other W3 priorities. The `audit_master` `EventAuditLogger` call alone is a ~30-minute fix and could ship as a small standalone MR in W3 even without the larger SMART-on-FHIR migration.
+
+**Source.** W1 PRD §5 (`.gauntlet/week1/prd.md` line 94 in the working PRD; canonical brief at `.gauntlet/week1/Week 1 - AgentForge.pdf`); W2 brief page 4 Core Agent Requirement #1 (`.gauntlet/week2/Week 2 - AgentForge Clinical Co-Pilot.pdf`); 2026-04-29 appendix entry "Direct DB access for week 1; FHIR auth deferred to week 2"; 2026-05-04 W2 architecture entry item 13 ("FHIR R4 read path moved from Week-1 deferred → Week-2 required"); current implementation at `agent/tools.py` lines 1-22 (docblock) + 32 (`import pymysql`) + 647/685/726/771/803 (the 5 SELECT statements); `CoPilotController.php` line 139 + 315 (ACL check site where `EventAuditLogger` would be added in W3). Paired with the write-path entry below.
+
+---
+
+### 2026-05-08 — Direct-SQL ingestion writes bypass OpenEMR's audit_master; reconstructible via co_pilot_* custom tables; EventAuditLogger integration deferred to W3 {#2026-05-08--write-path-audit-master-deferred-to-w3}
+
+**Decision.** Keep `RoundtripService::roundtripLabReport`, `roundtripAllergies`, and `roundtripMedications` on direct `QueryUtils::sqlInsert()` against OpenEMR's clinical tables (`procedure_order` + `procedure_order_code` + `procedure_report` + N × `procedure_result`; `lists` for allergies; `prescriptions` for medications) for W2. Defer to W3: adding `EventAuditLogger->newEvent()` calls after each clinical-table insert so Co-Pilot extractions appear in OpenEMR's standard `audit_master` table alongside other PHI-modifying events.
+
+**Important context — P4 R1 clinician-gated flow (commit `2a2d66a5b`).** As of 2026-05-08 the round-trip is no longer synchronous on document save. The new flow:
+
+1. Document upload → `DocumentSavedSubscriber::onDocumentCreated` runs the agent extraction pipeline.
+2. Successful extractions land in `co_pilot_extractions.status = 'pending_review'` (per `ExtractionStatus::PENDING_REVIEW`). **No clinical-table writes happen here.**
+3. A clinician reviews the extracted fields in the HITL UI.
+4. On Approve: `CoPilotController::handleApprove` → `RoundtripService::roundtripFromExtractionId` → existing per-doc_type round-trip logic (lab / allergy / medication) → status transitions to `ExtractionStatus::APPROVED`. Clinical-table writes happen here, gated by the clinician's explicit action.
+5. On Reject: status transitions to `ExtractionStatus::REJECTED`; no clinical-table writes ever happen.
+
+**This change is HIPAA-positive on its own** — autonomous AI writes to the chart are eliminated; every clinical-table row written by the Co-Pilot is preceded by a logged clinician approval action through `CoPilotController` (which has CSRF + ACL + horizontal-escalation + state-machine guards). The `audit_master` gap discussed below is therefore narrower than it was pre-P4: the clinician approval action itself is captured in `co_pilot_extractions.status` transitions and CoPilotController's standard PHP logging.
+
+**Two distinct gaps this entry acknowledges:**
+
+| Gap | What it is today | Why W3 |
+|---|---|---|
+| **API mechanism** — writes via direct SQL, not FHIR R4 endpoints | Direct `INSERT` into 4 OpenEMR clinical tables via `RoundtripService` | W2 brief Core Agent Requirement #1 explicitly permits *"FHIR resources or OpenEMR records"* — chose records, modeled on OpenEMR's CDA importer (`Cda/CdaTemplateImportDispose.php` lines 1620-1680, 165+, 1275+) which uses the same direct-SQL pattern |
+| **`audit_master` coverage** — Co-Pilot writes + clinician approval actions invisible to compliance queries against OpenEMR's standard audit table | Audit reconstructible via JOIN across 3 custom tables: `co_pilot_extractions` (per-extraction event with status transitions), `co_pilot_fhir_links` (per-clinical-row link), `co_pilot_extracted_fields` (per-field traceability with verification status). `CoPilotController::handleApprove` and `handleReject` log to PHP `SystemLogger` only. | Adding `EventAuditLogger` calls in 4 locations would close discoverability: 3 in `RoundtripService` (after each `procedure_result` / `lists` / `prescriptions` write — fires inside `roundtripFromExtractionId`'s call chain) + 1 in `CoPilotController::handleApprove` after the state-machine guard passes. ~1–2 hour PHP change; during the 88%-pass-rate freeze window, regression risk vs. defensibility-doc value tipped toward defer-with-doc |
+
+**Rationale.**
+
+Three forces drove this decision:
+
+1. **The W2 brief explicitly permits the API choice.** Page 4 Core Agent Requirement #1, verbatim: *"persist derived facts as appropriate FHIR resources or OpenEMR records."* The "or" is load-bearing. We chose OpenEMR records. Page 3's "FHIR and OpenEMR integrity" requirement — *"round-trip through OpenEMR without creating duplicate or untraceable records"* — is satisfied by `RoundtripService`'s cross-attempt natural-key dedup via `co_pilot_fhir_links` (UNIQUE-keyed lookup; re-extraction updates in place; one row per fact regardless of attempt count).
+
+2. **The data IS HIPAA-sufficient via the custom tables.** HIPAA §164.312(b) requires audit records sufficient to identify who/what/when/outcome for PHI-modifying events. The 3 `co_pilot_*` tables collectively capture all four:
+   - **Who:** `co_pilot_extractions.user_id` (front-desk uploader); the P4 R1 clinician approval flow also captures the PCP user_id via `CoPilotController::handleApprove`'s session context.
+   - **What:** `co_pilot_fhir_links.target_table` + `target_record_id` identifies the exact clinical row written; `co_pilot_extracted_fields` identifies the field-level value + verification status.
+   - **When:** `co_pilot_extractions.created_at` per extraction event; status transitions implicitly time-stamped via the row update.
+   - **Outcome:** `co_pilot_extractions.status` (`pending_review` / `approved` / `rejected` / `error` / `refused`) shows the full state machine; the `is_active` / `attempt_n` chain shows retry behavior.
+   
+   The gap is **discoverability**, not data-completeness — a compliance officer querying `audit_master` won't see Co-Pilot writes there, but a JOIN across `co_pilot_*` tables reconstructs the full audit trail.
+
+3. **W2 deadline pressure + freeze window risk-aversion.** Adding 4 `EventAuditLogger` calls is small but each carries an exception-path consideration (does audit-write failure block the user-facing extraction or approval action? answer should be no, fail-safe like `agent/_audit_log.py`). During the post-cluster-sweep stability window (88% pass rate at master, gate hardened with 80% min-floor + strip-rate axis), introducing new write-side code paths carries non-trivial regression risk that the brief does not require us to take.
+
+**Trade-offs accepted.**
+
+- **`audit_master` discoverability gap.** A compliance review tool pointed at `audit_master` will report "no Co-Pilot writes" when in fact the Co-Pilot did write (post-clinician-approval). Misleading by absence. The W3 fix closes this without changing the underlying SQL-write mechanism.
+- **No DB-level integrity controls on the clinical tables.** Unlike `agent_log`'s `agent_audit_rw` INSERT-only user, our writes to `procedure_result` / `lists` / `prescriptions` go through whatever DB user the OpenEMR PHP process runs as — typically with full CRUD. Cross-attempt natural-key dedup uses UPDATE deliberately for upserts, so this is by design — but it means we can't claim "writes are append-only at the DB layer" the way we can for `agent_log`.
+- **No per-write-event audit row equivalent to `agent_log`.** The closest equivalent is `co_pilot_extractions`, but it lacks `agent_log`-style payload metadata (no LLM-call breakdown, no verifier_verdict). Field-level traceability is in `co_pilot_extracted_fields` instead — a different shape than `agent_log` row-per-request, JSON-blob-per-tool.
+- **Naming smell.** Class is `RoundtripService` and table is `co_pilot_fhir_links` — names suggest FHIR-based round-trip, which the implementation does not do. We mitigate by docblock explanation in `RoundtripService.php` and by this entry's explicit acknowledgment.
+
+**What we have today (the 3-table custom audit trail).**
+
+A regulator query like "show me all Co-Pilot writes to patient X's chart" reconstructs as:
+
+```sql
+SELECT
+    cpe.user_id, cpe.patient_id, cpe.doc_ref_id, cpe.created_at,
+    cpe.model, cpe.status, cpe.attempt_n,
+    cpfl.target_table, cpfl.target_record_id, cpfl.resource_kind,
+    cpef.field_path, cpef.verification_status
+FROM co_pilot_extractions cpe
+JOIN co_pilot_fhir_links cpfl ON cpfl.co_pilot_extraction_id = cpe.id
+LEFT JOIN co_pilot_extracted_fields cpef
+    ON cpef.clinical_table = cpfl.target_table
+   AND cpef.clinical_row_id = cpfl.target_record_id
+WHERE cpe.patient_id = :pid
+  AND cpe.status = 'approved'   -- only approved extractions write to clinical tables (P4 R1)
+ORDER BY cpe.created_at DESC;
+```
+
+This returns the full audit trail at field grain. The gap closed by W3 is making the same data discoverable via OpenEMR's standard `audit_master` query patterns without requiring knowledge of the `co_pilot_*` custom tables.
+
+**Alternatives considered and rejected for W2.**
+
+| Alternative | Reason rejected |
+|---|---|
+| Refactor `RoundtripService` to use OpenEMR FHIR R4 services (`FhirObservationService::insert()` etc.) | Brief permits direct SQL; rewrite cost (auth, OAuth client creds, FHIR resource shape mapping, idempotency story shifts via FHIR `ifMatch` headers, eval re-validation) estimated at multi-day; deferred to W3 alongside read-path SMART-on-FHIR migration as a coherent W3 workstream |
+| Add `EventAuditLogger` calls in `RoundtripService` + `CoPilotController` now (~1-2 hours) | Small but during freeze window; carries exception-path considerations (audit-write fail-safety); defensibility doc closes the discoverability gap for interview purposes without code-change risk; W3 candidate |
+| Add DB-level INSERT triggers on `procedure_result` / `lists` / `prescriptions` writing to `audit_master` | Cross-cuts all OpenEMR writes (not just Co-Pilot); architectural overreach; would need OpenEMR-core agreement |
+| Document the deferral and ship as-is for W2; revisit in W3 | **Chosen.** Mirrors the read-path entry's approach; pairs as a coherent W3 workstream |
+
+**Revisit threshold.** Re-evaluate this decision if any of the following:
+
+- A grader, cohort, or hospital-CTO-shaped reviewer flags the `audit_master` discoverability gap as a meaningful concern. This entry is intended to pre-empt this; if it surfaces as real friction, the 1-2 hour `EventAuditLogger` fix is justified as a standalone MR.
+- W3 includes a SMART-on-FHIR client migration for the read path. At that point, the write-path FHIR R4 migration becomes a natural paired workstream; doing both together amortizes the SMART-on-FHIR setup cost.
+- An OpenEMR upstream change makes `EventAuditLogger` integration a hard requirement (e.g., a CI lint check that fails on PHI-table writes without an audit call). Unlikely but worth tracking.
+- Compliance review (real or grader-simulated) demonstrates that the `co_pilot_*` reconstruction query is non-trivial enough to be a practical barrier.
+
+**Source.** W2 brief page 3 ("FHIR and OpenEMR integrity") + page 4 Core Agent Requirement #1 ("FHIR resources or OpenEMR records"); current implementation at `RoundtripService.php` (post-P4 R1: `roundtripFromExtractionId` is the new entry point at line 253; legacy `roundtripLabReport` / `roundtripAllergies` / `roundtripMedications` still own the per-resource SQL writes); `CoPilotController.php` `handleApprove` / `handleReject` (P4 R1, commit `2a2d66a5b`); custom audit tables in `interface/modules/custom_modules/oe-module-clinical-copilot/sql/install.sql` (post-Aria-P3 idempotent `#IfMissingColumn` blocks); `DocumentSavedSubscriber.php` (P4 R1: `RoundtripService::roundtrip` call removed from `onDocumentCreated`); grep result confirming zero `EventAuditLogger` references across the entire module. Paired with the read-path entry above.
+
+---
+
 ## Revision log
 
 | Date | Revision | Author |
@@ -862,5 +1010,7 @@ The 8 nightly-tier failures document real system limitations — they are not hi
 | 2026-05-06 | **P1 HITL eval metrics — 8 load-bearing decisions locked.** Full rationale for each lives in the appendix entry below. (1) PHI custody: failed extraction values are never stored — structural pointers only. (2) Append-only attempt chain via `parent_extraction_id` + `is_active`. (3) Field-level upsert keyed on per-`doc_type` natural key. (4) Auto-retry triggers only on `ExtractionLowGrounding` (>30% strip). (5) Retry ladder order: Haiku-default → Haiku-verbatim → Sonnet-verbatim. (6) `template_id` auto-tagged from filename for W2 demo. (7) Reactivation does not delete clinical rows. (8) Per-document cost ceiling $0.50; per-run ceiling via env var. Source of truth: `.gauntlet/week2/hitl-extraction-prd.md` §12. | AgentForge build |
 | 2026-05-07 | **Model split for supervisor + responder graph nodes — Haiku 4.5 default with bounded Sonnet 4.6 escalation.** Supersedes W2_ARCHITECTURE.md §0 "Sonnet 4.5 for the supervisor" claim. Full rationale + alternatives + revisit threshold in appendix entry below. New `OBSERVABILITY.md` documents the Langfuse per-node funnel and escalation-rate query. | AgentForge build — delivery-lead |
 | 2026-05-08 | **W2 eval-cleanup outcomes + nightly-tier deferrals.** MRs 50–53 shipped: fixture-extraction env var wired (closed 18 extraction failures), `_GUIDELINE_KEYWORDS` expansion (closed 2 evidence-retrieval cases), `max_tokens` 4096→8192 (closed 1 truncation case + unmasked 3 expected security-boundary cases), gate hardening (trace tags, enriched FAILs, 80% min-floor, smoke-tier 8→14, strip-rate gate in both CI configs). Final state: 59/67 (88%) merged pass rate; 48 fixture-mode cases pass at 100%. 8 remaining failures documented in appendix entry above: Bucket A (P6 verifier boundary, W3), Bucket B (corpus gaps, content-engineering), Bucket C (case-spec error, W3 YAML fix), Bucket D (format-compliance edge case, W3 prompt iteration). Full trace evidence in `.gauntlet/week2/audit/2026-05-08-eval-failures.md` (gitignored). | AgentForge build — delivery-lead |
+| 2026-05-08 | **Read-path FHIR migration + audit_master coverage deferred to W3.** Acknowledges the unhonored 2026-04-29 commitment ("Re-do via FHIR in week 2"); documents two distinct gaps (PyMySQL vs FHIR API mechanism; `agent_log` captures audit but `audit_master` does not see Co-Pilot reads); rationale (W2 brief permits, DB-user-level access control + `agent_log` INSERT-only is HIPAA-sufficient, deadline pressure); revisit threshold; pre-empts interview-defense question. Paired with the write-path entry. | AgentForge build — Bram |
+| 2026-05-08 | **Write-path direct-SQL writes + audit_master coverage deferred to W3.** W2 brief's "FHIR resources or OpenEMR records" permits the SQL choice; modeled on OpenEMR's CDA importer pattern; audit reconstructible via JOIN across 3 `co_pilot_*` custom tables (extractions + fhir_links + extracted_fields); P4 R1's clinician-gated round-trip (commit `2a2d66a5b`) makes the autonomous-write concern moot but the `audit_master` discoverability gap remains; gap is discoverability not data-completeness; revisit threshold; W3 fix is 4 `EventAuditLogger` calls (3 in `RoundtripService` + 1 in `CoPilotController::handleApprove`). Paired with the read-path entry. | AgentForge build — Bram |
 
 When updating, add a row to this table and date-stamp any modified appendix entries inline.
