@@ -101,6 +101,41 @@ describe('AllergiesCard', () => {
     expect(screen.getByText('mild')).toBeInTheDocument()
   })
 
+  it('expands a row to show reaction details when the user clicks it', async () => {
+    const bundle: FhirBundle<FhirAllergyIntolerance> = {
+      resourceType: 'Bundle',
+      entry: [
+        {
+          resource: {
+            resourceType: 'AllergyIntolerance',
+            id: 'a1',
+            code: { text: 'Penicillin' },
+            criticality: 'high',
+            recordedDate: '2024-03-01',
+            reaction: [
+              { severity: 'severe', manifestation: [{ text: 'Anaphylaxis' }] },
+            ],
+          },
+        },
+      ],
+    }
+    mockGetAllergies.mockResolvedValue(bundle)
+    const { default: userEvent } = await import('@testing-library/user-event')
+    const user = userEvent.setup()
+    renderWithQueryClient(<AllergiesCard patientId="phil-belford-uuid" />)
+
+    // The row trigger is the only button rendered (apart from CardShell's
+    // internals). Find by accessible name = the row's text.
+    const trigger = await screen.findByRole('button', { name: /Penicillin/i })
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(trigger)
+
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText(/Anaphylaxis/)).toBeInTheDocument()
+    expect(screen.getByText(/Recorded/)).toBeInTheDocument()
+  })
+
   it('renders the "No Known Allergies" empty state for a zero-entry bundle', async () => {
     mockGetAllergies.mockResolvedValue({
       resourceType: 'Bundle',

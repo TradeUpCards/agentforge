@@ -25,7 +25,7 @@ export function ErrorRetry({ error, onRetry }: ErrorRetryProps) {
       <button
         type="button"
         onClick={onRetry}
-        className="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+        className="inline-flex items-center justify-center px-3 py-2 min-h-11 md:min-h-0 md:py-1 md:px-2.5 text-xs font-medium rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
       >
         Retry
       </button>

@@ -39,20 +39,30 @@ export function SubNav({ patientId }: { patientId: string }) {
       className="bg-white border-b border-gray-200 px-4"
       aria-label="Patient record sections"
     >
-      <ul className="flex flex-wrap gap-x-5 gap-y-1 text-sm py-2 m-0">
+      {/* On <md: horizontal scroll strip with no wrap, 44 px touch
+          targets, momentum scrolling. On >=md: original wrap layout. */}
+      <ul
+        className="
+          flex md:flex-wrap gap-x-5 gap-y-1 text-sm py-2 m-0
+          max-md:overflow-x-auto max-md:flex-nowrap max-md:whitespace-nowrap
+          max-md:-mx-4 max-md:px-4
+        "
+      >
         {ITEMS.map((item) => {
           const to = item.slug
             ? `/dashboard/${patientId}/${item.slug}`
             : `/dashboard/${patientId}`
           return (
-            <li key={item.slug || 'dashboard'}>
+            <li key={item.slug || 'dashboard'} className="shrink-0">
               <NavLink
                 to={to}
                 end={item.slug === ''}
                 className={({ isActive }) =>
-                  isActive
-                    ? 'text-gray-900 font-semibold'
-                    : 'text-blue-700 hover:underline'
+                  `inline-flex items-center min-h-11 md:min-h-0 ${
+                    isActive
+                      ? 'text-gray-900 font-semibold'
+                      : 'text-blue-700 hover:underline'
+                  }`
                 }
               >
                 {item.label}

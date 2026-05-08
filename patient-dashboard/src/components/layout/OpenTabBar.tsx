@@ -7,7 +7,17 @@
  * open patient/feature tabs (multi-tab session). Our React app does
  * not implement multi-tab; the strip is here for visual familiarity.
  *
- * Wiring:
+ * Responsive behavior (per the matrix in PATIENT_DASHBOARD_MIGRATION.md
+ * §17): hidden on `<md` (any phone orientation). Justification:
+ *   - The strip represents OpenEMR's multi-tab session shell which has
+ *     no functional analog on phone widths — clicking a tab opens the
+ *     legacy app in a new browser tab regardless.
+ *   - Visual familiarity isn't load-bearing here; hiding reclaims ~40
+ *     px of scarce vertical space on small screens.
+ *   - Power-users who want OpenEMR's multi-tab shell can launch via
+ *     the MainNav hamburger -> OpenEMR home, same as the chevron arrow.
+ *
+ * Wiring (≥md only):
  *   - "Dashboard" tab is rendered as the active tab, no link (we are
  *     already there).
  *   - The other tabs link to OpenEMR's main_screen.php in a new tab —
@@ -35,7 +45,7 @@ interface OpenTabBarProps {
 export function OpenTabBar({ active = 'Dashboard' }: OpenTabBarProps) {
   return (
     <div
-      className="bg-white border-b border-gray-200 px-4 py-1 flex items-end gap-3"
+      className="hidden md:flex bg-white border-b border-gray-200 px-4 py-1 items-end gap-3"
       aria-label="Open tabs"
     >
       <span className="text-blue-700 text-base leading-none mr-1" aria-hidden="true">
