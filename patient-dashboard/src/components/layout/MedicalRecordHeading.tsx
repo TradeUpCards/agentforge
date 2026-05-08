@@ -16,8 +16,8 @@ export function MedicalRecordHeading({ patientId }: { patientId: string }) {
   const name = patient ? getPatientDisplayName(patient) : '…'
 
   return (
-    <div className="bg-white px-4 py-2 border-b border-gray-200 flex items-center justify-between">
-      <p className="text-base font-semibold text-gray-800 m-0">
+    <div className="bg-white px-4 py-2 border-b border-gray-200 flex items-center justify-between gap-3">
+      <p className="text-base font-semibold text-gray-800 m-0 truncate flex-1 min-w-0">
         Medical Record Dashboard - {name}
       </p>
       <div className="flex items-center gap-3 text-gray-500" aria-hidden="true">

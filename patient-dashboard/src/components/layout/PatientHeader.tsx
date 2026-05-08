@@ -32,37 +32,29 @@ interface PatientHeaderProps {
  * Patient identity strip — mirrors the OpenEMR row directly below the
  * open-tabs bar.
  *
- * Three layout variants by viewport (per the matrix in
- * PATIENT_DASHBOARD_MIGRATION.md §17):
+ * Three layout variants picked by CONTAINER WIDTH (not viewport width).
+ * This matters when the Co-Pilot drawer pushes the chart and shrinks
+ * the patient-header's actual width even though the viewport hasn't
+ * changed — viewport queries would still render the wide variant in a
+ * narrow space, truncating the name with an ellipsis. Container queries
+ * pick the right variant for the actual width:
  *
- *   ≥lg (tablet landscape / desktop)
- *     Full one-line layout: avatar | name | DOB · Age · Sex · MRN · Active.
- *     Not sticky — wide screens have plenty of vertical room and the
- *     cards scroll under the OpenTabBar / heading bar separately.
+ *   < @xl   (< 576 px)        : stacked 2-line variant
+ *     Avatar + name + Active badge on row 1; DOB · Age · Sex · MRN
+ *     wrapped on row 2. Used for phone portrait, phone landscape with
+ *     Co-Pilot open, and tablet portrait with Co-Pilot open.
  *
- *   <lg portrait (phone portrait, tablet portrait)
- *     Full layout but stacked vertically (name on first row, DOB/Age/Sex/MRN
- *     wrapped, Active pill at end). Sticky to the top of the scroll area
- *     so the clinician always knows which patient they are looking at while
- *     scrolling cards. Clinical safety: prevents "wrong patient" cognitive
- *     errors during a long med list.
+ *   @xl    (576 - 1023 px)    : dense single-line variant
+ *     Whole identity packs onto one line. Used for phone landscape at
+ *     full width and tablet landscape with Co-Pilot open.
  *
- *   <lg landscape (phone landscape — including iPhone 14+ at ~844-932 px)
- *     COMPACT sticky variant: name + Active badge only, in a thin ~40 px
- *     bar. Tap to expand inline (reveals DOB/Age/Sex/MRN below). Defends
- *     the clinical-safety property at half the vertical cost — landscape
- *     phones have ~390 px of usable height before the keyboard, so every
- *     pixel matters.
+ *   @5xl+  (≥ 1024 px)        : desktop full inline variant
+ *     name + (idShort) + × + DOB · Age · Sex · MRN · Active +
+ *     EncounterSelector on the right. Used for tablet landscape and
+ *     desktop at full width.
  *
- * Breakpoint choice (lg, not md): modern phones in landscape exceed the
- * md threshold (768 px) — iPhone 14 lands at 844, Pro Max at 932 — so
- * gating the mobile variants at md would render the desktop layout on
- * those devices. Aligned with MainNav's lg-breakpoint hamburger.
- *
- * The PDF requirement #2 demands name / DOB / sex / MRN / active status —
- * all five remain available in every variant. Compact landscape hides
- * DOB/Sex/MRN behind a tap, but they remain reachable without leaving
- * the page.
+ * The PDF requirement #2 demands name / DOB / sex / MRN / active status
+ * — all five appear in every variant.
  */
 export function PatientHeader({
   patientId,
@@ -102,13 +94,13 @@ export function PatientHeader({
   const idShort = patient.id?.slice(0, 8) ?? '—'
 
   return (
-    <div className="sticky top-0 z-20 bg-white">
+    <div className="sticky top-0 z-20 bg-white @container">
       <div className="relative">
       {!hidden && (
         <>
-          {/* ≥lg, collapsed: thin bar (toggled by OpenTabBar's chevron) */}
+          {/* @5xl+, collapsed: thin bar (toggled by OpenTabBar's chevron) */}
           {collapsed && (
-            <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-1.5">
+            <header className="hidden @5xl:block bg-white border-b border-gray-200 px-4 py-1.5">
               <div className="flex items-center gap-3">
                 <Avatar small />
                 <h1 className="text-base font-bold text-blue-700 m-0 truncate">{name}</h1>
@@ -124,9 +116,9 @@ export function PatientHeader({
             </header>
           )}
 
-          {/* ≥lg, expanded: full inline layout (default) */}
+          {/* @5xl+, expanded: full inline layout (default) */}
           {!collapsed && (
-            <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-3">
+            <header className="hidden @5xl:block bg-white border-b border-gray-200 px-4 py-3">
               <div className="flex items-start justify-between gap-4 flex-wrap">
                 <div className="flex items-start gap-3">
                   <Avatar />
@@ -161,13 +153,13 @@ export function PatientHeader({
             </header>
           )}
 
-          {/* <lg portrait: dense 2-line header (phone portrait, tablet
-              portrait). Static — vertical room is plentiful in portrait,
-              so no per-variant collapse. Drawer toggle below covers the
-              "I want all my screen" case.
+          {/* < @xl: dense 2-line stacked variant.
+              Used for phone portrait, AND for any larger viewport when
+              the Co-Pilot drawer squeezes the chart container below
+              576 px (e.g., phone landscape with Co-Pilot open).
                 Line 1: avatar + name + Active badge
-                Line 2: DOB · Age · Sex · MRN */}
-          <header className="hidden max-lg:portrait:block bg-white border-b border-gray-200 px-4 py-2">
+                Line 2: DOB · Age · Sex · MRN (flex-wraps if very narrow) */}
+          <header className="@xl:hidden bg-white border-b border-gray-200 px-4 py-2">
             <div className="flex items-center gap-3">
               <Avatar small />
               <h1 className="text-base font-bold text-blue-700 m-0 leading-tight truncate flex-1 min-w-0">
@@ -194,11 +186,10 @@ export function PatientHeader({
             </p>
           </header>
 
-          {/* <lg landscape: single-line dense bar.
-              Vertical room is precious (~390 px before keyboard); the
-              whole identity packs onto one line. Phone landscape
-              including iPhone 14+ at 844-932 px. */}
-          <header className="hidden max-lg:landscape:block bg-white border-b border-gray-200 px-4 py-1.5">
+          {/* @xl - @5xl: single-line dense bar.
+              Used for phone landscape at full width AND tablet landscape
+              with Co-Pilot squeezing the chart between 576-1024 px. */}
+          <header className="hidden @xl:block @5xl:hidden bg-white border-b border-gray-200 px-4 py-1.5">
             <div className="flex items-center gap-2 text-xs">
               <span className="font-bold text-blue-700 truncate min-w-0 flex-shrink">
                 {name}
