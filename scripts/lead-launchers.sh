@@ -228,20 +228,35 @@ _parse_kickoff() {
         return 1
     fi
 
-    # Validate worktree shape — must be ../<single-segment>, no embedded `..`,
-    # no nested directory components, no shell metacharacters. This rejects
-    # absolute paths and sideways escapes like ../foo/../bar.
-    if ! printf '%s' "$worktree_raw" | grep -Eq '^\.\./[A-Za-z0-9._-]+$'; then
-        echo "_parse_kickoff: worktree '$worktree_raw' must match ^\\.\\./[A-Za-z0-9._-]+\$ (single sibling segment)" >&2
+    # Validate worktree shape. Two forms accepted:
+    #   1. Sibling form ../<single-segment> — the standard sprint-lead pattern
+    #      (aria/bram/cleo each get their own ../AgentForge-* worktree).
+    #   2. Absolute MSYS or drive-letter form pointing into the main repo's
+    #      directory tree — used by Director-style leads (Tate) who operate
+    #      from $AGENTFORGE_ROOT itself rather than a side worktree.
+    # Both forms forbid embedded `..` and shell metacharacters.
+    local _is_absolute=0
+    if printf '%s' "$worktree_raw" | grep -Eq '^\.\./[A-Za-z0-9._-]+$'; then
+        :  # sibling form — fall through to relative resolution
+    elif printf '%s' "$worktree_raw" | grep -Eq '^/[A-Za-z]/[A-Za-z0-9._/-]+$' \
+       || printf '%s' "$worktree_raw" | grep -Eq '^[A-Za-z]:[\\/][A-Za-z0-9._\\/-]+$'; then
+        _is_absolute=1
+    else
+        echo "_parse_kickoff: worktree '$worktree_raw' must match ^\\.\\./[A-Za-z0-9._-]+\$ (sibling) or absolute MSYS/drive-letter form" >&2
         return 1
     fi
 
     # Resolve to absolute path. _canonical_path normalizes drive-letter
     # to MSYS form, then resolves . / .. via realpath -m. If neither
     # cygpath nor realpath are available, fall back to the shell-native
-    # pwd -W pattern (step 5 above forbids embedded `..`, so pwd -W's
-    # lack of `..` normalization doesn't matter).
-    local rel="$AGENTFORGE_PARENT/${worktree_raw#../}"
+    # pwd -W pattern (the validated input above forbids embedded `..`, so
+    # pwd -W's lack of `..` normalization doesn't matter).
+    local rel
+    if [ "$_is_absolute" -eq 1 ]; then
+        rel="$worktree_raw"
+    else
+        rel="$AGENTFORGE_PARENT/${worktree_raw#../}"
+    fi
     local abs
     if command -v realpath >/dev/null 2>&1 || command -v cygpath >/dev/null 2>&1; then
         abs="$(_canonical_path "$rel")"
@@ -980,6 +995,19 @@ EOF
     _parse_kickoff "$name" || return $?
     local branch="$_PARSED_BRANCH"
     local worktree="$_PARSED_WORKTREE"
+
+    # Step 1.5: Refuse to teardown the main repo. Director-style leads
+    # (Tate) point at $AGENTFORGE_ROOT directly so they can coordinate from
+    # master. `finish_<director>` would otherwise attempt a `git worktree
+    # remove $AGENTFORGE_ROOT` (git refuses the main worktree, but better to
+    # stop earlier with a clear message and prevent any junction teardown
+    # against the canonical-source directories).
+    local _root_abs
+    _root_abs="$(_canonical_path "$AGENTFORGE_ROOT")"
+    if [ "$(_canonical_path "$worktree")" = "$_root_abs" ]; then
+        echo "finish_lead: refuse — '$name' targets the main repo ($AGENTFORGE_ROOT). Director-style leads have no teardown; just exit the session or run stop_$name to remove the workspace entry." >&2
+        return 1
+    fi
 
     # Step 2: Refuse if standing inside the worktree being torn down.
     # Both sides go through _canonical_path so MSYS-form (from $worktree)

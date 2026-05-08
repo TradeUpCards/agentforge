@@ -178,17 +178,31 @@ function _Parse-Kickoff {
         throw "Kickoff ${promptPath}: branch '$branch' contains illegal characters (allowed: A-Z a-z 0-9 / _ . -)."
     }
 
-    # Strict shape: relative-up-one-then-single-segment. Forbids absolute
-    # paths, embedded '..', sideways traversal, nested directories, and
-    # shell metacharacters. Side-effect: makes GetFullPath() canonical
-    # without ambiguity.
-    if ($worktree -notmatch '^\.\./[A-Za-z0-9._-]+$') {
-        throw "Kickoff ${promptPath}: worktree '$worktree' must match '^\.\./[A-Za-z0-9._-]+\$' (single sibling segment)."
+    # Two valid shapes:
+    #   1. Sibling form '../<single-segment>' — standard sprint-lead pattern
+    #      (aria/bram/cleo each get a ../AgentForge-* worktree).
+    #   2. Absolute MSYS or drive-letter form pointing into the main repo's
+    #      directory tree — used by Director-style leads (Tate) who operate
+    #      from $AgentForgeRoot itself rather than a side worktree.
+    # Both forms forbid embedded '..' and shell metacharacters.
+    $isAbsolute = $false
+    if ($worktree -match '^\.\./[A-Za-z0-9._-]+$') {
+        # sibling form — fall through to relative resolution
+    } elseif ($worktree -match '^/[A-Za-z]/[A-Za-z0-9._/-]+$' -or
+              $worktree -match '^[A-Za-z]:[\\/][A-Za-z0-9._\\/-]+$') {
+        $isAbsolute = $true
+    } else {
+        throw "Kickoff ${promptPath}: worktree '$worktree' must match '^\.\./[A-Za-z0-9._-]+\$' (sibling) or absolute MSYS/drive-letter form."
     }
 
-    # Resolve relative to AgentForgeRoot — '..' walks up to the parent.
-    $combined    = Join-Path $AgentForgeRoot $worktree
-    $absWorktree = [System.IO.Path]::GetFullPath($combined)
+    # Resolve to absolute path. Sibling form is relative to $AgentForgeRoot;
+    # absolute form is used as-is (after GetFullPath canonicalization).
+    if ($isAbsolute) {
+        $absWorktree = [System.IO.Path]::GetFullPath($worktree)
+    } else {
+        $combined    = Join-Path $AgentForgeRoot $worktree
+        $absWorktree = [System.IO.Path]::GetFullPath($combined)
+    }
 
     return @{
         Branch      = $branch
@@ -766,6 +780,18 @@ function Finish-Lead {
     }
     $branch   = $kickoff.Branch
     $worktree = $kickoff.AbsWorktree
+
+    # --- Step 1.5: refuse to teardown the main repo -------------------
+    # Director-style leads (Tate) point at $AgentForgeRoot directly so they
+    # can coordinate from master. `Finish-<Director>` would otherwise call
+    # `git worktree remove $AgentForgeRoot` (git refuses the main worktree,
+    # but better to stop earlier and prevent any junction teardown).
+    $rootCanon = [System.IO.Path]::GetFullPath($AgentForgeRoot).TrimEnd('\','/').ToLowerInvariant()
+    $treeCanonGuard = [System.IO.Path]::GetFullPath($worktree).TrimEnd('\','/').ToLowerInvariant()
+    if ($treeCanonGuard -eq $rootCanon) {
+        Write-Error "Step 1.5: refuse — '$Name' targets the main repo ($AgentForgeRoot). Director-style leads have no teardown; just exit the session or run Stop-$Name to remove the workspace entry."
+        return
+    }
 
     # --- Step 2: refuse if standing inside the target worktree --------
     if (-not $errored) {
