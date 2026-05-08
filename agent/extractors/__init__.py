@@ -649,7 +649,12 @@ async def _run_haiku_extraction(
         except Exception:
             pass
 
-    return parsed_result
+    # P3: return the stats alongside the parsed result so callers can build
+    # field_verdicts in the HTTP response payload without re-parsing.  Internal
+    # callers (_run_extraction_with_retry, P2 tests) unpack the tuple; the
+    # public attach_and_extract / attach_and_extract_async wrappers preserve
+    # their pre-P3 return type by discarding the stats.
+    return parsed_result, extraction_stats
 
 
 async def _run_extraction_with_retry(
@@ -661,7 +666,7 @@ async def _run_extraction_with_retry(
     filename: str | None = None,
     parent_extraction_id: int | None = None,
     triggered_by: str = "initial",
-) -> Union[LabReport, IntakeForm]:
+) -> tuple[Union[LabReport, IntakeForm], "ExtractionStats"]:
     """Run the auto-retry escalation ladder per PRD §6.
 
     Ladder:
@@ -747,7 +752,7 @@ async def _run_extraction_with_retry(
             )
 
         try:
-            result = await _run_haiku_extraction(
+            result, extraction_stats = await _run_haiku_extraction(
                 doc=doc,
                 doc_type=doc_type,
                 patient_id=patient_id,
@@ -759,7 +764,7 @@ async def _run_extraction_with_retry(
                 triggered_by=triggered_by if attempt_n == 1 else "auto_retry",
                 parent_extraction_id=parent_extraction_id,
             )
-            return result
+            return result, extraction_stats
 
         except ExtractionLowGrounding as exc:
             # PHI note: exc contains only structural counts and the reason code
@@ -846,7 +851,10 @@ def attach_and_extract(
                 "n_blocks": len(docling_doc.blocks),
             },
         )
-        result: LabReport | IntakeForm = asyncio.run(
+        # _run_extraction_with_retry returns (result, stats); discard stats at
+        # this public boundary to preserve the pre-P3 return-type contract.
+        # Callers needing metadata should use attach_and_extract_with_metadata_async().
+        result, _stats = asyncio.run(
             _run_extraction_with_retry(
                 doc=docling_doc,
                 doc_type=doc_type,
@@ -921,7 +929,12 @@ async def attach_and_extract_async(
                 "n_blocks": len(docling_doc.blocks),
             },
         )
-        result = await _run_extraction_with_retry(
+        # _run_extraction_with_retry returns (result, stats); we discard stats
+        # at this public boundary to preserve the pre-P3 return-type contract
+        # for existing callers (LangGraph workers, etc.).  Callers that need
+        # the metadata for HTTP response construction should use
+        # attach_and_extract_with_metadata_async() below.
+        result, _stats = await _run_extraction_with_retry(
             doc=docling_doc,
             doc_type=doc_type,
             patient_id=patient_id,
@@ -950,3 +963,109 @@ async def attach_and_extract_async(
         return result
 
     return docling_doc
+
+
+async def attach_and_extract_with_metadata_async(
+    patient_id: int,
+    doc_ref_id: str,
+    doc_type: str,
+    pdf_path: Path | None = None,
+    *,
+    stage1_only: bool = False,
+    filename: str | None = None,
+    triggered_by: Literal["initial", "auto_retry", "manual_retry"] = "initial",
+    parent_extraction_id: int | None = None,
+) -> dict[str, Any]:
+    """P3 variant of attach_and_extract_async that returns a richer payload.
+
+    The HTTP /attach_and_extract endpoint needs the full Docling block inventory
+    (for the "Possibly Missed" review-modal pane) and the per-field verifier
+    verdicts (for co_pilot_extracted_fields persistence).  Both pieces of data
+    exist inside the Stage-1 + Stage-2 pipeline but are not surfaced by the
+    pre-P3 return type, which is just the validated LabReport / IntakeForm /
+    DoclingDoc.
+
+    Returns a dict with these keys (always present):
+        "result":          LabReport | IntakeForm | DoclingDoc — same as the
+                           pre-P3 return value.  Callers serialize it the same
+                           way they always did.
+        "docling_blocks":  list of {block_id, page (1-based), bbox: {x,y,w,h},
+                           text_snippet (≤80 chars)} dicts.  Includes EVERY
+                           Docling block (cited and uncited) so the UI can
+                           render the "Possibly Missed" pane.
+        "field_verdicts":  list of {field_path, source_block_id, status,
+                           verifier_reason} dicts — one per field the parser
+                           processed.  Empty list when no Stage-2 ran.
+
+    The pre-P3 attach_and_extract_async() is preserved unchanged for callers
+    (LangGraph workers, P2 retry-ladder tests) that don't need the metadata.
+
+    Args mirror attach_and_extract_async exactly — see its docstring.
+    """
+    docling_doc = _run_stage1_layout(patient_id, doc_ref_id, doc_type, pdf_path)
+    docling_blocks = _serialize_blocks_for_response(docling_doc)
+
+    # Stage-1-only path: no Stage-2 verdicts to surface.
+    if stage1_only or doc_type not in ("lab_pdf", "intake_form"):
+        return {
+            "result": docling_doc,
+            "docling_blocks": docling_blocks,
+            "field_verdicts": [],
+        }
+
+    logger.info(
+        "attach_and_extract_with_metadata_async: starting extraction (auto-retry ladder)",
+        extra={
+            "doc_ref_id": doc_ref_id,
+            "doc_type": doc_type,
+            "n_blocks": len(docling_doc.blocks),
+        },
+    )
+    result, stats = await _run_extraction_with_retry(
+        doc=docling_doc,
+        doc_type=doc_type,
+        patient_id=patient_id,
+        doc_ref_id=doc_ref_id,
+        filename=filename,
+        triggered_by=triggered_by,
+        parent_extraction_id=parent_extraction_id,
+    )
+
+    # Convert ExtractionStats.field_verdicts (list of tuples) into the wire
+    # shape the HTTP response promises.  PHI-safe: field_path values are
+    # static literals (parser-side guarantee, pinned by
+    # test_field_verdicts_field_paths_are_static_literals_no_phi).
+    field_verdicts: list[dict[str, Any]] = [
+        {
+            "field_path":      fv[0],
+            "source_block_id": fv[1],
+            "status":          "verified" if fv[2] is None else "stripped",
+            "verifier_reason": fv[2],
+        }
+        for fv in stats.field_verdicts
+    ]
+
+    n_fields = (
+        len(result.results)
+        if isinstance(result, LabReport)
+        else (
+            len(result.current_medications)
+            + len(result.allergies)
+            + len(result.family_history)
+        )
+    )
+    logger.info(
+        "attach_and_extract_with_metadata_async: extraction complete",
+        extra={
+            "doc_ref_id": doc_ref_id,
+            "doc_type": doc_type,
+            "n_extracted_fields": n_fields,
+            "n_verdicts":         len(field_verdicts),
+        },
+    )
+
+    return {
+        "result": result,
+        "docling_blocks": docling_blocks,
+        "field_verdicts": field_verdicts,
+    }

@@ -154,7 +154,10 @@ class TestKwargsFlowIntoRunExtractionWithRetry:
         mock_doc = _minimal_docling_doc()
         mock_result = _minimal_lab_report()
 
-        mock_retry = AsyncMock(return_value=mock_result)
+        # P3: _run_extraction_with_retry now returns (result, stats). The mock
+        # wraps the result in a 2-tuple with None for stats — these tests assert
+        # on call kwargs, not on the stats content, so None is sufficient.
+        mock_retry = AsyncMock(return_value=(mock_result, None))
 
         with (
             patch("agent.extractors._run_stage1_layout", return_value=mock_doc),
@@ -189,7 +192,10 @@ class TestKwargsFlowIntoRunExtractionWithRetry:
         mock_doc = _minimal_docling_doc()
         mock_result = _minimal_lab_report()
 
-        mock_retry = AsyncMock(return_value=mock_result)
+        # P3: _run_extraction_with_retry now returns (result, stats). The mock
+        # wraps the result in a 2-tuple with None for stats — these tests assert
+        # on call kwargs, not on the stats content, so None is sufficient.
+        mock_retry = AsyncMock(return_value=(mock_result, None))
 
         with (
             patch("agent.extractors._run_stage1_layout", return_value=mock_doc),
@@ -215,7 +221,10 @@ class TestKwargsFlowIntoRunExtractionWithRetry:
         mock_doc = _minimal_docling_doc()
         mock_result = _minimal_lab_report()
 
-        mock_retry = AsyncMock(return_value=mock_result)
+        # P3: _run_extraction_with_retry now returns (result, stats). The mock
+        # wraps the result in a 2-tuple with None for stats — these tests assert
+        # on call kwargs, not on the stats content, so None is sufficient.
+        mock_retry = AsyncMock(return_value=(mock_result, None))
 
         with (
             patch("agent.extractors._run_stage1_layout", return_value=mock_doc),
@@ -240,7 +249,10 @@ class TestKwargsFlowIntoRunExtractionWithRetry:
         mock_doc = _minimal_docling_doc()
         mock_result = _minimal_lab_report()
 
-        mock_retry = AsyncMock(return_value=mock_result)
+        # P3: _run_extraction_with_retry now returns (result, stats). The mock
+        # wraps the result in a 2-tuple with None for stats — these tests assert
+        # on call kwargs, not on the stats content, so None is sufficient.
+        mock_retry = AsyncMock(return_value=(mock_result, None))
 
         with (
             patch("agent.extractors._run_stage1_layout", return_value=mock_doc),
