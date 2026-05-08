@@ -103,6 +103,7 @@ export function PatientHeader({
 
   return (
     <div className="sticky top-0 z-20 bg-white">
+      <div className="relative">
       {!hidden && (
         <>
           {/* ≥lg, collapsed: thin bar (toggled by OpenTabBar's chevron) */}
@@ -222,30 +223,31 @@ export function PatientHeader({
         </>
       )}
 
-      {/* Drawer-toggle handle — small chevron-tab anchored bottom-center
-          of the sticky container. Visible at all breakpoints. When
-          `hidden` is true the headers above are unrendered, leaving
-          only this handle at the top of the page; click to re-show. */}
+      {/* Drawer-toggle handle — absolutely positioned chevron-tab. Takes
+          NO layout space; visually overlaps the header's bottom edge
+          when expanded, sits at the top of the sticky container when
+          hidden. */}
       {onToggleHidden && (
-        <div className="flex justify-center" aria-hidden="false">
-          <button
-            type="button"
-            onClick={onToggleHidden}
-            aria-expanded={!hidden}
-            aria-label={hidden ? 'Show patient header' : 'Hide patient header'}
-            className="
-              inline-flex items-center justify-center
-              px-4 py-0.5 min-h-6
-              bg-white border border-t-0 border-gray-200
-              rounded-b shadow-sm
-              text-blue-700 hover:bg-gray-50
-              focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
-            "
-          >
-            <DrawerChevron showing={!hidden} />
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={onToggleHidden}
+          aria-expanded={!hidden}
+          aria-label={hidden ? 'Show patient header' : 'Hide patient header'}
+          className={`
+            absolute left-1/2 -translate-x-1/2 z-10
+            inline-flex items-center justify-center
+            px-3 h-5
+            bg-white border border-gray-200
+            rounded-md shadow-sm
+            text-blue-700 hover:bg-gray-50
+            focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+            ${!hidden ? '-bottom-2' : 'top-1'}
+          `}
+        >
+          <DrawerChevron showing={!hidden} />
+        </button>
       )}
+      </div>
     </div>
   )
 }
