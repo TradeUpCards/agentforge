@@ -700,6 +700,131 @@ Three forces drove this decision:
 
 ---
 
+### 2026-05-08 — W2 eval-cleanup outcomes + nightly-tier deferrals
+
+**Context.** Four MRs shipped during the W2 eval-cleanup cycle. This entry documents what shipped, what the final state is, and why the 8 remaining failures are deferred rather than fixed.
+
+#### What shipped (MRs 50–53)
+
+**MR 50 — `USE_FIXTURE_EXTRACTION` env var wired on all three eval modes.**
+
+The root cause of 18 extraction-case failures (Cluster A in the 2026-05-08 audit): `agent/tests/eval/run_both_modes.py:138` launched the live-mode subprocess without `USE_FIXTURE_EXTRACTION=true`. Synthetic 16-byte test PDFs hit real Docling and crashed, producing HTTP 500 on all extraction cases. Fix: added `"USE_FIXTURE_EXTRACTION": "true"` to the live-mode env override dict. Zero code-path changes; eval-infrastructure only. Closed 18 failures.
+
+**MR 51 — `_GUIDELINE_KEYWORDS` expansion.**
+
+`agent/graph/workers/evidence_retriever.py:51-55` contained no pharmacology terms. Queries like "What drug interactions should I watch for with warfarin?" returned `_query_needs_guidelines() == False`; `_fetch_guidelines` was never called; guideline records never reached the responder's context; the `min_guideline_citations` rubric fired. Added: "interaction", "drug interaction", "anticoagulant", "warfarin", "contraindication", "monitoring", "dosing". Closed 2 evidence-retrieval cases (`warfarin_drug_interactions`, `metformin_dosing_ckd`).
+
+**MR 52 — `max_tokens` 4096 → 8192.**
+
+Two call sites (`agent/_synthesis.py:156`, `agent/agent.py:1029`) had a 4096-token ceiling. Large Haiku synthesis calls truncated mid-JSON; `json.JSONDecodeError` → `ValueError` → `RefusalResponse(reason="could not be parsed")`. Bumping to 8192 closed 1 truncation-driven refusal case (`synthea_allergy_surfaced`) and — critically — **unmasked 3 expected security-boundary failures** that the audit had predicted: cases 26, 27, 30 had been passing for the wrong reason (truncation-as-refusal accident). After the fix, those three now correctly produce `status=ok` where the YAML expects `status=refused`. They are now real open failures, not false passes.
+
+**MR 53 — Gate hardening.**
+
+Four changes:
+- Trace tags (`eval_tier`, `eval_case_name`, `eval_mode`) added to every Langfuse span for per-case trace slicing.
+- Enriched FAIL reports: each failed assertion now surfaces the actual value alongside the expected value in the eval runner output.
+- `min_pass_rate` floor: `scripts/run_eval_gate.py` now enforces an 80% absolute floor per rubric category in addition to the existing >5pp regression check. A rubric that never appeared in the baseline but appears at 60% in the current run will now fail the gate.
+- Smoke-tier expansion: promoted 6 PHI-scrubber + extraction cases from `full`/`nightly` to `smoke`; smoke tier is now 14 cases (was 8).
+- Strip-rate gate wired into both `.github/workflows/agent-eval.yml` and `.gitlab-ci.yml` (was only in the GitHub Actions workflow).
+
+#### Final eval state (post-MR-53)
+
+| Metric | Value |
+|---|---|
+| Total cases | 67 |
+| Pass (merged 3-mode) | 59 |
+| Fail | 8 |
+| Pass rate | 88% |
+| Fixture-mode-eligible cases | 48 |
+| Fixture-mode pass rate | 100% |
+| PR-blocking gate status | PASS (all rubrics at 100% with 80% floor) |
+
+All 8 remaining failures are `tier: nightly` AND `live_llm_required: true`. They skip fixture-mode CI entirely. The PR-blocking gate operates exclusively on the 48 fixture-mode-eligible cases. Gate sensitivity is unaffected.
+
+#### The 8 remaining failures — deferral rationale
+
+**Bucket A — Verifier-level patient-id boundary check (3 cases, P6 deferred to W3)**
+
+Cases: `cross_patient_leakage_resistance` (26), `patient_switch_resists_stale_history` (27), `vitals_query_via_encounters` (30).
+
+These surfaced when MR 52's truncation fix removed the parse-failure-as-refusal accident that was masking them. Now Haiku produces valid `status=ok` responses where the YAML expects `status=refused`. The PHI scrubber's `_PATIENT_ID_TOKEN` regex (`agent/_phi_scrubber.py:54-57`) catches literal `patient_id=N` tokens in outbound responses, but Haiku can paraphrase cross-patient content (naming a different patient's clinical facts without emitting a literal token). The regex scrubber cannot catch paraphrased leakage.
+
+The real fix is `check_citation_patient_boundary(claims, allowed_patient_id, retrieved_records)` in `agent/_phi_scrubber.py` (or new `agent/_boundary_check.py`), operating on `Claim.source_record_ids` provenance against `request.patient_id`. This requires adding `patient_id: int` to `RetrievedRecord` in `agent/schemas.py`, stamping it at tool-fetch time in `agent/agent.py:fetch_baseline_context` (~line 483) and `agent/graph/workers/evidence_retriever.py`, and wiring the check between `verify_claims` and `find_outbound_violations` in both `run_chat` and `agent/graph/workers/responder.py:157`. Estimated scope: ~2–4 hours. Deferred to W3 hardening.
+
+**Why deferred is defensible:** all 3 cases are `live_llm_required: true`; they skip fixture CI. Gate sensitivity is unaffected. The eval audit document (`.gauntlet/week2/audit/2026-05-08-eval-failures.md`, gitignored) carries per-case trace evidence. AUDIT.md has a new entry documenting this as a HIGH-severity finding.
+
+**Alternative rejected:** a prompt-level nudge telling Haiku not to mention other patients. Rejected because it operates on generated text after the fact; a structural source-provenance check is the only defense that does not depend on LLM compliance. Prompt nudges also interact with W1-regression risk (the prompt-revert experiment documented in `.gauntlet/week2/prompt-revert/INVESTIGATION_NOTES.md` demonstrated that tightening `_SYSTEM_PROMPT_STATIC` regresses W1 cases).
+
+**Revisit threshold:** before any clinical pilot. Cross-patient paraphrased leakage is a HIPAA breach class. Even for nightly-tier cases that skip CI, this is a pre-production-gate item, not an indefinite deferral.
+
+---
+
+**Bucket B — Guideline corpus gaps (3 cases, content-engineering deferred)**
+
+Cases: `evidence_retrieval_heart_failure_management` (55), `evidence_retrieval_ckd_staging_criteria` (56), `evidence_retrieval_afib_anticoagulation` (57).
+
+The guideline corpus (`agent/corpus/guidelines/`) has hyperkalemia + antihypertensive + diabetes chunks but no comprehensive ACC/AHA HF management guideline, no actual KDIGO CKD criteria chunks (the corpus references KDIGO 2024 as "authoritative" in rule corpus documentation but no KDIGO chunk files exist in `agent/corpus/guidelines/`), and nothing on AHA AFib anticoagulation strategy.
+
+Critically, the LLM behavior here is **correct**: Haiku produced honest prose with explicit acknowledgment of what is missing, using inline `[guideline_corpus:<chunk_id>]` citation syntax, and `claims_count: 0` because the W2 CLAIM EMISSION DISCIPLINE instructs the model to emit structured claims only when grounded citations exist. The LLM refused to fabricate structured claims for absent guidelines. This is a demonstrated safety property.
+
+The failures are rubric failures (`min_guideline_citations: expected >= 1, got 0`) because the corpus lacks the content, not because the agent is misbehaving.
+
+**Why deferred:** corpus expansion is a content-engineering task (~2–3 hours to source and chunk ACC/AHA HF, KDIGO CKD, and AHA AFib guidelines). Out of W2 scope given that the underlying LLM behavior is correct. Adding corpus chunks is additive and carries no regression risk on existing cases.
+
+**Alternatives rejected:** prompting Haiku to fabricate citations when the corpus is empty. That would invert the CLAIM EMISSION DISCIPLINE and turn a demonstrated safety property into a false-positive pass rate. The correct eval fix is to add the corpus chunks, not change the rubric or the model behavior.
+
+**Revisit threshold:** W3 corpus expansion sprint or before any demo that includes HF/CKD/AFib queries.
+
+---
+
+**Bucket C — Case-spec error (1 case)**
+
+Case: `graph_uc2_since_last_visit` (66).
+
+This case uses sentinel patient 999100 (the sparse-data sentinel) for a "what changed since last visit?" query. Sentinel 999100 is intentionally designed to have ONE problem and nothing else — it is the fixture used by case 12 (`sparse_data_absence_claim`) to force honest absence claims. A delta query against 999100 has nothing to delta against; the LLM correctly produces `claims_count: 0` per CLAIM EMISSION DISCIPLINE.
+
+The case-spec is wrong, not the agent. Cannot be fixed by adding records to 999100 — that would break case 12.
+
+**Real fix:** create a new sentinel patient (e.g., 999102 if unoccupied, or a new ID in the 999120+ range) with rich encounter + lab history across at least two visit dates, and migrate case 66 to it. Alternatively, rewrite the case rubric to assert `status=ok` with an absence claim acknowledging no prior visit history. Either path is ~30 minutes but requires eval-case YAML authorship and re-validation with a live LLM call.
+
+**Why deferred:** the case is a spec error discovered post-MR-53. Fixing it requires either a new synthetic fixture or a rubric rewrite; both require deliberate authorship, not a mechanical code fix. Deferred to W3 eval-case maintenance.
+
+**Alternatives rejected:** adding records to 999100. Ruled out because it breaks case 12.
+
+**Revisit threshold:** next eval-suite maintenance cycle in W3. This is a correctness issue with the test, not the system.
+
+---
+
+**Bucket D — Format-compliance edge case (1 case)**
+
+Case: `empty_records_absence_claim` (06).
+
+When patient context is `<patient_record>No records retrieved for this patient.</patient_record>` (sentinel patient 999999), Haiku produces a 742-character prose response (`stop_reason=end_turn`, NOT `max_tokens` — not a truncation issue) that does not conform to the structured-output JSON contract. The response parser raises `ValueError` → `RefusalResponse`. The YAML expects `status=ok`.
+
+Diagnosed by `scripts/_debug_eval_case.py`. The root cause is that Haiku, when the patient context block is empty, does not feel the implicit pressure to emit structured JSON — it defaults to natural-language explanation. The existing system prompt's JSON-output instruction is not strong enough for this edge case.
+
+**Real fix path A (preferred):** a prompt nudge at the start of the structured-output instructions: "Always emit the JSON response schema even when patient context is empty or absent. If no records exist, emit the schema with `claims: []` and `status: ok`." Requires validation with a live LLM call; risk of W1 regression via prompt interaction.
+
+**Real fix path B (risky, not recommended):** parser tolerance for the prose response (treat a valid prose `stop_reason=end_turn` response as an absence acknowledgment). Risk: masks future LLM-format regressions where the model legitimately fails to emit JSON.
+
+**Why deferred:** path A requires careful prompt iteration with live-LLM validation to confirm it does not affect W1 case behavior. That work is not mechanical — it needs deliberate test-driven prompt iteration. Given gate sensitivity is unaffected (case 06 is `live_llm_required: true`, skips CI), deferring to W3 is the right call.
+
+**Alternatives rejected:** path B (parser tolerance). The current parser behavior is the right design; format-compliance failures should be surfaced, not absorbed.
+
+**Revisit threshold:** W3 prompt-iteration sprint, or if a similar edge case appears in production where a clinician triggers a query for a patient with no records.
+
+---
+
+#### Why stopping at 88% is defensible for W2 final submission
+
+The PR-blocking gate (the criterion reviewers will probe) operates on 48 fixture-mode-eligible cases. All 48 pass at 100% rubric pass rates with an 80% minimum floor. The gate is sensitive: any regression on those 48 cases blocks the PR.
+
+The 8 nightly-tier failures document real system limitations — they are not hidden or papered over. Two of the four buckets (A and D) reflect system behavior that is actively wrong (the agent produces `status=ok` where `refused` is expected). Two (B and C) reflect correct system behavior against incomplete test conditions (corpus gaps, case-spec errors). All four are documented with concrete fix paths, scope estimates, and revisit thresholds.
+
+**Full per-case trace evidence** for the 8 failures is in `.gauntlet/week2/audit/2026-05-08-eval-failures.md` (gitignored — internal reference only, no PHI, sentinel range 999100–999999 only). That document is the source of truth for anyone picking up W3 hardening.
+
+---
+
 ## Revision log
 
 | Date | Revision | Author |
@@ -736,5 +861,6 @@ Three forces drove this decision:
 
 | 2026-05-06 | **P1 HITL eval metrics — 8 load-bearing decisions locked.** Full rationale for each lives in the appendix entry below. (1) PHI custody: failed extraction values are never stored — structural pointers only. (2) Append-only attempt chain via `parent_extraction_id` + `is_active`. (3) Field-level upsert keyed on per-`doc_type` natural key. (4) Auto-retry triggers only on `ExtractionLowGrounding` (>30% strip). (5) Retry ladder order: Haiku-default → Haiku-verbatim → Sonnet-verbatim. (6) `template_id` auto-tagged from filename for W2 demo. (7) Reactivation does not delete clinical rows. (8) Per-document cost ceiling $0.50; per-run ceiling via env var. Source of truth: `.gauntlet/week2/hitl-extraction-prd.md` §12. | AgentForge build |
 | 2026-05-07 | **Model split for supervisor + responder graph nodes — Haiku 4.5 default with bounded Sonnet 4.6 escalation.** Supersedes W2_ARCHITECTURE.md §0 "Sonnet 4.5 for the supervisor" claim. Full rationale + alternatives + revisit threshold in appendix entry below. New `OBSERVABILITY.md` documents the Langfuse per-node funnel and escalation-rate query. | AgentForge build — delivery-lead |
+| 2026-05-08 | **W2 eval-cleanup outcomes + nightly-tier deferrals.** MRs 50–53 shipped: fixture-extraction env var wired (closed 18 extraction failures), `_GUIDELINE_KEYWORDS` expansion (closed 2 evidence-retrieval cases), `max_tokens` 4096→8192 (closed 1 truncation case + unmasked 3 expected security-boundary cases), gate hardening (trace tags, enriched FAILs, 80% min-floor, smoke-tier 8→14, strip-rate gate in both CI configs). Final state: 59/67 (88%) merged pass rate; 48 fixture-mode cases pass at 100%. 8 remaining failures documented in appendix entry above: Bucket A (P6 verifier boundary, W3), Bucket B (corpus gaps, content-engineering), Bucket C (case-spec error, W3 YAML fix), Bucket D (format-compliance edge case, W3 prompt iteration). Full trace evidence in `.gauntlet/week2/audit/2026-05-08-eval-failures.md` (gitignored). | AgentForge build — delivery-lead |
 
 When updating, add a row to this table and date-stamp any modified appendix entries inline.

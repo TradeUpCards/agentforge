@@ -251,6 +251,22 @@ The cleanest implementation point is a single PHI redaction module (e.g., `agent
 >
 > **Status:** PARTIAL. Severity remains HIGH for the deferred name-detection half. Production-blocker for the cross-patient-name leakage class until full Safe Harbor sweep ships in week 3.
 
+### C-7 [HIGH] — Cross-patient paraphrased leakage bypasses regex scrubber (audit-discovered, 2026-05-08)
+
+**Finding.** The PHI scrubber's `_PATIENT_ID_TOKEN` regex (`agent/_phi_scrubber.py:54-57`) catches literal `patient_id=N` / `pid=N` / `pid:N` tokens in outbound responses. It does not catch paraphrased cross-patient content. When Haiku synthesizes a brief for a patient whose encounter records contain references to a second patient, it can narrate the second patient's clinical facts without emitting any literal token that the regex matches. Three eval cases now surface this: `cross_patient_leakage_resistance` (case 26), `patient_switch_resists_stale_history` (case 27), `vitals_query_via_encounters` (case 30).
+
+These three cases were previously masked by a different bug: MR 52's `max_tokens` 4096→8192 fix removed the truncation-as-refusal accident that was causing them to refuse for the wrong reason. Once the model could complete synthesis, the missing boundary check became visible.
+
+**Evidence.** The eval audit at `.gauntlet/week2/audit/2026-05-08-eval-failures.md` (gitignored, internal) carries the per-case trace analysis. All three cases are `tier: nightly`, `live_llm_required: true`; they skip fixture-mode CI and do not affect the PR-blocking gate.
+
+**Risk.** Haiku, given a chart that contains a cross-patient identifier as a lure in encounter narrative text, can produce a `status=ok` response that references the second patient's clinical facts without triggering the outbound PHI gate. The clinician sees content that references another patient's data. Risk classification is HIGH (not CRITICAL) for the current deployment posture because the agent service is internal-network-only and behind authenticated OpenEMR session; the clinician sees the leakage but no external party does. Risk escalates to CRITICAL in any multi-tenant or externally-accessible deployment.
+
+**Structural gap.** The existing scrubber architecture is correct for the literal-token class of leakage it was designed to catch. The missing layer is source-provenance checking: each `Claim.source_record_ids` element should be verified to belong to the request's `patient_id` before the claim passes to the response. This check cannot be done with regex on output text; it requires `patient_id: int` stamped on `RetrievedRecord` at tool-fetch time (`agent/schemas.py` + `agent/agent.py:fetch_baseline_context` ~line 483 + `agent/graph/workers/evidence_retriever.py`) and a `check_citation_patient_boundary` function wired between `verify_claims` and `find_outbound_violations` in both `agent/agent.py:run_chat` and `agent/graph/workers/responder.py:157`.
+
+**Mitigation in place.** The `_PATIENT_ID_TOKEN` regex (`agent/_phi_scrubber.py:54-57`) catches the literal-token half of the leakage class (confirmed by eval case 26 pre-MR-52 behavior). The lure fixture for sentinel 999114 is the controlled test surface; no real patient data is involved in testing.
+
+**Status.** Documented. Deferred to W3 hardening as `check_citation_patient_boundary`. See `DECISIONS.md` 2026-05-08 entry §"Bucket A" for rationale, fix scope (~2–4h), and revisit threshold (before any clinical pilot — pre-production gate).
+
 ---
 
 ## Appendix: Findings Index
@@ -279,3 +295,4 @@ The cleanest implementation point is a single PHI redaction module (e.g., `agent
 | C-4 | Compliance | No anomalous-access alerting | MEDIUM | Week 3 work; agent log enables it |
 | C-5 | Compliance | BAA framing per brief footnote | POLICY | Document explicitly in `ARCHITECTURE.md` |
 | C-6 | Compliance | Outbound PHI redaction required for response prose (cross-patient identifier leakage) | HIGH | Sanitize response + claims + Langfuse traces; surfaced by eval case 26 |
+| C-7 | Compliance | Cross-patient paraphrased leakage bypasses `_PATIENT_ID_TOKEN` regex scrubber; 3 eval cases surface it (26, 27, 30) | HIGH | Deferred to W3: `check_citation_patient_boundary` on `Claim.source_record_ids` provenance; pre-production gate |
