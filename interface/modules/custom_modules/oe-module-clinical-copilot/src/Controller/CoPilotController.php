@@ -35,6 +35,7 @@ use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\SystemLogger;
 use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Modules\ClinicalCopilot\Bootstrap;
+use OpenEMR\Modules\ClinicalCopilot\ExtractionStatus;
 use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
 use OpenEMR\Modules\ClinicalCopilot\Service\DocumentPathResolver;
 use OpenEMR\Modules\ClinicalCopilot\Service\ExtractedFieldsWriter;
@@ -296,6 +297,355 @@ final class CoPilotController
                 'detail' => 'The agent encountered an internal error. Please retry.',
             ]);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // P4 R1 — approve / reject endpoints
+    // -----------------------------------------------------------------------
+
+    /**
+     * Handle an approve POST.  Always emits a JSON response.
+     *
+     * Caller (approve_extraction.php) must boot OpenEMR globals first.
+     *
+     * Expected: POST with JSON body {"extraction_id": <int>}
+     *
+     * Preconditions:
+     *   - status must be ExtractionStatus::PENDING_REVIEW (422 otherwise).
+     *   - is_active = 1 (404 if not found or inactive).
+     *   - patient_id stored on the row must match the session's sentinel pid.
+     *
+     * On success:
+     *   - Runs RoundtripService::roundtripFromExtractionId (clinical tables written).
+     *   - Transitions status to ExtractionStatus::APPROVED.
+     *   - Returns {"status": "approved", "extraction_id": <int>}.
+     *
+     * Error codes:
+     *   401 — not authenticated
+     *   403 — ACL or CSRF failure, or patient-id mismatch
+     *   404 — extraction not found or not active
+     *   405 — not a POST
+     *   413 — body too large
+     *   422 — extraction not in pending_review (wrong state for approve)
+     *   500 — internal error
+     */
+    public function handleApprove(): void
+    {
+        header('Content-Type: application/json');
+
+        try {
+            $this->dispatchApprove();
+        } catch (Throwable $e) {
+            $this->logger->error('Clinical Co-Pilot approve handler failed', [
+                'exception_class' => get_class($e),
+                'file'            => basename($e->getFile()),
+                'line'            => $e->getLine(),
+            ]);
+            http_response_code(500);
+            echo json_encode([
+                'status' => 'error',
+                'detail' => 'The server encountered an internal error. Please retry.',
+            ]);
+        }
+    }
+
+    /**
+     * Handle a reject POST.  Always emits a JSON response.
+     *
+     * Caller (reject_extraction.php) must boot OpenEMR globals first.
+     *
+     * Expected: POST with JSON body {"extraction_id": <int>}
+     *
+     * Preconditions:
+     *   - status must be ExtractionStatus::PENDING_REVIEW (422 otherwise).
+     *   - is_active = 1 (404 if not found or inactive).
+     *   - patient_id stored on the row must match the session's sentinel pid.
+     *
+     * On success:
+     *   - Transitions status to ExtractionStatus::REJECTED (terminal — no round-trip).
+     *   - Returns {"status": "rejected", "extraction_id": <int>}.
+     *
+     * Error codes: same set as handleApprove.
+     */
+    public function handleReject(): void
+    {
+        header('Content-Type: application/json');
+
+        try {
+            $this->dispatchReject();
+        } catch (Throwable $e) {
+            $this->logger->error('Clinical Co-Pilot reject handler failed', [
+                'exception_class' => get_class($e),
+                'file'            => basename($e->getFile()),
+                'line'            => $e->getLine(),
+            ]);
+            http_response_code(500);
+            echo json_encode([
+                'status' => 'error',
+                'detail' => 'The server encountered an internal error. Please retry.',
+            ]);
+        }
+    }
+
+    private function dispatchApprove(): void
+    {
+        // 1. Session check.
+        $session    = SessionWrapperFactory::getInstance()->getActiveSession();
+        $userId     = (int) ($session->get('authUserID') ?? 0);
+        $sessionPid = (int) ($session->get('pid') ?? 0);
+
+        if ($userId <= 0) {
+            http_response_code(401);
+            echo json_encode(['status' => 'error', 'detail' => 'Authentication required.']);
+            return;
+        }
+
+        // 2. ACL.
+        if (!AclMain::aclCheckCore('patients', 'med')) {
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'forbidden']);
+            return;
+        }
+
+        // 3. Method.
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['status' => 'error', 'detail' => 'Method not allowed.']);
+            return;
+        }
+
+        // 4. CSRF.
+        $csrfToken = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+        if (!is_string($csrfToken) || !CsrfUtils::verifyCsrfToken($csrfToken, $session)) {
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'Invalid CSRF token.']);
+            return;
+        }
+
+        // 5. Patient context.
+        if ($sessionPid <= 0) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'No active patient in session.']);
+            return;
+        }
+
+        // 6. Parse body.
+        $rawBody = (string) file_get_contents('php://input', false, null, 0, self::MAX_REQUEST_BYTES + 1);
+        if (strlen($rawBody) > self::MAX_REQUEST_BYTES) {
+            http_response_code(413);
+            echo json_encode(['status' => 'error', 'detail' => 'Request payload too large.']);
+            return;
+        }
+
+        $decoded = json_decode($rawBody, true);
+        if (!is_array($decoded)) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'Invalid JSON body.']);
+            return;
+        }
+
+        $extractionIdRaw = $decoded['extraction_id'] ?? null;
+        if (!is_int($extractionIdRaw) || $extractionIdRaw <= 0) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'extraction_id must be a positive integer.']);
+            return;
+        }
+
+        $extractionId = $extractionIdRaw;
+
+        // 7. Load extraction row (active only).
+        $rows = QueryUtils::fetchRecords(
+            'SELECT `id`, `patient_id`, `doc_ref_id`, `doc_type`, `status`
+               FROM `co_pilot_extractions`
+              WHERE `id` = ?
+                AND `is_active` = 1
+              LIMIT 1',
+            [$extractionId],
+        );
+
+        if ($rows === []) {
+            http_response_code(404);
+            echo json_encode(['status' => 'error', 'detail' => 'Extraction not found or not active.']);
+            return;
+        }
+
+        $extraction = $rows[0];
+        $storedPid  = (int) $extraction['patient_id'];
+
+        // 8. Patient-id horizontal-escalation check.
+        //    The stored patient_id is the SENTINEL pid; the session pid is real.
+        //    Compare via PersonaMap::sentinelId (mirrors handleReprocess pattern).
+        $expectedSentinelPid = PersonaMap::sentinelId($sessionPid);
+        if ($expectedSentinelPid === null || $storedPid !== $expectedSentinelPid) {
+            $this->logger->warning('ClinicalCopilot/approve: patient_id mismatch — possible horizontal escalation', [
+                'extraction_id' => $extractionId,
+            ]);
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'Patient context mismatch.']);
+            return;
+        }
+
+        // 9. State guard: approve is only valid from ExtractionStatus::PENDING_REVIEW.
+        //    Any other status (approved, rejected, error, refused) returns 422.
+        $currentStatus = (string) $extraction['status'];
+        if (!in_array($currentStatus, ExtractionStatus::approvableStatuses(), true)) {
+            http_response_code(422);
+            echo json_encode([
+                'status'         => 'error',
+                'detail'         => 'Extraction is not in pending_review state.',
+                'current_status' => $currentStatus,
+            ]);
+            return;
+        }
+
+        // 10. Run round-trip from persisted extraction_json.
+        $counts = $this->roundtripService->roundtripFromExtractionId(
+            extractionId:  $extractionId,
+            realPatientId: $sessionPid,
+            fieldsWriter:  $this->fieldsWriter,
+        );
+
+        $this->logger->info('ClinicalCopilot: extraction approved', [
+            'extraction_id' => $extractionId,
+            'observations'  => $counts['observations'],
+            'allergies'     => $counts['allergies'],
+            'medications'   => $counts['medications'],
+            'n_errors'      => count($counts['errors']),
+        ]);
+
+        http_response_code(200);
+        echo json_encode([
+            'status'        => ExtractionStatus::APPROVED,
+            'extraction_id' => $extractionId,
+            'observations'  => $counts['observations'],
+            'allergies'     => $counts['allergies'],
+            'medications'   => $counts['medications'],
+        ]);
+    }
+
+    private function dispatchReject(): void
+    {
+        // 1. Session check.
+        $session    = SessionWrapperFactory::getInstance()->getActiveSession();
+        $userId     = (int) ($session->get('authUserID') ?? 0);
+        $sessionPid = (int) ($session->get('pid') ?? 0);
+
+        if ($userId <= 0) {
+            http_response_code(401);
+            echo json_encode(['status' => 'error', 'detail' => 'Authentication required.']);
+            return;
+        }
+
+        // 2. ACL.
+        if (!AclMain::aclCheckCore('patients', 'med')) {
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'forbidden']);
+            return;
+        }
+
+        // 3. Method.
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['status' => 'error', 'detail' => 'Method not allowed.']);
+            return;
+        }
+
+        // 4. CSRF.
+        $csrfToken = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+        if (!is_string($csrfToken) || !CsrfUtils::verifyCsrfToken($csrfToken, $session)) {
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'Invalid CSRF token.']);
+            return;
+        }
+
+        // 5. Patient context.
+        if ($sessionPid <= 0) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'No active patient in session.']);
+            return;
+        }
+
+        // 6. Parse body.
+        $rawBody = (string) file_get_contents('php://input', false, null, 0, self::MAX_REQUEST_BYTES + 1);
+        if (strlen($rawBody) > self::MAX_REQUEST_BYTES) {
+            http_response_code(413);
+            echo json_encode(['status' => 'error', 'detail' => 'Request payload too large.']);
+            return;
+        }
+
+        $decoded = json_decode($rawBody, true);
+        if (!is_array($decoded)) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'Invalid JSON body.']);
+            return;
+        }
+
+        $extractionIdRaw = $decoded['extraction_id'] ?? null;
+        if (!is_int($extractionIdRaw) || $extractionIdRaw <= 0) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'extraction_id must be a positive integer.']);
+            return;
+        }
+
+        $extractionId = $extractionIdRaw;
+
+        // 7. Load extraction row (active only).
+        $rows = QueryUtils::fetchRecords(
+            'SELECT `id`, `patient_id`, `doc_ref_id`, `doc_type`, `status`
+               FROM `co_pilot_extractions`
+              WHERE `id` = ?
+                AND `is_active` = 1
+              LIMIT 1',
+            [$extractionId],
+        );
+
+        if ($rows === []) {
+            http_response_code(404);
+            echo json_encode(['status' => 'error', 'detail' => 'Extraction not found or not active.']);
+            return;
+        }
+
+        $extraction = $rows[0];
+        $storedPid  = (int) $extraction['patient_id'];
+
+        // 8. Patient-id horizontal-escalation check.
+        //    The stored patient_id is the SENTINEL pid; the session pid is real.
+        //    Compare via PersonaMap::sentinelId (mirrors handleReprocess pattern).
+        $expectedSentinelPid = PersonaMap::sentinelId($sessionPid);
+        if ($expectedSentinelPid === null || $storedPid !== $expectedSentinelPid) {
+            $this->logger->warning('ClinicalCopilot/reject: patient_id mismatch — possible horizontal escalation', [
+                'extraction_id' => $extractionId,
+            ]);
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'Patient context mismatch.']);
+            return;
+        }
+
+        // 9. State guard: reject is only valid from ExtractionStatus::PENDING_REVIEW.
+        //    Terminal states (approved, rejected, error, refused) cannot be rejected again.
+        $currentStatus = (string) $extraction['status'];
+        if (!in_array($currentStatus, ExtractionStatus::rejectableStatuses(), true)) {
+            http_response_code(422);
+            echo json_encode([
+                'status'         => 'error',
+                'detail'         => 'Extraction is not in pending_review state.',
+                'current_status' => $currentStatus,
+            ]);
+            return;
+        }
+
+        // 10. Transition to rejected (terminal — no round-trip will ever run).
+        $this->roundtripService->updateExtractionStatus($extractionId, ExtractionStatus::REJECTED);
+
+        $this->logger->info('ClinicalCopilot: extraction rejected', [
+            'extraction_id' => $extractionId,
+        ]);
+
+        http_response_code(200);
+        echo json_encode([
+            'status'        => ExtractionStatus::REJECTED,
+            'extraction_id' => $extractionId,
+        ]);
     }
 
     private function dispatchReprocess(): void

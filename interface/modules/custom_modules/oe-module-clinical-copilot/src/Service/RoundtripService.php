@@ -54,6 +54,7 @@ namespace OpenEMR\Modules\ClinicalCopilot\Service;
 
 use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\SystemLogger;
+use OpenEMR\Modules\ClinicalCopilot\ExtractionStatus;
 use OpenEMR\Modules\ClinicalCopilot\Service\FieldKeyExtractor\AllergyKeyExtractor;
 use OpenEMR\Modules\ClinicalCopilot\Service\FieldKeyExtractor\LabResultKeyExtractor;
 use OpenEMR\Modules\ClinicalCopilot\Service\FieldKeyExtractor\MedicationKeyExtractor;
@@ -210,6 +211,145 @@ class RoundtripService
         $this->logger->info('ClinicalCopilot/RoundtripService: prior attempts marked inactive', [
             'doc_ref_id' => $docRefId,
             'doc_type'   => $docType,
+        ]);
+    }
+
+    // -----------------------------------------------------------------------
+    // P4 R1 — on-demand round-trip driven from persisted extraction state
+    // -----------------------------------------------------------------------
+
+    /**
+     * Execute the FHIR round-trip for a persisted extraction row.
+     *
+     * Called by CoPilotController::handleApprove when the clinician approves
+     * an extraction that is currently in status=pending_review.
+     *
+     * Preconditions (enforced by the controller, not here):
+     *   - The extraction row exists and is in ExtractionStatus::PENDING_REVIEW.
+     *   - The row has is_active = 1.
+     *
+     * This method:
+     *  1. Loads the co_pilot_extractions row.
+     *  2. Loads co_pilot_extracted_fields rows for this extraction.
+     *  3. Reconstructs verifiedFieldMap from those rows (field_path → ef_row_id).
+     *  4. Dispatches into the existing per-doc_type round-trip logic.
+     *  5. Transitions the row status to ExtractionStatus::APPROVED.
+     *
+     * @param int $extractionId  co_pilot_extractions.id
+     * @param int $realPatientId Real OpenEMR pid (from session — NOT the sentinel).
+     *                           Clinical-table FK must reference the actual patient row.
+     * @param ExtractedFieldsWriter|null $fieldsWriter  For back-filling clinical pointers.
+     *
+     * @return array{
+     *     observations: int,
+     *     allergies:    int,
+     *     medications:  int,
+     *     errors:       list<string>
+     * }
+     *
+     * @throws \RuntimeException when the extraction row is not found or has no
+     *         extraction_json to round-trip from.
+     */
+    public function roundtripFromExtractionId(
+        int $extractionId,
+        int $realPatientId,
+        ?ExtractedFieldsWriter $fieldsWriter = null,
+    ): array {
+        // 1. Load the extraction row.
+        $rows = QueryUtils::fetchRecords(
+            'SELECT `id`, `doc_ref_id`, `doc_type`, `extraction_json`
+               FROM `co_pilot_extractions`
+              WHERE `id` = ?
+                AND `is_active` = 1
+              LIMIT 1',
+            [$extractionId],
+        );
+
+        if ($rows === []) {
+            throw new \RuntimeException('Extraction row not found or not active.');
+        }
+
+        $row            = $rows[0];
+        $docRefId       = (string) $row['doc_ref_id'];
+        $docType        = (string) $row['doc_type'];
+        $extractionJson = isset($row['extraction_json']) ? (string) $row['extraction_json'] : null;
+
+        if ($extractionJson === null || $extractionJson === '') {
+            throw new \RuntimeException('Extraction row has no extraction_json to round-trip from.');
+        }
+
+        $extractionPayload = json_decode($extractionJson, true);
+        if (!is_array($extractionPayload)) {
+            throw new \RuntimeException('Extraction row extraction_json could not be decoded.');
+        }
+
+        // 2. Load co_pilot_extracted_fields to reconstruct verifiedFieldMap.
+        $fieldRows = QueryUtils::fetchRecords(
+            'SELECT `id`, `field_path`, `status`
+               FROM `co_pilot_extracted_fields`
+              WHERE `extraction_id` = ?
+              ORDER BY `id` ASC',
+            [$extractionId],
+        );
+
+        // 3. Reconstruct verifiedFieldMap (field_path → ef_row_id) for verified rows only.
+        /** @var array<string, int> $verifiedFieldMap */
+        $verifiedFieldMap = [];
+        foreach ($fieldRows as $fieldRow) {
+            if ((string) ($fieldRow['status'] ?? '') === 'verified') {
+                $verifiedFieldMap[(string) $fieldRow['field_path']] = (int) $fieldRow['id'];
+            }
+        }
+
+        // 4. Dispatch into existing round-trip logic.
+        $counts = $this->roundtrip(
+            extractionId:     $extractionId,
+            patientId:        $realPatientId,
+            docType:          $docType,
+            extraction:       $extractionPayload,
+            docRefId:         $docRefId,
+            verifiedFieldMap: $verifiedFieldMap,
+            fieldsWriter:     $fieldsWriter,
+        );
+
+        // 5. Transition status to approved.
+        $this->updateExtractionStatus($extractionId, ExtractionStatus::APPROVED);
+
+        $this->logger->info('ClinicalCopilot/RoundtripService: roundtripFromExtractionId complete', [
+            'extraction_id' => $extractionId,
+            'doc_type'      => $docType,
+            'new_status'    => ExtractionStatus::APPROVED,
+            'observations'  => $counts['observations'],
+            'allergies'     => $counts['allergies'],
+            'medications'   => $counts['medications'],
+            'n_errors'      => count($counts['errors']),
+        ]);
+
+        return $counts;
+    }
+
+    /**
+     * Update the status column on a co_pilot_extractions row.
+     *
+     * Used by P4 R1 approve/reject flows.  Only acts on the active row
+     * (is_active = 1) to prevent accidental status changes on superseded
+     * attempt rows.
+     *
+     * @param non-empty-string $newStatus  One of the ExtractionStatus constants.
+     */
+    public function updateExtractionStatus(int $extractionId, string $newStatus): void
+    {
+        QueryUtils::sqlStatementThrowException(
+            'UPDATE `co_pilot_extractions`
+                SET `status` = ?
+              WHERE `id` = ?
+                AND `is_active` = 1',
+            [$newStatus, $extractionId],
+        );
+
+        $this->logger->info('ClinicalCopilot/RoundtripService: extraction status updated', [
+            'extraction_id' => $extractionId,
+            'new_status'    => $newStatus,
         ]);
     }
 
