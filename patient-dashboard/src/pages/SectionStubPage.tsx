@@ -41,6 +41,7 @@ export function SectionStubPage() {
   const { patientId, section } = useParams<{ patientId: string; section: string }>()
   const label = (section && LABELS[section]) ?? 'Section'
   const [headerCollapsed, setHeaderCollapsed] = useState(false)
+  const [headerHidden, setHeaderHidden] = useState(false)
 
   if (!patientId) {
     return (
@@ -53,7 +54,12 @@ export function SectionStubPage() {
   return (
     <div className="min-h-screen bg-white">
       <MainNav />
-      <PatientHeader patientId={patientId} collapsed={headerCollapsed} />
+      <PatientHeader
+        patientId={patientId}
+        collapsed={headerCollapsed}
+        hidden={headerHidden}
+        onToggleHidden={() => setHeaderHidden((s) => !s)}
+      />
       <OpenTabBar
         active="Dashboard"
         headerCollapsed={headerCollapsed}

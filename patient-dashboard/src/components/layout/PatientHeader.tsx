@@ -17,6 +17,15 @@ interface PatientHeaderProps {
    * they have their own size logic by orientation.
    */
   collapsed?: boolean
+  /**
+   * Drawer-style toggle (all breakpoints). When true, the entire
+   * header content is hidden and only the bottom-center chevron handle
+   * remains, sticky at the top. Click the handle to re-show. Default
+   * false (header visible).
+   */
+  hidden?: boolean
+  /** Fired when the drawer-toggle chevron handle is clicked. */
+  onToggleHidden?: () => void
 }
 
 /**
@@ -55,7 +64,12 @@ interface PatientHeaderProps {
  * DOB/Sex/MRN behind a tap, but they remain reachable without leaving
  * the page.
  */
-export function PatientHeader({ patientId, collapsed = false }: PatientHeaderProps) {
+export function PatientHeader({
+  patientId,
+  collapsed = false,
+  hidden = false,
+  onToggleHidden,
+}: PatientHeaderProps) {
   const { data: patient, isLoading, error } = usePatient(patientId)
   const age = patient?.birthDate ? calculateAge(patient.birthDate) : undefined
 
@@ -88,114 +102,113 @@ export function PatientHeader({ patientId, collapsed = false }: PatientHeaderPro
   const idShort = patient.id?.slice(0, 8) ?? '—'
 
   return (
-    <>
-      {/* ≥lg, collapsed: thin bar (toggled by OpenTabBar's chevron) */}
-      {collapsed && (
-        <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-1.5">
-          <div className="flex items-center gap-3">
-            <Avatar small />
-            <h1 className="text-base font-bold text-blue-700 m-0 truncate">{name}</h1>
-            <ActiveBadge active={active} />
-            <span className="text-xs text-gray-600 ml-2">
-              <span className="font-semibold">MRN:</span>{' '}
-              <span className="font-mono">{mrn}</span>
-            </span>
-            <span className="ml-auto">
-              <EncounterSelector patientId={patient.id ?? ''} />
-            </span>
-          </div>
-        </header>
-      )}
-
-      {/* ≥lg, expanded: full inline layout (default) */}
-      {!collapsed && (
-        <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-3">
-          <div className="flex items-start justify-between gap-4 flex-wrap">
-            <div className="flex items-start gap-3">
-              <Avatar />
-              <div>
-                <h1 className="text-xl font-bold text-blue-700 m-0 leading-tight flex items-baseline gap-1.5">
-                  <span>{name}</span>
-                  <span className="text-gray-500 text-sm font-normal">({idShort})</span>
-                  <span className="text-gray-400 text-sm font-normal">×</span>
-                </h1>
-                <p className="text-sm text-gray-700 mt-1">
-                  <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
-                  {age !== undefined && (
-                    <>
-                      {' '}
-                      <span className="font-semibold">Age:</span> {age}
-                    </>
-                  )}
-                  {' · '}
-                  <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
-                  {' · '}
+    <div className="sticky top-0 z-20 bg-white">
+      {!hidden && (
+        <>
+          {/* ≥lg, collapsed: thin bar (toggled by OpenTabBar's chevron) */}
+          {collapsed && (
+            <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-1.5">
+              <div className="flex items-center gap-3">
+                <Avatar small />
+                <h1 className="text-base font-bold text-blue-700 m-0 truncate">{name}</h1>
+                <ActiveBadge active={active} />
+                <span className="text-xs text-gray-600 ml-2">
                   <span className="font-semibold">MRN:</span>{' '}
                   <span className="font-mono">{mrn}</span>
-                  {' · '}
-                  <ActiveBadge active={active} />
-                </p>
+                </span>
+                <span className="ml-auto">
+                  <EncounterSelector patientId={patient.id ?? ''} />
+                </span>
               </div>
-            </div>
-            <div className="mt-1">
-              <EncounterSelector patientId={patient.id ?? ''} />
-            </div>
-          </div>
-        </header>
-      )}
-
-      {/* <lg portrait: dense 2-line sticky header (phone portrait, tablet
-          portrait). No toggle — vertical room is plentiful in portrait,
-          so there's no meaningful savings from collapsing.
-            Line 1: avatar + name + Active badge
-            Line 2: DOB · Age · Sex · MRN
-          If a user wants more screen for cards, rotating to landscape
-          gets them the compact tap-to-expand variant. */}
-      <header className="hidden max-lg:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-2 shadow-sm">
-        <div className="flex items-center gap-3">
-          <Avatar small />
-          <h1 className="text-base font-bold text-blue-700 m-0 leading-tight truncate flex-1 min-w-0">
-            {name}
-          </h1>
-          <ActiveBadge active={active} />
-        </div>
-        <p className="text-xs text-gray-700 mt-1 leading-snug m-0 flex flex-wrap gap-x-2">
-          <span>
-            <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
-          </span>
-          {age !== undefined && (
-            <span>
-              <span className="font-semibold">Age:</span> {age}
-            </span>
+            </header>
           )}
-          <span>
-            <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
-          </span>
-          <span>
-            <span className="font-semibold">MRN:</span>{' '}
-            <span className="font-mono">{mrn}</span>
-          </span>
-        </p>
-      </header>
 
-      {/* <lg landscape: single-line dense sticky bar.
-          Vertical room is precious (~390 px before the keyboard) so the
-          whole identity packs onto one line. Name truncates if needed;
-          Active, DOB/Age/Sex/MRN have fixed-ish widths. No toggle —
-          everything visible at all times, just compact.
-          Phone landscape including iPhone 14+ at 844-932 px. */}
-      <header className="hidden max-lg:landscape:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-1.5 shadow-sm">
-        <div className="flex items-center gap-2 text-xs">
-          <span className="font-bold text-blue-700 truncate min-w-0 flex-shrink">
-            {name}
-          </span>
-          <ActiveBadge active={active} />
-          <span className="text-gray-700 ml-1 whitespace-nowrap">
-            <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
-            {age !== undefined && (
-              <>
-                {' '}
-                · <span className="font-semibold">Age:</span> {age}
+          {/* ≥lg, expanded: full inline layout (default) */}
+          {!collapsed && (
+            <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-3">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="flex items-start gap-3">
+                  <Avatar />
+                  <div>
+                    <h1 className="text-xl font-bold text-blue-700 m-0 leading-tight flex items-baseline gap-1.5">
+                      <span>{name}</span>
+                      <span className="text-gray-500 text-sm font-normal">({idShort})</span>
+                      <span className="text-gray-400 text-sm font-normal">×</span>
+                    </h1>
+                    <p className="text-sm text-gray-700 mt-1">
+                      <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
+                      {age !== undefined && (
+                        <>
+                          {' '}
+                          <span className="font-semibold">Age:</span> {age}
+                        </>
+                      )}
+                      {' · '}
+                      <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
+                      {' · '}
+                      <span className="font-semibold">MRN:</span>{' '}
+                      <span className="font-mono">{mrn}</span>
+                      {' · '}
+                      <ActiveBadge active={active} />
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-1">
+                  <EncounterSelector patientId={patient.id ?? ''} />
+                </div>
+              </div>
+            </header>
+          )}
+
+          {/* <lg portrait: dense 2-line header (phone portrait, tablet
+              portrait). Static — vertical room is plentiful in portrait,
+              so no per-variant collapse. Drawer toggle below covers the
+              "I want all my screen" case.
+                Line 1: avatar + name + Active badge
+                Line 2: DOB · Age · Sex · MRN */}
+          <header className="hidden max-lg:portrait:block bg-white border-b border-gray-200 px-4 py-2">
+            <div className="flex items-center gap-3">
+              <Avatar small />
+              <h1 className="text-base font-bold text-blue-700 m-0 leading-tight truncate flex-1 min-w-0">
+                {name}
+              </h1>
+              <ActiveBadge active={active} />
+            </div>
+            <p className="text-xs text-gray-700 mt-1 leading-snug m-0 flex flex-wrap gap-x-2">
+              <span>
+                <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
+              </span>
+              {age !== undefined && (
+                <span>
+                  <span className="font-semibold">Age:</span> {age}
+                </span>
+              )}
+              <span>
+                <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
+              </span>
+              <span>
+                <span className="font-semibold">MRN:</span>{' '}
+                <span className="font-mono">{mrn}</span>
+              </span>
+            </p>
+          </header>
+
+          {/* <lg landscape: single-line dense bar.
+              Vertical room is precious (~390 px before keyboard); the
+              whole identity packs onto one line. Phone landscape
+              including iPhone 14+ at 844-932 px. */}
+          <header className="hidden max-lg:landscape:block bg-white border-b border-gray-200 px-4 py-1.5">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="font-bold text-blue-700 truncate min-w-0 flex-shrink">
+                {name}
+              </span>
+              <ActiveBadge active={active} />
+              <span className="text-gray-700 ml-1 whitespace-nowrap">
+                <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
+                {age !== undefined && (
+                  <>
+                    {' '}
+                    · <span className="font-semibold">Age:</span> {age}
               </>
             )}
             {' · '}
@@ -206,7 +219,51 @@ export function PatientHeader({ patientId, collapsed = false }: PatientHeaderPro
           </span>
         </div>
       </header>
-    </>
+        </>
+      )}
+
+      {/* Drawer-toggle handle — small chevron-tab anchored bottom-center
+          of the sticky container. Visible at all breakpoints. When
+          `hidden` is true the headers above are unrendered, leaving
+          only this handle at the top of the page; click to re-show. */}
+      {onToggleHidden && (
+        <div className="flex justify-center" aria-hidden="false">
+          <button
+            type="button"
+            onClick={onToggleHidden}
+            aria-expanded={!hidden}
+            aria-label={hidden ? 'Show patient header' : 'Hide patient header'}
+            className="
+              inline-flex items-center justify-center
+              px-4 py-0.5 min-h-6
+              bg-white border border-t-0 border-gray-200
+              rounded-b shadow-sm
+              text-blue-700 hover:bg-gray-50
+              focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+            "
+          >
+            <DrawerChevron showing={!hidden} />
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DrawerChevron({ showing }: { showing: boolean }) {
+  // Points UP when the drawer is showing (clicking will hide it upward),
+  // points DOWN when the drawer is hidden (clicking will reveal it).
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="currentColor"
+      aria-hidden="true"
+      className={`transition-transform ${showing ? 'rotate-180' : ''}`}
+    >
+      <path d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708" />
+    </svg>
   )
 }
 

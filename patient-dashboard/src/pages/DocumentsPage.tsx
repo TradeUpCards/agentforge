@@ -33,6 +33,7 @@ import { CoPilotDrawer } from '../components/copilot/CoPilotDrawer'
 export function DocumentsPage() {
   const { patientId } = useParams<{ patientId: string }>()
   const [headerCollapsed, setHeaderCollapsed] = useState(false)
+  const [headerHidden, setHeaderHidden] = useState(false)
   const { data, isLoading, error, refetch } = useDocuments(patientId ?? '', 50)
   const docs = data ? extractBundleResources<FhirDocumentReference>(data) : []
 
@@ -47,7 +48,12 @@ export function DocumentsPage() {
   return (
     <div className="min-h-screen bg-white">
       <MainNav />
-      <PatientHeader patientId={patientId} collapsed={headerCollapsed} />
+      <PatientHeader
+        patientId={patientId}
+        collapsed={headerCollapsed}
+        hidden={headerHidden}
+        onToggleHidden={() => setHeaderHidden((s) => !s)}
+      />
       <OpenTabBar
         active="Dashboard"
         headerCollapsed={headerCollapsed}
