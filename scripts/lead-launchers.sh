@@ -1336,27 +1336,33 @@ finish_lead() { _finish_lead "$@"; }
 start_aria() { _start_lead "aria" "$@"; }
 start_bram() { _start_lead "bram" "$@"; }
 start_cleo() { _start_lead "cleo" "$@"; }
+start_tate() { _start_lead "tate" "$@"; }
 
 stop_aria() { _stop_lead "aria"; }
 stop_bram() { _stop_lead "bram"; }
 stop_cleo() { _stop_lead "cleo"; }
+stop_tate() { _stop_lead "tate"; }
 
 finish_aria() { _finish_lead "aria" "$@"; }
 finish_bram() { _finish_lead "bram" "$@"; }
 finish_cleo() { _finish_lead "cleo" "$@"; }
+finish_tate() { _finish_lead "tate" "$@"; }
 
 # hyphenated aliases (matches PowerShell muscle memory)
 start-aria() { _start_lead "aria" "$@"; }
 start-bram() { _start_lead "bram" "$@"; }
 start-cleo() { _start_lead "cleo" "$@"; }
+start-tate() { _start_lead "tate" "$@"; }
 
 stop-aria() { _stop_lead "aria"; }
 stop-bram() { _stop_lead "bram"; }
 stop-cleo() { _stop_lead "cleo"; }
+stop-tate() { _stop_lead "tate"; }
 
 finish-aria() { _finish_lead "aria" "$@"; }
 finish-bram() { _finish_lead "bram" "$@"; }
 finish-cleo() { _finish_lead "cleo" "$@"; }
+finish-tate() { _finish_lead "tate" "$@"; }
 
 start-lead()  { _start_lead  "$@"; }
 stop-lead()   { _stop_lead   "$@"; }

@@ -1073,12 +1073,15 @@ function Get-Leads {
 function Start-Aria { Start-Lead -Name "aria" @args }
 function Start-Bram { Start-Lead -Name "bram" @args }
 function Start-Cleo { Start-Lead -Name "cleo" @args }
+function Start-Tate { Start-Lead -Name "tate" @args }
 
 function Stop-Aria { Stop-Lead -Name "aria" }
 function Stop-Bram { Stop-Lead -Name "bram" }
 function Stop-Cleo { Stop-Lead -Name "cleo" }
+function Stop-Tate { Stop-Lead -Name "tate" }
 
 # @args splat forwards -Force / -KeepBranch / -NoFetch to Finish-Lead.
 function Finish-Aria { Finish-Lead -Name "aria" @args }
 function Finish-Bram { Finish-Lead -Name "bram" @args }
 function Finish-Cleo { Finish-Lead -Name "cleo" @args }
+function Finish-Tate { Finish-Lead -Name "tate" @args }
