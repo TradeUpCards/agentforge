@@ -12,6 +12,7 @@ import type { FhirDocumentReference } from '../types/fhir'
 import { Spinner } from '../components/ui/Spinner'
 import { ErrorRetry } from '../components/ui/ErrorRetry'
 import { ExpandableRow, DetailGrid } from '../components/ui/ExpandableRow'
+import { CoPilotDrawer } from '../components/copilot/CoPilotDrawer'
 
 /**
  * Documents page — full listing of FHIR DocumentReference resources for
@@ -106,6 +107,7 @@ export function DocumentsPage() {
           </ul>
         )}
       </main>
+      <CoPilotDrawer patientId={patientId} />
     </div>
   )
 }

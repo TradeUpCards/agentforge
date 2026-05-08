@@ -5,6 +5,7 @@ import { OpenTabBar } from '../components/layout/OpenTabBar'
 import { PatientHeader } from '../components/layout/PatientHeader'
 import { MedicalRecordHeading } from '../components/layout/MedicalRecordHeading'
 import { SubNav } from '../components/layout/SubNav'
+import { CoPilotDrawer } from '../components/copilot/CoPilotDrawer'
 import { openemrHome } from '../utils/openemrLinks'
 
 /**
@@ -87,6 +88,7 @@ export function SectionStubPage() {
           </Link>
         </div>
       </main>
+      <CoPilotDrawer patientId={patientId} />
     </div>
   )
 }
