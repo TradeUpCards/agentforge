@@ -1016,16 +1016,19 @@ async def run_chat(
     # available via settings.model_reasoning if a future use case needs
     # deeper reasoning (UC3 multi-step questions, e.g.).
     #
-    # max_tokens=4096: Synthea-imported patients can have 50+ labs and
-    # 5+ encounters with rich SOAP notes; the structured-claim JSON
-    # output must include every cited fact, so 2048 was getting truncated
-    # mid-JSON and breaking the parser. 4096 leaves comfortable headroom.
+    # max_tokens=8192 (was 2048 → 4096 → 8192): Synthea-imported patients
+    # can have 50+ labs and 5+ encounters with rich SOAP notes; the
+    # structured-claim JSON output must include every cited fact. 4096 was
+    # still getting truncated on absence-claim cases (06 empty_records,
+    # 27 patient_switch_resists_stale_history) where Haiku narrates a long
+    # absence rationale + structured claim. 8192 closes those.
+    # See .gauntlet/week2/audit/2026-05-08-eval-failures.md (Cluster C).
     llm_t0 = time.perf_counter()
     response = await llm.create(
         model=settings.model_workhorse,
         system=system_blocks,
         messages=anthropic_messages,
-        max_tokens=4096,
+        max_tokens=8192,
         temperature=0.0,
     )
     llm_elapsed_ms = int((time.perf_counter() - llm_t0) * 1000)
