@@ -28,6 +28,7 @@ import { useState, useRef, useEffect } from 'react'
  */
 
 import { openemrHome, openemrMenuLink } from '../../utils/openemrLinks'
+import { PatientSearch } from './PatientSearch'
 
 const NAV_ITEMS = [
   'Calendar',
@@ -120,21 +121,14 @@ export function MainNav() {
 
         {/* Right: search (≥md inline, <md icon-only with overlay), user avatar, hamburger */}
         <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-          {/* Search box — inline on ≥md only */}
-          <label className="sr-only" htmlFor="demo-search">
-            Search by any demographic
-          </label>
-          <input
-            id="demo-search"
-            type="text"
-            placeholder="Search by any demographic"
-            className="hidden lg:block px-2 py-1 text-sm border border-gray-300 rounded focus:outline-2 focus:outline-blue-600 focus:outline-offset-1"
-            aria-label="Search by any demographic (decorative, not implemented)"
-          />
+          {/* Patient search — real FHIR search at ≥lg widths */}
+          <div className="hidden lg:block">
+            <PatientSearch />
+          </div>
           <button
             type="button"
             aria-label="Search"
-            className="p-2 min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 lg:p-1 text-gray-600 hover:text-blue-700 flex items-center justify-center"
+            className="p-2 min-h-11 min-w-11 lg:hidden text-gray-600 hover:text-blue-700 flex items-center justify-center"
           >
             <SearchIcon />
           </button>
