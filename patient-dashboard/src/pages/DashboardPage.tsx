@@ -12,6 +12,7 @@ import { MedicationsCard } from '../components/cards/MedicationsCard'
 import { PrescriptionsCard } from '../components/cards/PrescriptionsCard'
 import { CareTeamCard } from '../components/cards/CareTeamCard'
 import { EncountersCard } from '../components/cards/EncountersCard'
+import { DocumentsCard } from '../components/cards/DocumentsCard'
 
 /**
  * Composes the full patient dashboard with the OpenEMR-familiar layout:
@@ -60,6 +61,7 @@ export function DashboardPage() {
         <PrescriptionsCard patientId={patientId} />
         <CareTeamCard patientId={patientId} />
         <EncountersCard patientId={patientId} />
+        <DocumentsCard patientId={patientId} />
       </DashboardGrid>
     </div>
   )

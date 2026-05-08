@@ -3,6 +3,7 @@ import { useAuth } from 'react-oidc-context'
 import { LoginPage } from './pages/LoginPage'
 import { PatientSelectPage } from './pages/PatientSelectPage'
 import { DashboardPage } from './pages/DashboardPage'
+import { DocumentsPage } from './pages/DocumentsPage'
 import { SectionStubPage } from './pages/SectionStubPage'
 import { CallbackPage } from './auth/CallbackPage'
 import { ProtectedRoute } from './auth/ProtectedRoute'
@@ -47,6 +48,16 @@ export default function App() {
         element={
           <ProtectedRoute>
             <DashboardPage />
+          </ProtectedRoute>
+        }
+      />
+      {/* Real Documents page (replaces the SectionStubPage default for `documents`).
+          Must precede the generic :section catch-all. */}
+      <Route
+        path="/dashboard/:patientId/documents"
+        element={
+          <ProtectedRoute>
+            <DocumentsPage />
           </ProtectedRoute>
         }
       />
