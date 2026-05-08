@@ -134,15 +134,24 @@ def main() -> None:
         print(f"  fixture: {fixture_report.name}")
         print(f"  hybrid:  {hybrid_report.name}")
     else:
-        # 1) Live mode — uses the .env defaults (USE_FIXTURE_*=false / auto).
-        live_report = _run_mode("LIVE", {"USE_FIXTURE_LLM": "false", "USE_FIXTURE_DATA": "false"})
-        # 2) Fixture mode — overrides for fixture-pinned cases.
-        fixture_report = _run_mode("FIXTURE", {"USE_FIXTURE_LLM": "true", "USE_FIXTURE_DATA": "true"})
+        # USE_FIXTURE_EXTRACTION=true on every mode: the runner submits a synthetic
+        # 16-byte placeholder PDF (`runner.py:_run_extraction_case`), not a real
+        # PDF, so the extraction pipeline must always be mocked regardless of
+        # LLM/data mode. Without this flag the mock helpers (mock_extraction_in_
+        # fixture_mode in conftest.py and _apply_extraction_mock_if_needed in
+        # runner.py) stay dormant and the synthetic PDF crashes Docling →
+        # HTTP 500 → all 18 lab/intake extraction cases fail with status=error.
+        # Fixed by Aria's mock-coverage extension at 37d64aea4 + 7e82defb2 only
+        # works if these flags propagate; this file is the env-var carrier.
+        # 1) Live mode — real LLM + real MariaDB; extraction still mocked.
+        live_report = _run_mode("LIVE", {"USE_FIXTURE_LLM": "false", "USE_FIXTURE_DATA": "false", "USE_FIXTURE_EXTRACTION": "true"})
+        # 2) Fixture mode — canned LLM + fixture data; extraction mocked.
+        fixture_report = _run_mode("FIXTURE", {"USE_FIXTURE_LLM": "true", "USE_FIXTURE_DATA": "true", "USE_FIXTURE_EXTRACTION": "true"})
         # 3) Hybrid mode (real LLM + fixture data) — for cases with BOTH
         #    `live_llm_required` and `fixture_data_required` flags. These
         #    test real model behavior against canned chart data, which
-        #    neither pure mode can satisfy.
-        hybrid_report = _run_mode("HYBRID", {"USE_FIXTURE_LLM": "false", "USE_FIXTURE_DATA": "true"})
+        #    neither pure mode can satisfy. Extraction still mocked.
+        hybrid_report = _run_mode("HYBRID", {"USE_FIXTURE_LLM": "false", "USE_FIXTURE_DATA": "true", "USE_FIXTURE_EXTRACTION": "true"})
 
     live_text = live_report.read_text(encoding="utf-8")
     fixture_text = fixture_report.read_text(encoding="utf-8")
