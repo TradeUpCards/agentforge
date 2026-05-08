@@ -41,9 +41,44 @@ interface CoPilotDrawerProps {
   patientId: string
 }
 
+/**
+ * Tracks a media query and re-renders on change. SSR-safe (returns
+ * false when window is unavailable; matchMedia subscribes on mount).
+ */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return window.matchMedia(query).matches
+  })
+  useEffect(() => {
+    const mql = window.matchMedia(query)
+    const onChange = () => setMatches(mql.matches)
+    setMatches(mql.matches)
+    mql.addEventListener('change', onChange)
+    return () => mql.removeEventListener('change', onChange)
+  }, [query])
+  return matches
+}
+
 export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
   const [open, setOpen] = useState(false)
   const drawerRef = useRef<HTMLDivElement>(null)
+  // Phone portrait gets a bottom-sheet layout instead of a side drawer
+  // so the patient's chart stays visible in the top half of the
+  // viewport. JS-driven so the className can switch wholesale rather
+  // than fighting Tailwind variant ordering between right-edge drawer
+  // and bottom sheet positioning rules.
+  const isPhonePortrait = useMediaQuery(
+    '(max-width: 639px) and (orientation: portrait)',
+  )
+  // Lazy-mount the iframe on first open and keep it mounted thereafter
+  // so the legacy chat-panel.php only loads when the user actually
+  // uses Co-Pilot. Subsequent opens reuse the same iframe / same chat
+  // history without a fresh page load.
+  const [hasBeenOpened, setHasBeenOpened] = useState(false)
+  useEffect(() => {
+    if (open) setHasBeenOpened(true)
+  }, [open])
 
   // Lock body scroll when drawer is open on phone (full-screen overlay).
   useEffect(() => {
@@ -96,76 +131,109 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
         </button>
       )}
 
-      {/* Backdrop on phone (helps the eye see the overlay layer) */}
-      {open && (
-        <div
-          className="fixed inset-0 z-40 bg-black/30 lg:hidden"
-          onClick={() => setOpen(false)}
-          aria-hidden="true"
-        />
-      )}
+      {/* Backdrop — always rendered so opacity transition fires on
+          open AND close. pointer-events gate prevents stealing clicks
+          when closed. Only on `<lg` where the drawer reaches the
+          dashboard area. */}
+      <div
+        aria-hidden="true"
+        onClick={() => setOpen(false)}
+        className={`
+          fixed inset-0 z-40 bg-black/30 lg:hidden
+          motion-safe:transition-opacity motion-safe:duration-200
+          ${open ? 'opacity-100' : 'opacity-0 pointer-events-none'}
+        `}
+      />
 
-      {/* Drawer.
-          Width steps:
-            <sm  (phone portrait):     85% — leaves a ~58 px peek of the
-                                       dashboard visible at the left so
-                                       the user retains context AND has
-                                       a tap-target for the backdrop.
-            sm   (phone landscape):    384 px (w-96)
-            md   (tablet portrait):    400 px
-            lg   (tablet landscape):   480 px
-            xl   (desktop):            520 px */}
-      {open && (
-        <aside
-          ref={drawerRef}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Clinical Co-Pilot"
-          className="
-            fixed inset-y-0 right-0 z-50
-            w-[85%] sm:w-96 md:w-[400px] lg:w-[480px] xl:w-[520px]
-            bg-white border-l border-gray-200 shadow-2xl
-            flex flex-col
-          "
+      {/* Drawer — always rendered so slide animations fire on open and
+          close. Layout switches between phone portrait (bottom sheet,
+          50% height, slide up from bottom) and everything else (right-
+          edge drawer, slide in from right).
+            Phone portrait      : bottom sheet, 50 vh tall
+            Phone landscape (sm): right drawer 384 px
+            Tablet portrait (md): right drawer 400 px
+            Tablet landscape lg : right drawer 480 px
+            Desktop (xl)        : right drawer 520 px
+
+          Iframe is lazy-mounted on first open and kept thereafter, so
+          the legacy chat-panel.php only loads when the user actually
+          uses Co-Pilot at least once. */}
+      <aside
+        ref={drawerRef}
+        role="dialog"
+        aria-modal={open}
+        aria-hidden={!open}
+        aria-label="Clinical Co-Pilot"
+        className={`
+          fixed z-50 bg-white shadow-2xl flex flex-col
+          motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-out
+          ${
+            isPhonePortrait
+              ? 'inset-x-0 bottom-0 h-1/2 border-t border-gray-200 rounded-t-2xl'
+              : 'inset-y-0 right-0 w-96 md:w-[400px] lg:w-[480px] xl:w-[520px] border-l border-gray-200'
+          }
+          ${
+            open
+              ? 'translate-x-0 translate-y-0'
+              : isPhonePortrait
+                ? 'translate-y-full pointer-events-none'
+                : 'translate-x-full pointer-events-none'
+          }
+        `}
+      >
+        <header
+          className={`
+            relative flex items-center justify-between px-3 border-b border-gray-200 bg-gray-50
+            ${isPhonePortrait ? 'pt-4 pb-2' : 'py-2'}
+          `}
         >
-          <header className="flex items-center justify-between px-3 py-2 border-b border-gray-200 bg-gray-50">
-            <h2 className="text-sm font-semibold text-gray-800 m-0 flex items-center gap-2">
-              <SparklesIcon />
-              <span>Co-Pilot</span>
-            </h2>
-            <div className="flex items-center gap-1">
-              <a
-                href={openemrHome()}
-                target="_blank"
-                rel="noopener noreferrer"
-                title="Open in OpenEMR (escape hatch if session expired)"
-                aria-label="Open in OpenEMR"
-                className="
-                  inline-flex items-center justify-center
-                  p-2 min-h-11 min-w-11
-                  text-gray-600 hover:text-blue-700
-                  rounded
-                  focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
-                "
-              >
-                <ExternalIcon />
-              </a>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                aria-label="Close Co-Pilot"
-                className="
-                  inline-flex items-center justify-center
-                  p-2 min-h-11 min-w-11
-                  text-gray-600 hover:text-gray-900
-                  rounded
-                  focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
-                "
-              >
-                <CloseIcon />
-              </button>
-            </div>
-          </header>
+          {/* Drag-handle hint on bottom-sheet variant — pure decoration,
+              cues the "swipe down to close" affordance even though
+              we don't currently implement gesture-driven dismiss. */}
+          {isPhonePortrait && (
+            <span
+              aria-hidden="true"
+              className="absolute left-1/2 -translate-x-1/2 top-1.5 w-10 h-1 rounded-full bg-gray-300"
+            />
+          )}
+          <h2 className="text-sm font-semibold text-gray-800 m-0 flex items-center gap-2">
+            <SparklesIcon />
+            <span>Co-Pilot</span>
+          </h2>
+          <div className="flex items-center gap-1">
+            <a
+              href={openemrHome()}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open in OpenEMR (escape hatch if session expired)"
+              aria-label="Open in OpenEMR"
+              className="
+                inline-flex items-center justify-center
+                p-2 min-h-11 min-w-11
+                text-gray-600 hover:text-blue-700
+                rounded
+                focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+              "
+            >
+              <ExternalIcon />
+            </a>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              aria-label="Close Co-Pilot"
+              className="
+                inline-flex items-center justify-center
+                p-2 min-h-11 min-w-11
+                text-gray-600 hover:text-gray-900
+                rounded
+                focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+              "
+            >
+              <CloseIcon />
+            </button>
+          </div>
+        </header>
+        {hasBeenOpened && (
           <iframe
             src={iframeSrc}
             title="Clinical Co-Pilot chat"
@@ -174,8 +242,8 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
             // Note: the chat panel needs scripts to run (chat-panel.js) so we
             // do NOT add a `sandbox` attribute that would strip those.
           />
-        </aside>
-      )}
+        )}
+      </aside>
     </>
   )
 }
