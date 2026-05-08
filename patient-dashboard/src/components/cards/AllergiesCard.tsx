@@ -1,6 +1,7 @@
 import { useAllergies } from '../../hooks/useAllergies'
 import { extractBundleResources } from '../../utils/fhirParsers'
 import { formatDate } from '../../utils/formatters'
+import { openemrEditLink } from '../../utils/openemrLinks'
 import type { FhirAllergyIntolerance } from '../../types/fhir'
 import { CardShell } from './CardShell'
 import { Badge } from '../ui/Badge'
@@ -33,6 +34,7 @@ export function AllergiesCard({ patientId }: { patientId: string }) {
       isLoading={isLoading}
       error={error}
       onRetry={() => void refetch()}
+      editHref={openemrEditLink('allergy')}
     >
       {!isLoading && allergies.length === 0 ? (
         <EmptyState message={data ? 'No Known Allergies' : 'Nothing Recorded'} />

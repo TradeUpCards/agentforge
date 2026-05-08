@@ -6,6 +6,17 @@ interface CardShellProps {
   isLoading: boolean
   error?: Error | null
   onRetry?: () => void
+  /**
+   * Optional out-link target for the title-bar edit-pencil. When provided,
+   * the pencil becomes a real `<a target="_blank">` to OpenEMR; when
+   * omitted, the pencil is decorative-only (legacy visual parity).
+   */
+  editHref?: string
+  /**
+   * Accessible label for the edit pencil link. Defaults to
+   * "Edit {title} in OpenEMR" when editHref is set.
+   */
+  editLabel?: string
   children: React.ReactNode
 }
 
@@ -16,8 +27,9 @@ interface CardShellProps {
  *   - Small drag-handle glyph next to title (decorative — legacy uses
  *     it to signal the card is sortable; we render it for visual
  *     familiarity but do not implement drag).
- *   - Edit-pencil icon at the right of the title bar (decorative for
- *     the same reason — opens the editor in legacy; not implemented).
+ *   - Edit-pencil icon at the right of the title bar — when `editHref`
+ *     is supplied, becomes a real out-link to OpenEMR's edit form for
+ *     the resource type; otherwise decorative.
  *   - No rounded corners, no shadow, white background — matches the
  *     plain bordered look of the legacy dashboard.
  *
@@ -34,9 +46,12 @@ export function CardShell({
   isLoading,
   error,
   onRetry,
+  editHref,
+  editLabel,
   children,
 }: CardShellProps) {
   const slug = slugify(title)
+  const resolvedEditLabel = editLabel ?? `Edit ${title} in OpenEMR`
 
   return (
     <section
@@ -54,7 +69,26 @@ export function CardShell({
         </h2>
         <div className="flex items-center gap-2">
           {isLoading && <Spinner label={`Loading ${title}`} />}
-          <EditPencilIcon />
+          {editHref ? (
+            <a
+              href={editHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={resolvedEditLabel}
+              title={resolvedEditLabel}
+              className="
+                inline-flex items-center justify-center
+                p-2 min-h-11 min-w-11 md:min-h-0 md:min-w-0 md:p-1
+                text-blue-700 hover:text-blue-900
+                focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+                rounded
+              "
+            >
+              <EditPencilIcon />
+            </a>
+          ) : (
+            <EditPencilIcon />
+          )}
         </div>
       </div>
       <div className="px-3 py-2 text-sm">

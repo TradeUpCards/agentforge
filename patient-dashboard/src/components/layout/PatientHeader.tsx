@@ -7,6 +7,7 @@ import {
 } from '../../utils/fhirParsers'
 import { capitalize, formatDate } from '../../utils/formatters'
 import { Spinner } from '../ui/Spinner'
+import { EncounterSelector } from './EncounterSelector'
 
 interface PatientHeaderProps {
   patientId: string
@@ -107,9 +108,8 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
               </p>
             </div>
           </div>
-          <div className="text-sm text-gray-700 mt-1">
-            <span className="font-semibold">Open Encounter:</span>{' '}
-            <span className="text-gray-500">None</span>
+          <div className="mt-1">
+            <EncounterSelector patientId={patient.id ?? ''} />
           </div>
         </div>
       </header>
