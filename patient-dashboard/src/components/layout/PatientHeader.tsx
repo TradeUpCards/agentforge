@@ -223,32 +223,28 @@ export function PatientHeader({
         </>
       )}
 
-      {/* Drawer-toggle handle — absolutely positioned chevron-tab.
-          Anchored to the LEFT (matching the legacy OpenEMR widget's
-          chevron position next to the open-tabs row) and takes NO
-          layout space.
-            Expanded: hangs from the patient header's bottom edge
-                      (half above the bottom border, half below).
-            Hidden:   anchored to the TOP edge — half above the
-                      wrapper's top (= overlapping MainNav's bottom
-                      border above), half below. Avoids bleeding into
-                      the OpenTabBar / cards area below. */}
+      {/* Drawer-toggle handle — absolutely positioned chevron tab,
+          anchored top-center, half-overlapping the bottom edge of the
+          MainNav row above. Takes NO layout space.
+          Position is identical in both states; only the chevron
+          orientation flips:
+            Expanded → chevron up    (click to collapse upward)
+            Hidden   → chevron down  (click to expand downward) */}
       {onToggleHidden && (
         <button
           type="button"
           onClick={onToggleHidden}
           aria-expanded={!hidden}
           aria-label={hidden ? 'Show patient header' : 'Hide patient header'}
-          className={`
-            absolute left-4 z-10
+          className="
+            absolute left-1/2 -translate-x-1/2 -top-2.5 z-10
             inline-flex items-center justify-center
             px-3 h-5
             bg-white border border-gray-200
             rounded-md shadow-sm
             text-blue-700 hover:bg-gray-50
             focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
-            ${!hidden ? '-bottom-2.5' : '-top-2.5'}
-          `}
+          "
         >
           <DrawerChevron showing={!hidden} />
         </button>
