@@ -91,8 +91,47 @@ export function MainNav() {
       aria-label="OpenEMR application menu"
     >
       <div className="flex items-center justify-between gap-3">
-        {/* Left: logo + (≥md) horizontal nav items */}
-        <div className="flex items-center gap-4 min-w-0">
+        {/* Left: hamburger (<lg) + logo + (≥lg) horizontal nav items */}
+        <div className="flex items-center gap-2 min-w-0">
+          {/* Hamburger — visible on <lg only, anchored to the LEFT next
+              to the logo (standard mobile pattern; opposite side from
+              the user avatar so the affordance is unambiguous). */}
+          <div ref={hamburgerRef} className="relative lg:hidden">
+            <button
+              type="button"
+              onClick={() => setHamburgerOpen((s) => !s)}
+              aria-label={hamburgerOpen ? 'Close menu' : 'Open menu'}
+              aria-expanded={hamburgerOpen}
+              className="p-2 min-h-11 min-w-11 text-gray-700 hover:text-blue-700 flex items-center justify-center"
+            >
+              {hamburgerOpen ? <CloseIcon /> : <HamburgerIcon />}
+            </button>
+            {hamburgerOpen && (
+              <div
+                role="menu"
+                aria-label="Application menu"
+                className="absolute left-0 mt-1 w-56 bg-white border border-gray-200 shadow-lg py-1 z-30"
+              >
+                <ul className="m-0">
+                  {NAV_ITEMS.map((item) => (
+                    <li key={item}>
+                      <a
+                        role="menuitem"
+                        href={openemrMenuLink(item)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block px-4 py-3 min-h-11 text-sm font-semibold text-gray-800 hover:bg-gray-50 hover:text-blue-700 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600"
+                        onClick={() => setHamburgerOpen(false)}
+                      >
+                        {item}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+
           <a
             href={LOGO_HREF}
             target="_blank"
@@ -103,7 +142,7 @@ export function MainNav() {
             <OpenEmrLogo />
           </a>
 
-          <ul className="hidden lg:flex items-center gap-4 text-sm m-0 flex-wrap">
+          <ul className="hidden lg:flex items-center gap-4 text-sm m-0 flex-wrap ml-2">
             {NAV_ITEMS.map((item) => (
               <li key={item}>
                 <a
@@ -119,7 +158,7 @@ export function MainNav() {
           </ul>
         </div>
 
-        {/* Right: search (≥md inline, <md icon-only with overlay), user avatar, hamburger */}
+        {/* Right: search (lg+ inline, <lg icon-only) + user avatar */}
         <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           {/* Patient search — real FHIR search at ≥lg widths */}
           <div className="hidden lg:block">
@@ -157,43 +196,6 @@ export function MainNav() {
                 >
                   Sign out
                 </button>
-              </div>
-            )}
-          </div>
-
-          {/* Hamburger — visible on <lg only (so phone landscape + tablet portrait + tablet landscape all use it) */}
-          <div ref={hamburgerRef} className="relative lg:hidden">
-            <button
-              type="button"
-              onClick={() => setHamburgerOpen((s) => !s)}
-              aria-label={hamburgerOpen ? 'Close menu' : 'Open menu'}
-              aria-expanded={hamburgerOpen}
-              className="p-2 min-h-11 min-w-11 text-gray-700 hover:text-blue-700 flex items-center justify-center"
-            >
-              {hamburgerOpen ? <CloseIcon /> : <HamburgerIcon />}
-            </button>
-            {hamburgerOpen && (
-              <div
-                role="menu"
-                aria-label="Application menu"
-                className="absolute right-0 mt-1 w-56 bg-white border border-gray-200 shadow-lg py-1 z-30"
-              >
-                <ul className="m-0">
-                  {NAV_ITEMS.map((item) => (
-                    <li key={item}>
-                      <a
-                        role="menuitem"
-                        href={openemrMenuLink(item)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block px-4 py-3 min-h-11 text-sm font-semibold text-gray-800 hover:bg-gray-50 hover:text-blue-700 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600"
-                        onClick={() => setHamburgerOpen(false)}
-                      >
-                        {item}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
               </div>
             )}
           </div>
