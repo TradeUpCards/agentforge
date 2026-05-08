@@ -99,14 +99,16 @@ def evidence_retriever_node(state: SupervisorState) -> dict[str, Any]:
 
             # Additive: fetch guidelines when query has relevant keywords.
             if _query_needs_guidelines(query):
-                guideline_citations, guideline_tool = _fetch_guidelines(query)
+                guideline_citations, guideline_records, guideline_tool = _fetch_guidelines(query)
                 new_citations.extend(guideline_citations)
+                new_records.extend(guideline_records)
                 tools_called.append(guideline_tool)
 
             # If no patient_id and no guideline keywords, fall back to guidelines.
             if not tools_called:
-                guideline_citations, guideline_tool = _fetch_guidelines(query)
+                guideline_citations, guideline_records, guideline_tool = _fetch_guidelines(query)
                 new_citations.extend(guideline_citations)
+                new_records.extend(guideline_records)
                 tools_called.append(guideline_tool)
 
             n_citations_added = len(new_citations)
@@ -202,22 +204,55 @@ def _query_needs_guidelines(query: str) -> bool:
     return any(kw in query_lower for kw in _GUIDELINE_KEYWORDS)
 
 
-def _fetch_guidelines(query: str) -> tuple[list[Citation], str]:
-    """Call search_guidelines and return (citations, tool_called)."""
+def _fetch_guidelines(query: str) -> tuple[list[Citation], list[Any], str]:
+    """Call search_guidelines and return (citations, retrieved_records, tool_called).
+
+    The retrieved_records carry the full chunk content (body, section,
+    source attribution) under table=`guideline_corpus` so the responder's
+    `_format_patient_context()` renders them as `<guideline>` blocks in the
+    LLM's system prompt — same contract as patient records. Without these,
+    the citations are present in state but the responder LLM can't cite
+    them in claims because it never saw the chunk text.
+
+    Mirrors the worker→responder bridging fix in
+    `_fetch_all_patient_records` (2026-05-07): citations alone aren't
+    enough — the responder needs the actual content rendered into its
+    system prompt.
+    """
+    from agent.schemas import CitationStrength, RetrievedRecord
+
     chunks = search_guidelines(query, top_k=5)
     citations: list[Citation] = []
+    retrieved_records: list[Any] = []
     for chunk in chunks:
+        chunk_id = chunk["chunk_id"]
         citations.append(
             Citation(
                 source_type="guideline",
-                source_id=chunk["chunk_id"],
+                source_id=chunk_id,
                 page_or_section=chunk.get("section"),
-                field_or_chunk_id=chunk["chunk_id"],
-                quote_or_value=chunk.get("leading_excerpt", chunk["chunk_id"]),
+                field_or_chunk_id=chunk_id,
+                quote_or_value=chunk.get("leading_excerpt", chunk_id),
                 bbox=None,
             )
         )
-    return citations, "search_guidelines"
+        # Pipe the full chunk content through to the responder via state.
+        # Table name is `guideline_corpus` — agent.agent._format_patient_context
+        # special-cases this to render as <guideline> blocks (vs. <patient_record>).
+        retrieved_records.append(
+            RetrievedRecord(
+                table="guideline_corpus",
+                record_id=chunk_id,
+                citation_strength=CitationStrength.FREE_TEXT,
+                fields={
+                    "body": chunk.get("body", chunk.get("leading_excerpt", "")),
+                    "section": chunk.get("section"),
+                    "source_attribution": chunk.get("source_attribution"),
+                    "source_url": chunk.get("source_url"),
+                },
+            )
+        )
+    return citations, retrieved_records, "search_guidelines"
 
 
 def _fetch_all_patient_records(
