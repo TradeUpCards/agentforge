@@ -60,14 +60,10 @@ export function PatientHeader({ patientId, collapsed = false }: PatientHeaderPro
   const { data: patient, isLoading, error } = usePatient(patientId)
   const age = patient?.birthDate ? calculateAge(patient.birthDate) : undefined
 
-  // Mobile-only collapse state per orientation. Independent so rotating
-  // doesn't disrupt the user's explicit choice.
-  //   - Portrait: starts EXPANDED (vertical room is plentiful; show full
-  //     identity by default, tap to compact if user wants more space for
-  //     cards).
-  //   - Landscape: starts COMPACT (vertical room is precious — keyboard
-  //     can take 50% of height; tap to expand if user needs DOB/Sex/MRN).
-  const [portraitCollapsed, setPortraitCollapsed] = useState(false)
+  // Mobile-landscape-only collapse state. Portrait stays statically
+  // expanded (2-line dense layout — toggling 3-to-2 lines isn't worth a
+  // tap). Landscape DOES toggle (collapsing reclaims meaningful vertical
+  // space in a ~390 px tall viewport).
   const [landscapeExpanded, setLandscapeExpanded] = useState(false)
 
   if (isLoading) {
@@ -155,56 +151,38 @@ export function PatientHeader({ patientId, collapsed = false }: PatientHeaderPro
         </header>
       )}
 
-      {/* <lg portrait: tappable header (phone portrait, tablet portrait).
-          Default expanded; tap to collapse to compact (just name + Active). */}
-      <header className="hidden max-lg:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
-        <button
-          type="button"
-          onClick={() => setPortraitCollapsed((s) => !s)}
-          aria-expanded={!portraitCollapsed}
-          aria-label={
-            portraitCollapsed ? 'Show patient details' : 'Hide patient details'
-          }
-          className="w-full px-4 py-2 min-h-11 text-left hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600"
-        >
-          <div className="flex items-center gap-3">
-            <Avatar small />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center justify-between gap-2">
-                <h1 className="text-base font-bold text-blue-700 m-0 leading-tight truncate">
-                  {name}
-                </h1>
-                <ChevronIcon expanded={!portraitCollapsed} />
-              </div>
-              {!portraitCollapsed && (
-                <div className="flex items-center gap-2 mt-0.5">
-                  <ActiveBadge active={active} />
-                  <span className="text-xs text-gray-600 font-mono truncate">
-                    MRN {mrn}
-                  </span>
-                </div>
-              )}
-              {portraitCollapsed && (
-                <div className="flex items-center gap-2 mt-0.5">
-                  <ActiveBadge active={active} />
-                </div>
-              )}
-            </div>
-          </div>
-          {!portraitCollapsed && (
-            <p className="text-xs text-gray-700 mt-2 leading-snug m-0">
-              <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
-              {age !== undefined && (
-                <>
-                  {' '}
-                  · <span className="font-semibold">Age:</span> {age}
-                </>
-              )}
-              {' · '}
-              <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
-            </p>
+      {/* <lg portrait: dense 2-line sticky header (phone portrait, tablet
+          portrait). No toggle — vertical room is plentiful in portrait,
+          so there's no meaningful savings from collapsing.
+            Line 1: avatar + name + Active badge
+            Line 2: DOB · Age · Sex · MRN
+          If a user wants more screen for cards, rotating to landscape
+          gets them the compact tap-to-expand variant. */}
+      <header className="hidden max-lg:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-2 shadow-sm">
+        <div className="flex items-center gap-3">
+          <Avatar small />
+          <h1 className="text-base font-bold text-blue-700 m-0 leading-tight truncate flex-1 min-w-0">
+            {name}
+          </h1>
+          <ActiveBadge active={active} />
+        </div>
+        <p className="text-xs text-gray-700 mt-1 leading-snug m-0 flex flex-wrap gap-x-2">
+          <span>
+            <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
+          </span>
+          {age !== undefined && (
+            <span>
+              <span className="font-semibold">Age:</span> {age}
+            </span>
           )}
-        </button>
+          <span>
+            <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
+          </span>
+          <span>
+            <span className="font-semibold">MRN:</span>{' '}
+            <span className="font-mono">{mrn}</span>
+          </span>
+        </p>
       </header>
 
       {/* <lg landscape: compact sticky (tap to expand) — phone landscape including iPhone 14+ at 844-932 px */}
