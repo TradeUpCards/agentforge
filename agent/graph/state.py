@@ -19,7 +19,7 @@ from typing import Literal, Optional
 
 from typing_extensions import TypedDict
 
-from agent.schemas import AgentResponse, Citation, RefusalResponse
+from agent.schemas import AgentResponse, Citation, RefusalResponse, RetrievedRecord
 
 
 class SupervisorState(TypedDict):
@@ -76,6 +76,15 @@ class SupervisorState(TypedDict):
         node_name, latency_ms, tokens_input, tokens_output,
         cost_estimate_usd, retrieval_hits, extraction_confidence.
         Appended by each node that incurs LLM or retrieval cost.
+
+    retrieved_records : list[RetrievedRecord]
+        Full record content (table, record_id, citation_strength, fields)
+        accumulated by retrieval workers. The responder reads these directly
+        to give the LLM the actual diagnosis text, drug names, lab values,
+        etc. — not just citation IDs. Without this, citations alone carry
+        only `table:id` references and the LLM (correctly) reports back
+        "no clinical content available." Populated by evidence_retriever
+        from the W1 patient tools' RetrievedRecord output.
     """
 
     query: str
@@ -87,6 +96,7 @@ class SupervisorState(TypedDict):
     worker_results: list[dict]
     final_response: Optional[AgentResponse | RefusalResponse]
     node_observability: list[dict]
+    retrieved_records: list[RetrievedRecord]
 
     # Internal routing signal: set by supervisor_node so _supervisor_router
     # can determine which worker to dispatch to without a second LLM call.

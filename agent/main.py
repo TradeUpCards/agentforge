@@ -546,6 +546,7 @@ async def graph_chat(request: ChatRequest) -> AgentResponse | RefusalResponse:
         "worker_results": [],
         "final_response": None,
         "node_observability": [],
+        "retrieved_records": [],
         "_pending_route": None,
     }
 
