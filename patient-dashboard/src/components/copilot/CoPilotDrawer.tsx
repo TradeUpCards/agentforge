@@ -160,7 +160,7 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
         aria-hidden={!open}
         aria-label="Clinical Co-Pilot"
         className={`
-          fixed z-50 bg-white shadow-2xl flex flex-col
+          fixed z-50 bg-white shadow-2xl flex flex-col overscroll-contain
           motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-out
           ${
             isPhonePortrait
@@ -232,10 +232,13 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
           <iframe
             src={iframeSrc}
             title="Clinical Co-Pilot chat"
-            className="flex-1 w-full border-0"
+            className="flex-1 w-full border-0 overscroll-contain"
             // sandbox: keep same-origin so the chat panel can read its cookie.
             // Note: the chat panel needs scripts to run (chat-panel.js) so we
             // do NOT add a `sandbox` attribute that would strip those.
+            // overscroll-contain: when the chat hits its scroll bounds, the
+            // touch event stays inside the iframe instead of chaining up to
+            // body and scrolling the chart underneath the bottom sheet.
           />
         )}
       </aside>
