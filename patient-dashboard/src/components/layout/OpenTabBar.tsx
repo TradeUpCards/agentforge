@@ -25,8 +25,7 @@
  *   - The per-tab refresh / lock / close icons are decorative.
  */
 
-const OPENEMR_BASE =
-  import.meta.env.VITE_OPENEMR_BASE_URL ?? 'https://localhost:9300'
+import { openemrHome } from '../../utils/openemrLinks'
 
 const TABS = [
   'Calendar',
@@ -63,7 +62,7 @@ export function OpenTabBar({ active = 'Dashboard' }: OpenTabBarProps) {
                 <span className={labelClass}>{name}</span>
               ) : (
                 <a
-                  href={`${OPENEMR_BASE}/interface/main/main_screen.php`}
+                  href={openemrHome()}
                   target="_blank"
                   rel="noopener noreferrer"
                   className={labelClass}

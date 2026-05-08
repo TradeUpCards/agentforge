@@ -60,8 +60,8 @@ export function SubNav({ patientId }: { patientId: string }) {
                 className={({ isActive }) =>
                   `inline-flex items-center min-h-11 md:min-h-0 ${
                     isActive
-                      ? 'text-gray-900 font-semibold'
-                      : 'text-blue-700 hover:underline'
+                      ? 'text-gray-900 font-semibold border-b-2 border-blue-700 -mb-px pb-px'
+                      : 'text-blue-700 hover:underline border-b-2 border-transparent -mb-px pb-px'
                   }`
                 }
               >

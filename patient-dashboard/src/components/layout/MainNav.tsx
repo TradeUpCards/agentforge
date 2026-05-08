@@ -27,8 +27,7 @@ import { useState, useRef, useEffect } from 'react'
  * adaptation, not a deviation.
  */
 
-const OPENEMR_BASE =
-  import.meta.env.VITE_OPENEMR_BASE_URL ?? 'https://localhost:9300'
+import { openemrHome } from '../../utils/openemrLinks'
 
 const NAV_ITEMS = [
   'Calendar',
@@ -46,7 +45,7 @@ const NAV_ITEMS = [
   'Popups',
 ]
 
-const NAV_HREF = `${OPENEMR_BASE}/interface/main/main_screen.php`
+const NAV_HREF = openemrHome()
 
 export function MainNav() {
   const auth = useAuth()
@@ -69,11 +68,11 @@ export function MainNav() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
-  // Close the hamburger drawer when the viewport grows past `md`. Without this,
+  // Close the hamburger drawer when the viewport grows past `lg`. Without this,
   // a user who opens the drawer on phone-portrait and rotates to a wider layout
   // is left with an orphan dropdown.
   useEffect(() => {
-    const mql = window.matchMedia('(min-width: 768px)')
+    const mql = window.matchMedia('(min-width: 1024px)')
     const onChange = () => mql.matches && setHamburgerOpen(false)
     mql.addEventListener('change', onChange)
     return () => mql.removeEventListener('change', onChange)
@@ -102,7 +101,7 @@ export function MainNav() {
             <OpenEmrLogo />
           </a>
 
-          <ul className="hidden md:flex items-center gap-4 text-sm m-0 flex-wrap">
+          <ul className="hidden lg:flex items-center gap-4 text-sm m-0 flex-wrap">
             {NAV_ITEMS.map((item) => (
               <li key={item}>
                 <a
@@ -128,13 +127,13 @@ export function MainNav() {
             id="demo-search"
             type="text"
             placeholder="Search by any demographic"
-            className="hidden md:block px-2 py-1 text-sm border border-gray-300 rounded focus:outline-2 focus:outline-blue-600 focus:outline-offset-1"
+            className="hidden lg:block px-2 py-1 text-sm border border-gray-300 rounded focus:outline-2 focus:outline-blue-600 focus:outline-offset-1"
             aria-label="Search by any demographic (decorative, not implemented)"
           />
           <button
             type="button"
             aria-label="Search"
-            className="p-2 min-h-11 min-w-11 md:min-h-0 md:min-w-0 md:p-1 text-gray-600 hover:text-blue-700 flex items-center justify-center"
+            className="p-2 min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 lg:p-1 text-gray-600 hover:text-blue-700 flex items-center justify-center"
           >
             <SearchIcon />
           </button>
@@ -146,7 +145,7 @@ export function MainNav() {
               onClick={() => setUserMenuOpen((s) => !s)}
               aria-label="User menu"
               aria-expanded={userMenuOpen}
-              className="p-2 min-h-11 min-w-11 md:min-h-0 md:min-w-0 md:p-1 text-gray-600 hover:text-blue-700 flex items-center justify-center"
+              className="p-2 min-h-11 min-w-11 lg:min-h-0 lg:min-w-0 lg:p-1 text-gray-600 hover:text-blue-700 flex items-center justify-center"
             >
               <UserIcon />
             </button>
@@ -159,7 +158,7 @@ export function MainNav() {
                   type="button"
                   role="menuitem"
                   onClick={handleSignOut}
-                  className="w-full text-left px-3 py-3 md:py-1.5 text-sm text-gray-700 hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600"
+                  className="w-full text-left px-3 py-3 lg:py-1.5 text-sm text-gray-700 hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600"
                 >
                   Sign out
                 </button>
@@ -167,8 +166,8 @@ export function MainNav() {
             )}
           </div>
 
-          {/* Hamburger — visible on <md only */}
-          <div ref={hamburgerRef} className="relative md:hidden">
+          {/* Hamburger — visible on <lg only (so phone landscape + tablet portrait + tablet landscape all use it) */}
+          <div ref={hamburgerRef} className="relative lg:hidden">
             <button
               type="button"
               onClick={() => setHamburgerOpen((s) => !s)}

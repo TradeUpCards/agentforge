@@ -52,7 +52,7 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
   if (isLoading) {
     return (
       <header
-        className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-2 max-md:portrait:sticky max-md:portrait:top-0 max-md:landscape:sticky max-md:landscape:top-0 z-20"
+        className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-2 max-md:sticky max-md:top-0 z-20"
         aria-busy="true"
       >
         <Spinner label="Loading patient" />
@@ -64,7 +64,7 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
   if (error || !patient) {
     return (
       <header
-        className="bg-white border-b border-gray-200 px-4 py-3 max-md:portrait:sticky max-md:portrait:top-0 max-md:landscape:sticky max-md:landscape:top-0 z-20"
+        className="bg-white border-b border-gray-200 px-4 py-3 max-md:sticky max-md:top-0 z-20"
         role="alert"
       >
         <p className="text-sm text-red-700">Failed to load patient.</p>
@@ -115,7 +115,7 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
       </header>
 
       {/* <md portrait: full stacked + sticky */}
-      <header className="md:hidden portrait:block landscape:hidden sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-2 shadow-sm">
+      <header className="hidden max-md:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-2 shadow-sm">
         <div className="flex items-center gap-3">
           <Avatar small />
           <div className="min-w-0 flex-1">
@@ -142,7 +142,7 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
       </header>
 
       {/* <md landscape: compact sticky (tap to expand) */}
-      <header className="md:hidden landscape:block portrait:hidden sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
+      <header className="hidden max-md:landscape:block sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
         <button
           type="button"
           onClick={() => setLandscapeExpanded((s) => !s)}

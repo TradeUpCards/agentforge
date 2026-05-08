@@ -25,9 +25,22 @@
 const OPENEMR_BASE =
   import.meta.env.VITE_OPENEMR_BASE_URL ?? 'https://localhost:9300'
 
+/**
+ * Multi-tenant site identifier for the OpenEMR install. Default install
+ * uses the literal `default`. Surfaced as a build-time env var so a
+ * non-default deploy can override.
+ *
+ * This MUST be appended to every PHP-side URL: legacy OpenEMR's
+ * main_screen.php and most patient-file pages expect `?site=<name>`
+ * and bounce to a "Site ID missing" error when the parameter is absent
+ * (which forces a fresh OpenEMR login). Including the param lets the
+ * existing PHP session resolve cleanly and keeps the user signed in.
+ */
+const OPENEMR_SITE = import.meta.env.VITE_OPENEMR_SITE ?? 'default'
+
 /** OpenEMR's main application shell. Lands user in their existing chart context. */
 export const openemrHome = (): string =>
-  `${OPENEMR_BASE}/interface/main/main_screen.php`
+  `${OPENEMR_BASE}/interface/main/main_screen.php?site=${encodeURIComponent(OPENEMR_SITE)}`
 
 /** Edit form for a clinical resource type in legacy OpenEMR. */
 export const openemrEditLink = (

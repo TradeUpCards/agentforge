@@ -4,6 +4,7 @@ import { OpenTabBar } from '../components/layout/OpenTabBar'
 import { PatientHeader } from '../components/layout/PatientHeader'
 import { MedicalRecordHeading } from '../components/layout/MedicalRecordHeading'
 import { SubNav } from '../components/layout/SubNav'
+import { openemrHome } from '../utils/openemrLinks'
 
 /**
  * Placeholder page for the non-Dashboard sub-nav items
@@ -33,9 +34,6 @@ const LABELS: Record<string, string> = {
   ledger: 'Ledger',
   'external-data': 'External Data',
 }
-
-const OPENEMR_BASE =
-  import.meta.env.VITE_OPENEMR_BASE_URL ?? 'https://localhost:9300'
 
 export function SectionStubPage() {
   const { patientId, section } = useParams<{ patientId: string; section: string }>()
@@ -68,7 +66,7 @@ export function SectionStubPage() {
         </p>
         <div className="mt-5 flex items-center gap-3">
           <a
-            href={`${OPENEMR_BASE}/interface/main/main_screen.php`}
+            href={openemrHome()}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded border border-blue-700 bg-white text-blue-700 hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
