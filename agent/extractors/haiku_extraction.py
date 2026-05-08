@@ -83,6 +83,7 @@ class ExtractionLowGrounding(ValueError):
 
 REASON_VALUE_NOT_SUBSTRING = "value_not_substring_of_block"
 REASON_BLOCK_NOT_FOUND = "block_not_found"
+REASON_CONFIDENCE_OOB = "confidence_oob"
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +101,19 @@ class ExtractionStats:
     PHI discipline: counts and reason codes only — no field names, no
     field values. verifier_reason_counts keys are ONLY the module-level
     REASON_* constants defined in this file, never LLM output or block text.
+
+    field_verdicts shape: list of (field_path, source_block_id, verifier_reason)
+      - field_path:      static string literal (e.g. "results[0].test_name")
+      - source_block_id: block ID string or None
+      - verifier_reason: None when verified; one of REASON_* constants when stripped
     """
 
     total_fields: int = 0
     stripped_fields: int = 0
     verifier_reason_counts: dict[str, int] = _dc_field(default_factory=dict)
+    field_verdicts: list[tuple[str, str | None, str | None]] = _dc_field(
+        default_factory=list
+    )
 
     @property
     def strip_rate(self) -> float:
@@ -113,20 +122,53 @@ class ExtractionStats:
             return 0.0
         return self.stripped_fields / self.total_fields
 
-    def record_failure(self, reason: str) -> None:
+    def record_failure(
+        self,
+        reason: str,
+        field_path: str = "",
+        source_block_id: str | None = None,
+    ) -> None:
         """Increment stripped_fields and the named reason bucket.
+
+        Also appends a (field_path, source_block_id, reason) tuple to
+        field_verdicts for per-field traceability in the P3 response payload.
 
         Args:
             reason: MUST be one of the REASON_* module-level constants
-                    (REASON_VALUE_NOT_SUBSTRING, REASON_BLOCK_NOT_FOUND).
+                    (REASON_VALUE_NOT_SUBSTRING, REASON_BLOCK_NOT_FOUND,
+                    REASON_CONFIDENCE_OOB).
                     Never pass interpolated strings, field names, or
                     values from LLM output — those would become keys in
                     the Langfuse span's verifier_reason_counts JSON.
+            field_path:      Static string literal identifying the field
+                             (e.g. "results[0].test_name"). PHI-safe:
+                             always a literal, never interpolated LLM output.
+            source_block_id: The Docling block_id cited for this field, or
+                             None if not available.
         """
         self.stripped_fields += 1
         self.verifier_reason_counts[reason] = (
             self.verifier_reason_counts.get(reason, 0) + 1
         )
+        self.field_verdicts.append((field_path, source_block_id, reason))
+
+    def record_verified(
+        self,
+        field_path: str,
+        source_block_id: str | None,
+    ) -> None:
+        """Record a successfully verified field in field_verdicts.
+
+        Appends a (field_path, source_block_id, None) tuple — the None
+        verifier_reason signals "verified" (as opposed to a REASON_* constant
+        which signals "stripped").
+
+        Args:
+            field_path:      Static string literal identifying the field.
+                             Must never contain LLM output or patient data.
+            source_block_id: The Docling block_id confirmed as the source.
+        """
+        self.field_verdicts.append((field_path, source_block_id, None))
 
 
 # ---------------------------------------------------------------------------
@@ -235,18 +277,52 @@ def _check_grounding_rate(
 # ---------------------------------------------------------------------------
 
 
-def _validate_confidence(confidence: float, label: str) -> float:
-    """Raise ValueError if confidence is outside [0.0, 1.0].
+def _validate_confidence(
+    confidence: float,
+    label: str,
+    stats: ExtractionStats,
+    field_path: str = "",
+    source_block_id: str | None = None,
+) -> float | None:
+    """Return confidence if in [0.0, 1.0]; record a strip failure and return
+    None if out of bounds (strip-and-continue, not raise).
 
-    Intentionally does NOT interpolate the actual confidence value into the
-    message: the value itself is not PHI, but establishing a convention that
-    no numeric field values appear in exception messages is simpler to audit
-    than case-by-case reasoning about which values are safe.
+    P3 decision (W2_ARCHITECTURE.md P3 brief): confidence_oob is treated as
+    a strip-and-continue condition, not an extraction abort. The field is
+    dropped from the result set and REASON_CONFIDENCE_OOB is recorded in
+    ExtractionStats so it surfaces in Langfuse and field_verdicts.
+
+    Intentionally does NOT interpolate the actual confidence value into any
+    log message or exception: establishes the convention that no numeric
+    field values appear in observability output.
+
+    Args:
+        confidence:      The raw confidence float from the LLM response.
+        label:           Non-PHI label for logging context (e.g. "LabResult").
+        stats:           ExtractionStats accumulator; record_failure is called
+                         here when confidence is OOB.
+        field_path:      Static string literal for field_verdicts traceability.
+        source_block_id: Docling block_id for the field being validated.
+
+    Returns:
+        The confidence float when in range, or None when OOB (signal to skip).
     """
     if not (0.0 <= confidence <= 1.0):
-        raise ValueError(
-            f"confidence out of range in {label}: must be in [0.0, 1.0]"
+        logger.info(
+            "extraction_verifier: confidence out of range, field stripped",
+            extra={
+                "label": label,
+                "field_path": field_path,
+                "source_block_id": source_block_id,
+                # Never log the confidence value itself
+            },
         )
+        stats.record_failure(
+            REASON_CONFIDENCE_OOB,
+            field_path=field_path,
+            source_block_id=source_block_id,
+        )
+        return None
     return confidence
 
 
@@ -375,7 +451,7 @@ def parse_lab_report(
 
     Raises:
         ValueError:              patient_id outside sentinel range, or invalid
-                                 block_id cited by Haiku, or confidence OOB.
+                                 block_id cited by Haiku.
         ExtractionLowGrounding:  >30% of fields fail grounding check.
         json.JSONDecodeError:    Haiku response is not valid JSON.
     """
@@ -395,7 +471,11 @@ def parse_lab_report(
     stats = ExtractionStats()
     all_confidences: list[float] = []
 
-    for item in raw_results:
+    for i, item in enumerate(raw_results):
+        # Static field_path literal for this result item — index is the loop
+        # ordinal (integer), never LLM output. PHI-safe per W2 P3 brief.
+        field_path = f"results[{i}].test_name"
+
         # Validate source_block_id exists in the doc
         source_block_id: str | None = item.get("source_block_id")
         if source_block_id is not None and source_block_id not in block_index:
@@ -404,22 +484,39 @@ def parse_lab_report(
                 "Block index violation — refusing extraction."
             )
 
-        # Confidence bound check
+        # Confidence bound check — strip-and-continue (P3: confidence_oob)
         raw_confidence = item.get("confidence", 0.0)
         # Convert to float defensively
         try:
-            confidence = float(raw_confidence)
+            raw_conf_float = float(raw_confidence)
         except (TypeError, ValueError):
-            confidence = 0.0
-        _validate_confidence(confidence, "LabResult")
-        all_confidences.append(confidence)
+            raw_conf_float = 0.0
+        stats.total_fields += 1
+        validated_confidence = _validate_confidence(
+            raw_conf_float,
+            "LabResult",
+            stats,
+            field_path=field_path,
+            source_block_id=source_block_id,
+        )
+        if validated_confidence is None:
+            # OOB confidence → field stripped, already recorded in stats
+            logger.info(
+                "extraction_verifier: field stripped (confidence_oob)",
+                extra={"field_path": field_path, "source_block_id": source_block_id},
+            )
+            continue
+        confidence = validated_confidence
 
         # Grounding check: does the test_name appear in the source block?
         test_name: str = str(item.get("test_name", ""))
-        stats.total_fields += 1
         grounded, reason = verify_field(test_name, source_block_id, block_index)
         if not grounded:
-            stats.record_failure(reason or REASON_VALUE_NOT_SUBSTRING)
+            stats.record_failure(
+                reason or REASON_VALUE_NOT_SUBSTRING,
+                field_path=field_path,
+                source_block_id=source_block_id,
+            )
             # Strip this field — do NOT add to passed_results
             logger.info(
                 "extraction_verifier: field stripped (grounding failed)",
@@ -430,6 +527,10 @@ def parse_lab_report(
                 },
             )
             continue
+
+        # Grounding passed — record verified verdict
+        stats.record_verified(field_path, source_block_id)
+        all_confidences.append(confidence)
 
         # Parse value — must be numeric
         raw_value = item.get("value")
@@ -522,7 +623,7 @@ def parse_intake_form(
 
     Raises:
         ValueError:              patient_id outside sentinel range, or invalid
-                                 block_id, or confidence OOB.
+                                 block_id cited by Haiku.
         ExtractionLowGrounding:  >30% of fields fail grounding check.
         json.JSONDecodeError:    Haiku response is not valid JSON.
     """
@@ -569,8 +670,14 @@ def parse_intake_form(
     stats.total_fields += 1
     demo_grounded, demo_reason = verify_field(demo_name, demo_block_id, block_index)
     if not demo_grounded:
-        stats.record_failure(demo_reason or REASON_VALUE_NOT_SUBSTRING)
+        stats.record_failure(
+            demo_reason or REASON_VALUE_NOT_SUBSTRING,
+            field_path="demographics.name",
+            source_block_id=demo_block_id,
+        )
         demo_block_id = None  # strip — null out block ref but keep the field
+    else:
+        stats.record_verified("demographics.name", demo_block_id)
 
     raw_dob = raw_demo.get("dob")
     dob: date | None = None
@@ -595,25 +702,37 @@ def parse_intake_form(
         stats.total_fields += 1
         cc_grounded, cc_reason = verify_field(chief_concern, chief_concern_block_id, block_index)
         if not cc_grounded:
-            stats.record_failure(cc_reason or REASON_VALUE_NOT_SUBSTRING)
+            stats.record_failure(
+                cc_reason or REASON_VALUE_NOT_SUBSTRING,
+                field_path="chief_concern",
+                source_block_id=chief_concern_block_id,
+            )
             chief_concern = None  # strip ungrounded chief_concern
+        else:
+            stats.record_verified("chief_concern", chief_concern_block_id)
 
     # --- medications ---
     raw_meds: list[dict[str, Any]] = raw.get("current_medications", [])
     medications: list[Medication] = []
-    for med_item in raw_meds:
+    for med_i, med_item in enumerate(raw_meds):
+        med_field_path = f"current_medications[{med_i}].name"
         med_block_id: str | None = med_item.get("source_block_id")
         _check_block_id(med_block_id, "medication")
         med_name: str = str(med_item.get("name", ""))
         stats.total_fields += 1
         grounded, reason = verify_field(med_name, med_block_id, block_index)
         if not grounded:
-            stats.record_failure(reason or REASON_VALUE_NOT_SUBSTRING)
+            stats.record_failure(
+                reason or REASON_VALUE_NOT_SUBSTRING,
+                field_path=med_field_path,
+                source_block_id=med_block_id,
+            )
             logger.info(
                 "extraction_verifier: medication stripped (grounding failed)",
                 extra={"source_block_id": med_block_id},
             )
             continue
+        stats.record_verified(med_field_path, med_block_id)
         medications.append(
             Medication(
                 name=med_name,
@@ -626,19 +745,25 @@ def parse_intake_form(
     # --- allergies ---
     raw_allergies: list[dict[str, Any]] = raw.get("allergies", [])
     allergies: list[Allergy] = []
-    for allergy_item in raw_allergies:
+    for allergy_i, allergy_item in enumerate(raw_allergies):
+        allergy_field_path = f"allergies[{allergy_i}].substance"
         allergy_block_id: str | None = allergy_item.get("source_block_id")
         _check_block_id(allergy_block_id, "allergy")
         substance: str = str(allergy_item.get("substance", ""))
         stats.total_fields += 1
         grounded, reason = verify_field(substance, allergy_block_id, block_index)
         if not grounded:
-            stats.record_failure(reason or REASON_VALUE_NOT_SUBSTRING)
+            stats.record_failure(
+                reason or REASON_VALUE_NOT_SUBSTRING,
+                field_path=allergy_field_path,
+                source_block_id=allergy_block_id,
+            )
             logger.info(
                 "extraction_verifier: allergy stripped (grounding failed)",
                 extra={"source_block_id": allergy_block_id},
             )
             continue
+        stats.record_verified(allergy_field_path, allergy_block_id)
         allergies.append(
             Allergy(
                 substance=substance,
@@ -651,19 +776,25 @@ def parse_intake_form(
     # --- family_history ---
     raw_fh: list[dict[str, Any]] = raw.get("family_history", [])
     family_history: list[FamilyHistoryItem] = []
-    for fh_item in raw_fh:
+    for fh_i, fh_item in enumerate(raw_fh):
+        fh_field_path = f"family_history[{fh_i}].condition"
         fh_block_id: str | None = fh_item.get("source_block_id")
         _check_block_id(fh_block_id, "family_history")
         condition: str = str(fh_item.get("condition", ""))
         stats.total_fields += 1
         grounded, reason = verify_field(condition, fh_block_id, block_index)
         if not grounded:
-            stats.record_failure(reason or REASON_VALUE_NOT_SUBSTRING)
+            stats.record_failure(
+                reason or REASON_VALUE_NOT_SUBSTRING,
+                field_path=fh_field_path,
+                source_block_id=fh_block_id,
+            )
             logger.info(
                 "extraction_verifier: family_history stripped (grounding failed)",
                 extra={"source_block_id": fh_block_id},
             )
             continue
+        stats.record_verified(fh_field_path, fh_block_id)
         family_history.append(
             FamilyHistoryItem(
                 condition=condition,
@@ -678,8 +809,16 @@ def parse_intake_form(
         overall_confidence = float(raw_confidence)
     except (TypeError, ValueError):
         overall_confidence = 0.0
-    _validate_confidence(overall_confidence, "IntakeForm")
-    all_confidences.append(overall_confidence)
+    # strip-and-continue for OOB overall confidence (P3 decision)
+    validated_overall = _validate_confidence(
+        overall_confidence,
+        "IntakeForm",
+        stats,
+        field_path="confidence",
+        source_block_id=None,
+    )
+    if validated_overall is not None:
+        all_confidences.append(validated_overall)
 
     # --- source_citations ---
     source_citations: dict[str, str] = {}

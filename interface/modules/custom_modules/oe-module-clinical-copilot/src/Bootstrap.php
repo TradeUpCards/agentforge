@@ -24,6 +24,10 @@ use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\PageHeadingSubscriber;
 use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\PatientMenuSubscriber;
 use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\ScriptFilterSubscriber;
 use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
+use OpenEMR\Modules\ClinicalCopilot\Service\DocumentPathResolver;
+use OpenEMR\Modules\ClinicalCopilot\Service\ExtractedFieldsWriter;
+use OpenEMR\Modules\ClinicalCopilot\Service\FieldKeyExtractorFactory;
+use OpenEMR\Modules\ClinicalCopilot\Service\RoundtripService;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 
 final class Bootstrap
@@ -50,8 +54,20 @@ final class Bootstrap
         $this->eventDispatcher->addSubscriber(new PatientMenuSubscriber());
         $this->eventDispatcher->addSubscriber(new ScriptFilterSubscriber());
         $this->eventDispatcher->addSubscriber(new PageHeadingSubscriber());
+
         // Stage-4a: auto-extraction subscriber for lab/intake documents.
-        $this->eventDispatcher->addSubscriber(new DocumentSavedSubscriber(new AgentClient()));
+        // Wire all P3 services explicitly so the dependency graph is visible.
+        $extractorFactory = new FieldKeyExtractorFactory();
+        $roundtripService = new RoundtripService(null, $extractorFactory);
+        $pathResolver     = new DocumentPathResolver();
+        $fieldsWriter     = new ExtractedFieldsWriter();
+
+        $this->eventDispatcher->addSubscriber(new DocumentSavedSubscriber(
+            agentClient:      new AgentClient(),
+            roundtripService: $roundtripService,
+            pathResolver:     $pathResolver,
+            fieldsWriter:     $fieldsWriter,
+        ));
     }
 
     /**

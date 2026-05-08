@@ -333,13 +333,18 @@ class TestRetryLadderRecovery:
         doc = _minimal_doc()
         valid_result = _minimal_lab_report()
 
+        # P3: _run_haiku_extraction now returns (parsed_result, stats) — tests
+        # wrap the success-path result as a 2-tuple (None for stats since these
+        # tests don't assert on stats; the wrapper unpacks correctly either way).
         mock_inner = AsyncMock(side_effect=[
             ExtractionLowGrounding("extraction_low_grounding: 3/5 failed"),
-            valid_result,
+            (valid_result, None),
         ])
 
         with patch("agent.extractors._run_haiku_extraction", mock_inner):
-            result = await _run_extraction_with_retry(
+            # P3: _run_extraction_with_retry now returns (result, stats) — unpack
+            # so the existing `assert result is valid_result` keeps its semantics.
+            result, _stats = await _run_extraction_with_retry(
                 doc=doc,
                 doc_type="lab_pdf",
                 patient_id=_PID,
@@ -417,14 +422,17 @@ class TestRetryLadderSonnetEscalation:
         doc = _minimal_doc()
         valid_result = _minimal_lab_report()
 
+        # P3: see test_haiku_default_fails_haiku_verbatim_succeeds for the
+        # tuple-shape rationale — _run_haiku_extraction now returns
+        # (parsed_result, stats); _run_extraction_with_retry returns the same.
         mock_inner = AsyncMock(side_effect=[
             ExtractionLowGrounding("extraction_low_grounding: 4/5 failed"),
             ExtractionLowGrounding("extraction_low_grounding: 3/5 failed"),
-            valid_result,
+            (valid_result, None),
         ])
 
         with patch("agent.extractors._run_haiku_extraction", mock_inner):
-            result = await _run_extraction_with_retry(
+            result, _stats = await _run_extraction_with_retry(
                 doc=doc,
                 doc_type="lab_pdf",
                 patient_id=_PID,
@@ -658,14 +666,19 @@ class TestRetryLadderNoFailedValueLeak:
 
         captured_call_2_kwargs: dict[str, Any] = {}
 
-        async def _capture_on_call_2(*args: Any, **kwargs: Any) -> LabReport:
-            """Side effect that captures call-2 kwargs then returns valid result."""
+        async def _capture_on_call_2(*args: Any, **kwargs: Any) -> "tuple[LabReport, None]":
+            """Side effect that captures call-2 kwargs then returns valid result.
+
+            P3: _run_haiku_extraction now returns (parsed_result, stats).  The
+            mock returns (valid_result, None) — None for stats since this test
+            asserts on kwargs, not on stats content.
+            """
             nonlocal captured_call_2_kwargs
             if kwargs.get("attempt_n") == 1:
                 raise ExtractionLowGrounding("extraction_low_grounding: 4/5 failed")
             # attempt_n == 2 (or higher) — capture and succeed
             captured_call_2_kwargs = dict(kwargs)
-            return valid_result
+            return (valid_result, None)
 
         mock_inner = AsyncMock(side_effect=_capture_on_call_2)
 
@@ -740,7 +753,9 @@ class TestRetryLadderSpanLifecycle:
         doc = _minimal_doc()
         valid_result = _minimal_lab_report()
 
-        mock_inner = AsyncMock(return_value=valid_result)
+        # P3: tuple-wrap valid_result since _run_haiku_extraction now returns
+        # (parsed_result, stats).
+        mock_inner = AsyncMock(return_value=(valid_result, None))
 
         with patch("agent.extractors._run_haiku_extraction", mock_inner):
             await _run_extraction_with_retry(
@@ -765,9 +780,10 @@ class TestRetryLadderSpanLifecycle:
         doc = _minimal_doc()
         valid_result = _minimal_lab_report()
 
+        # P3: tuple-wrap success-path result.
         mock_inner = AsyncMock(side_effect=[
             ExtractionLowGrounding("extraction_low_grounding: 3/5 failed"),
-            valid_result,
+            (valid_result, None),
         ])
 
         with patch("agent.extractors._run_haiku_extraction", mock_inner):
@@ -797,10 +813,11 @@ class TestRetryLadderSpanLifecycle:
         doc = _minimal_doc()
         valid_result = _minimal_lab_report()
 
+        # P3: tuple-wrap success-path result.
         mock_inner = AsyncMock(side_effect=[
             ExtractionLowGrounding("extraction_low_grounding: 4/5 failed"),
             ExtractionLowGrounding("extraction_low_grounding: 3/5 failed"),
-            valid_result,
+            (valid_result, None),
         ])
 
         with patch("agent.extractors._run_haiku_extraction", mock_inner):

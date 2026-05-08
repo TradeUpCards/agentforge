@@ -26,7 +26,7 @@ from .agent import record_score, run_chat, verify_attach_hmac, verify_hmac, veri
 from ._phi_scrubber import mask_observability_patterns
 from .config import get_settings
 from .document_schemas import IntakeForm, LabReport
-from .extractors import attach_and_extract_async
+from .extractors import attach_and_extract_async, attach_and_extract_with_metadata_async
 from .graph.builder import build_supervisor_graph
 from .schemas import (
     AgentResponse,
@@ -221,6 +221,30 @@ async def attach_and_extract_endpoint(
     timestamp_raw = request.headers.get("X-OpenEMR-Timestamp", "")
     hmac_header = request.headers.get("X-OpenEMR-HMAC", "")
 
+    # P3 reprocess-flow headers (PRD §7.3).  Both optional; absent on initial
+    # uploads, present when the PHP reprocess endpoint POSTs to this route.
+    # Workflow metadata only — NOT part of the HMAC payload formula
+    # (verify_attach_hmac at agent.py:435 hashes only the file + identifiers).
+    is_reprocess = request.headers.get("X-OpenEMR-Reprocess", "").strip().lower() == "true" \
+        or request.headers.get("X-OpenEMR-Reprocess", "").strip() == "1"
+    parent_extraction_id_raw = request.headers.get("X-OpenEMR-Parent-Extraction-Id", "")
+    parent_extraction_id: int | None = None
+    if is_reprocess:
+        try:
+            parent_extraction_id = int(parent_extraction_id_raw)
+            if parent_extraction_id <= 0:
+                raise ValueError("non-positive")
+        except (ValueError, TypeError):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "refused",
+                    "reason": "reprocess_missing_parent_id",
+                    "request_id": request_id,
+                },
+            )
+    triggered_by_value = "manual_retry" if is_reprocess else "initial"
+
     # Parse user_id: must be a valid integer.
     try:
         user_id = int(user_id_raw)
@@ -359,12 +383,22 @@ async def attach_and_extract_endpoint(
             },
         )
 
-        result = await attach_and_extract_async(
+        # P3: switch to the metadata-returning variant so the response can
+        # include docling_blocks (full block inventory for the "Possibly
+        # Missed" review pane) and field_verdicts (per-field verifier verdicts
+        # for co_pilot_extracted_fields persistence).  The pre-P3
+        # attach_and_extract_async() is preserved for LangGraph callers.
+        extraction_payload = await attach_and_extract_with_metadata_async(
             patient_id=patient_id,
             doc_ref_id=doc_ref_id,
             doc_type=doc_type,
             pdf_path=tmp_path,
+            triggered_by=triggered_by_value,
+            parent_extraction_id=parent_extraction_id,
         )
+        result = extraction_payload["result"]
+        docling_blocks_payload = extraction_payload["docling_blocks"]
+        field_verdicts_payload = extraction_payload["field_verdicts"]
 
     except Exception as exc:
         # Stage-2 fix #1 pattern: scrub exception message and break __cause__
@@ -450,6 +484,16 @@ async def attach_and_extract_endpoint(
             "n_pages": n_pages,
             "extraction_confidence_avg": extraction_confidence_avg,
             "request_id": request_id,
+            # P3 (PRD §7): full Docling block inventory for the "Possibly
+            # Missed" pane + per-field verifier verdicts so the OpenEMR
+            # subscriber can persist co_pilot_extracted_fields rows and the
+            # review modal can render bbox overlays.  parent_extraction_id /
+            # triggered_by are echoed so the PHP layer can chain attempts
+            # without a second DB query.
+            "parent_extraction_id": parent_extraction_id,
+            "triggered_by": triggered_by_value,
+            "docling_blocks": docling_blocks_payload,
+            "field_verdicts": field_verdicts_payload,
         },
     )
 

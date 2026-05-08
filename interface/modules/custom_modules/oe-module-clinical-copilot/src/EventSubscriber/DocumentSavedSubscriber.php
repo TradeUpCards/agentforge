@@ -30,6 +30,12 @@
  *   Same upload re-fired will return the existing extraction without a second
  *   agent call.
  *
+ * IS_ACTIVE INVARIANT:
+ *   markPriorAttemptsInactive() is called BEFORE resolveFilePath() and the
+ *   agent call.  This ensures that even an error-path early return (e.g.
+ *   unresolvable file) still deactivates prior attempts before writing the
+ *   new error row, maintaining the at-most-one-active invariant.
+ *
  * @package   OpenEMR
  * @link      https://www.open-emr.org
  * @author    AgentForge Team
@@ -41,11 +47,12 @@ declare(strict_types=1);
 
 namespace OpenEMR\Modules\ClinicalCopilot\EventSubscriber;
 
-use Document as OpenEMRDocument;
 use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\SystemLogger;
 use OpenEMR\Modules\ClinicalCopilot\Events\DocumentCreatedEvent;
 use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
+use OpenEMR\Modules\ClinicalCopilot\Service\DocumentPathResolver;
+use OpenEMR\Modules\ClinicalCopilot\Service\ExtractedFieldsWriter;
 use OpenEMR\Modules\ClinicalCopilot\Service\PersonaMap;
 use OpenEMR\Modules\ClinicalCopilot\Service\RoundtripService;
 use Psr\Log\LoggerInterface;
@@ -69,13 +76,21 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
 
     private readonly RoundtripService $roundtripService;
 
+    private readonly DocumentPathResolver $pathResolver;
+
+    private readonly ExtractedFieldsWriter $fieldsWriter;
+
     public function __construct(
         private readonly AgentClient $agentClient,
         ?LoggerInterface $logger = null,
         ?RoundtripService $roundtripService = null,
+        ?DocumentPathResolver $pathResolver = null,
+        ?ExtractedFieldsWriter $fieldsWriter = null,
     ) {
-        $this->logger = $logger ?? new SystemLogger();
+        $this->logger           = $logger ?? new SystemLogger();
         $this->roundtripService = $roundtripService ?? new RoundtripService($this->logger);
+        $this->pathResolver     = $pathResolver ?? new DocumentPathResolver($this->logger);
+        $this->fieldsWriter     = $fieldsWriter ?? new ExtractedFieldsWriter($this->logger);
     }
 
     public static function getSubscribedEvents(): array
@@ -93,10 +108,14 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
      *  2. Checks if it is one of our auto-extract categories.
      *  3. Runs the pid through PersonaMap; skips if not a demo persona.
      *  4. Checks idempotency — skips if this (doc_ref_id, doc_type) already
-     *     has an extraction row.
-     *  5. Resolves the filesystem path via a Document instance.
-     *  6. Calls AgentClient::attachAndExtract.
-     *  7. Persists the result row in co_pilot_extractions.
+     *     has an active OK extraction row.
+     *  5. Marks prior attempts inactive (IS_ACTIVE INVARIANT — before any
+     *     file I/O or agent call so even the error path is covered).
+     *  6. Resolves the filesystem path via DocumentPathResolver.
+     *  7. Calls AgentClient::attachAndExtract.
+     *  8. Persists the result row in co_pilot_extractions (incl. docling_blocks_json).
+     *  9. Writes co_pilot_extracted_fields rows via ExtractedFieldsWriter.
+     * 10. FHIR round-trip for successful extractions.
      */
     public function onDocumentCreated(DocumentCreatedEvent $event): void
     {
@@ -149,10 +168,19 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 return;
             }
 
-            // 5. Resolve filesystem path via Document instance.
-            //    Document::get_filesystem_filepath() handles path depth + site dir.
-            //    We call get_data() to also handle encryption transparently.
-            $filePath = $this->resolveFilePath($docId);
+            // 5. IS_ACTIVE INVARIANT FIX: mark prior attempts inactive BEFORE
+            //    any file I/O or agent call.  This ensures the invariant holds
+            //    even when resolveFilePath() or the agent call returns early
+            //    with an error and we persist an error row below.
+            //
+            //    Prior code (pre-P3) called markPriorAttemptsInactive() only
+            //    just before the successful-path INSERT at step 8, which meant
+            //    an error-path early return at step 6 could leave a prior active
+            //    row plus a new error row both having is_active=1.
+            $this->roundtripService->markPriorAttemptsInactive($docRefId, $docType);
+
+            // 6. Resolve filesystem path via DocumentPathResolver.
+            $filePath = $this->pathResolver->resolve($docId);
             if ($filePath === null) {
                 $this->logger->error('ClinicalCopilot: could not resolve filesystem path for document', [
                     'doc_ref_id' => $docRefId,
@@ -170,7 +198,7 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 return;
             }
 
-            // 6. Call agent.
+            // 7. Call agent.
             $startMs  = (int) round(microtime(true) * 1000);
             $response = $this->agentClient->attachAndExtract(
                 patientId: $sentinelPid,
@@ -204,6 +232,17 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
             $totalFields   = is_int($response['total_fields'] ?? null)       ? $response['total_fields']   : null;
             $strippedFields = is_int($response['stripped_fields'] ?? null)   ? $response['stripped_fields'] : null;
 
+            // P3: field-level verdicts and Docling block inventory.
+            $fieldVerdicts = is_array($response['field_verdicts'] ?? null)
+                ? $response['field_verdicts']
+                : [];
+            $doclingBlocks = is_array($response['docling_blocks'] ?? null)
+                ? $response['docling_blocks']
+                : [];
+            $doclingBlocksJson = $doclingBlocks !== []
+                ? json_encode($doclingBlocks, JSON_UNESCAPED_UNICODE)
+                : null;
+
             // extraction_json holds only the validated schema payload — NOT raw doc text.
             $extractionJson = ($agentStatus === 'ok' && isset($response['extraction']))
                 ? json_encode($response['extraction'], JSON_UNESCAPED_UNICODE)
@@ -220,35 +259,42 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 'triggered_by'  => $triggeredBy,
             ]);
 
-            // 7. Persist result.
-            //    Before inserting the new attempt row, mark any prior active
-            //    rows for this (doc_ref_id, doc_type) as inactive.  This
-            //    enforces the at-most-one-active invariant defined in PRD §4.1.
-            //    For the very first attempt, the UPDATE matches zero rows and
-            //    is a safe no-op.
-            $this->roundtripService->markPriorAttemptsInactive($docRefId, $docType);
-
+            // 8. Persist result.
+            //    Prior attempts were already deactivated at step 5 (IS_ACTIVE
+            //    INVARIANT FIX).  No second markPriorAttemptsInactive() call here.
             $extractionId = $this->persistExtractionRow(
-                pid:            $sentinelPid,
-                docRefId:       $docRefId,
-                docType:        $docType,
-                status:         $agentStatus,
-                extractionJson: $extractionJson,
-                nBlocks:        $nBlocks,
-                confidenceAvg:  $confidenceAvg,
-                requestId:      $requestId,
-                templateId:     $templateId,
-                model:          $model,
-                promptVariant:  $promptVariant,
-                attemptN:       $attemptN,
-                triggeredBy:    $triggeredBy,
-                costUsd:        $costUsd,
-                latencyMs:      $agentLatencyMs,
-                totalFields:    $totalFields,
-                strippedFields: $strippedFields,
+                pid:                $sentinelPid,
+                docRefId:           $docRefId,
+                docType:            $docType,
+                status:             $agentStatus,
+                extractionJson:     $extractionJson,
+                nBlocks:            $nBlocks,
+                confidenceAvg:      $confidenceAvg,
+                requestId:          $requestId,
+                templateId:         $templateId,
+                model:              $model,
+                promptVariant:      $promptVariant,
+                attemptN:           $attemptN,
+                triggeredBy:        $triggeredBy,
+                costUsd:            $costUsd,
+                latencyMs:          $agentLatencyMs,
+                totalFields:        $totalFields,
+                strippedFields:     $strippedFields,
+                doclingBlocksJson:  $doclingBlocksJson,
             );
 
-            // 8. FHIR round-trip — only on successful extraction.  Persists
+            // 9. Write per-field verdict rows (P3).
+            if ($extractionId > 0 && $fieldVerdicts !== []) {
+                $verifiedFieldMap = $this->fieldsWriter->writeAll(
+                    $extractionId,
+                    $fieldVerdicts,
+                    $doclingBlocks,
+                );
+            } else {
+                $verifiedFieldMap = [];
+            }
+
+            // 10. FHIR round-trip — only on successful extraction.  Persists
             // derived facts into OpenEMR's clinical tables (procedure_*,
             // lists, prescriptions) so they appear in the chart UI and
             // are queryable via the FHIR API.  Per W2 PRD §1 + §43.
@@ -266,10 +312,13 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 $extractionPayload = json_decode($extractionJson, true);
                 if (is_array($extractionPayload)) {
                     $this->roundtripService->roundtrip(
-                        extractionId: $extractionId,
-                        patientId:    $pid,
-                        docType:      $docType,
-                        extraction:   $extractionPayload,
+                        extractionId:    $extractionId,
+                        patientId:       $pid,
+                        docType:         $docType,
+                        extraction:      $extractionPayload,
+                        docRefId:        $docRefId,
+                        verifiedFieldMap: $verifiedFieldMap,
+                        fieldsWriter:    $this->fieldsWriter,
                     );
                 }
             }
@@ -335,78 +384,6 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
     }
 
     /**
-     * Resolve the absolute filesystem path for a document.
-     *
-     * Uses `Document::get_filesystem_filepath()` so path-depth adjustments
-     * and OE_SITE_DIR resolution happen in the same way as the existing
-     * document download flow.
-     *
-     * Returns null when the document uses CouchDB storage or the path is
-     * otherwise unresolvable.
-     *
-     * NOTE: We do NOT call `Document::get_data()` here because we want the
-     * AgentClient to stream the bytes independently (handles large files
-     * without double-buffering in PHP).  The subscriber only resolves the
-     * path; AgentClient reads and hashes the bytes.
-     */
-    protected function resolveFilePath(int $docId): ?string
-    {
-        // Document::get_filesystem_filepath() is `protected` in OpenEMR core
-        // (visible to subclasses only), so calling it from this subscriber
-        // raises a PHP scope error.  Resolve the path directly via SQL on
-        // the `documents.url` column, which stores the canonical
-        // file:///absolute/path for filesystem-stored documents
-        // (storagemethod = 0).  CouchDB-stored docs (storagemethod != 0)
-        // are out of scope for tonight's MVP; that branch returns null.
-        $row = QueryUtils::fetchRecords(
-            "SELECT url, storagemethod FROM documents WHERE id = ? AND deleted = 0 LIMIT 1",
-            [$docId]
-        );
-        if (empty($row) || (int) ($row[0]['storagemethod'] ?? -1) !== 0) {
-            return null;
-        }
-        $url = (string) ($row[0]['url'] ?? '');
-        $path = str_starts_with($url, 'file://') ? substr($url, 7) : $url;
-        if ($path === '' || !file_exists($path)) {
-            return null;
-        }
-
-        // OpenEMR encrypts uploaded documents at rest via CryptoGen
-        // (aes-256-gcm, key managed in the database).  The bytes on disk
-        // are NOT raw PDF/PNG — they're ciphertext.  Without decryption,
-        // Docling reads garbage, fails magic-byte detection (%PDF / 89 PNG),
-        // and rejects the input with format=None.
-        //
-        // Document::decrypt_content() is the only public decryption seam;
-        // we read the ciphertext from disk and pass it through.  If decrypt
-        // throws (file not actually encrypted on this OpenEMR install),
-        // fall back to the raw bytes as-is.
-        //
-        // Write the plaintext to a fresh temp file and return that path.
-        // AgentClient reads from this path; the temp file is intentionally
-        // left for OS-level temp cleanup tonight (Thursday cleanup: register
-        // a finally-block unlink in the caller).
-        $rawBytes = @file_get_contents($path);
-        if ($rawBytes === false) {
-            return null;
-        }
-
-        $document = new OpenEMRDocument($docId);
-        try {
-            $plainBytes = $document->decrypt_content($rawBytes);
-        } catch (\Throwable $e) {
-            $plainBytes = $rawBytes;
-        }
-
-        $tmpPath = tempnam(sys_get_temp_dir(), 'copilot_plain_');
-        if ($tmpPath === false || @file_put_contents($tmpPath, $plainBytes) === false) {
-            return null;
-        }
-
-        return $tmpPath;
-    }
-
-    /**
      * Write one row to co_pilot_extractions.
      *
      * Uses QueryUtils::sqlInsert so the statement goes through OpenEMR's
@@ -416,6 +393,8 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
      * default to NULL / their column DEFAULTs when omitted, so existing call
      * sites that pre-date P2 (e.g. the error-path early return above) remain
      * valid without being updated.
+     *
+     * The P3 column docling_blocks_json defaults to NULL when omitted.
      */
     protected function persistExtractionRow(
         int $pid,
@@ -426,15 +405,16 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
         ?int $nBlocks,
         ?float $confidenceAvg,
         ?string $requestId,
-        ?string $templateId     = null,
-        ?string $model          = null,
-        string  $promptVariant  = 'default',
-        int     $attemptN       = 1,
-        string  $triggeredBy    = 'initial',
-        ?float  $costUsd        = null,
-        ?int    $latencyMs      = null,
-        ?int    $totalFields    = null,
-        ?int    $strippedFields = null,
+        ?string $templateId          = null,
+        ?string $model               = null,
+        string  $promptVariant       = 'default',
+        int     $attemptN            = 1,
+        string  $triggeredBy         = 'initial',
+        ?float  $costUsd             = null,
+        ?int    $latencyMs           = null,
+        ?int    $totalFields         = null,
+        ?int    $strippedFields      = null,
+        ?string $doclingBlocksJson   = null,
     ): int {
         return (int) QueryUtils::sqlInsert(
             'INSERT INTO `co_pilot_extractions`
@@ -443,8 +423,9 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                  `agent_request_id`,
                  `template_id`, `model`, `prompt_variant`,
                  `attempt_n`, `triggered_by`,
-                 `cost_usd`, `latency_ms`, `total_fields`, `stripped_fields`)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 `cost_usd`, `latency_ms`, `total_fields`, `stripped_fields`,
+                 `docling_blocks_json`)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 $pid,
                 $docRefId,
@@ -463,6 +444,7 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
                 $latencyMs,
                 $totalFields,
                 $strippedFields,
+                $doclingBlocksJson,
             ]
         );
     }

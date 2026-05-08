@@ -31,9 +31,15 @@ namespace OpenEMR\Modules\ClinicalCopilot\Controller;
 
 use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\SystemLogger;
 use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Modules\ClinicalCopilot\Bootstrap;
+use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
+use OpenEMR\Modules\ClinicalCopilot\Service\DocumentPathResolver;
+use OpenEMR\Modules\ClinicalCopilot\Service\ExtractedFieldsWriter;
+use OpenEMR\Modules\ClinicalCopilot\Service\PersonaMap;
+use OpenEMR\Modules\ClinicalCopilot\Service\RoundtripService;
 use Psr\Log\LoggerInterface;
 use Throwable;
 
@@ -60,9 +66,26 @@ final class CoPilotController
 
     private readonly LoggerInterface $logger;
 
-    public function __construct(?LoggerInterface $logger = null)
-    {
-        $this->logger = $logger ?? new SystemLogger();
+    private readonly AgentClient $agentClient;
+
+    private readonly DocumentPathResolver $pathResolver;
+
+    private readonly RoundtripService $roundtripService;
+
+    private readonly ExtractedFieldsWriter $fieldsWriter;
+
+    public function __construct(
+        ?LoggerInterface $logger = null,
+        ?AgentClient $agentClient = null,
+        ?DocumentPathResolver $pathResolver = null,
+        ?RoundtripService $roundtripService = null,
+        ?ExtractedFieldsWriter $fieldsWriter = null,
+    ) {
+        $this->logger           = $logger ?? new SystemLogger();
+        $this->agentClient      = $agentClient ?? new AgentClient($this->logger);
+        $this->pathResolver     = $pathResolver ?? new DocumentPathResolver($this->logger);
+        $this->roundtripService = $roundtripService ?? new RoundtripService($this->logger);
+        $this->fieldsWriter     = $fieldsWriter ?? new ExtractedFieldsWriter($this->logger);
     }
 
     /**
@@ -236,6 +259,271 @@ final class CoPilotController
 
         http_response_code($result['status']);
         echo $result['body'];
+    }
+
+    /**
+     * Handle a reprocess POST.  Always emits a JSON response and exits.
+     *
+     * Caller (reprocess.php) is responsible for booting OpenEMR globals.
+     *
+     * Expected: POST with JSON body {"extraction_id": <int>}
+     *
+     * Security controls:
+     *  - Session authenticated (userId from session, never from body).
+     *  - ACL: aclCheckCore('patients', 'med').
+     *  - CSRF token in X-CSRF-Token header.
+     *  - Patient-id horizontal-escalation check: extraction.patient_id must
+     *    match session pid (prevents one patient's session from reprocessing
+     *    another patient's document).
+     *  - extraction.is_active = 1 required (only the current active attempt
+     *    can be reprocessed; superseded rows are immutable).
+     */
+    public function handleReprocess(): void
+    {
+        header('Content-Type: application/json');
+
+        try {
+            $this->dispatchReprocess();
+        } catch (Throwable $e) {
+            $this->logger->error('Clinical Co-Pilot reprocess handler failed', [
+                'exception_class' => get_class($e),
+                'file'            => basename($e->getFile()),
+                'line'            => $e->getLine(),
+            ]);
+            http_response_code(500);
+            echo json_encode([
+                'status' => 'error',
+                'detail' => 'The agent encountered an internal error. Please retry.',
+            ]);
+        }
+    }
+
+    private function dispatchReprocess(): void
+    {
+        // 1. Session check.
+        $session   = SessionWrapperFactory::getInstance()->getActiveSession();
+        $userId    = (int) ($session->get('authUserID') ?? 0);
+        $sessionPid = (int) ($session->get('pid') ?? 0);
+
+        if ($userId <= 0) {
+            http_response_code(401);
+            echo json_encode(['status' => 'error', 'detail' => 'Authentication required.']);
+            return;
+        }
+
+        // 2. ACL.
+        if (!AclMain::aclCheckCore('patients', 'med')) {
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'forbidden']);
+            return;
+        }
+
+        // 3. Method.
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['status' => 'error', 'detail' => 'Method not allowed.']);
+            return;
+        }
+
+        // 4. CSRF.
+        $csrfToken = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+        if (!is_string($csrfToken) || !CsrfUtils::verifyCsrfToken($csrfToken, $session)) {
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'Invalid CSRF token.']);
+            return;
+        }
+
+        // 5. Patient context.
+        if ($sessionPid <= 0) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'No active patient in session.']);
+            return;
+        }
+
+        // 6. Parse body.
+        $rawBody = (string) file_get_contents('php://input', false, null, 0, self::MAX_REQUEST_BYTES + 1);
+        if (strlen($rawBody) > self::MAX_REQUEST_BYTES) {
+            http_response_code(413);
+            echo json_encode(['status' => 'error', 'detail' => 'Request payload too large.']);
+            return;
+        }
+
+        $decoded = json_decode($rawBody, true);
+        if (!is_array($decoded)) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'Invalid JSON body.']);
+            return;
+        }
+
+        $extractionIdRaw = $decoded['extraction_id'] ?? null;
+        if (!is_int($extractionIdRaw) || $extractionIdRaw <= 0) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'detail' => 'extraction_id must be a positive integer.']);
+            return;
+        }
+
+        $extractionId = $extractionIdRaw;
+
+        // 7. Load extraction row (active only).
+        $rows = QueryUtils::fetchRecords(
+            'SELECT `id`, `patient_id`, `doc_ref_id`, `doc_type`
+               FROM `co_pilot_extractions`
+              WHERE `id` = ?
+                AND `is_active` = 1
+              LIMIT 1',
+            [$extractionId],
+        );
+
+        if ($rows === []) {
+            http_response_code(404);
+            echo json_encode(['status' => 'error', 'detail' => 'Extraction not found or not active.']);
+            return;
+        }
+
+        $extraction  = $rows[0];
+        $storedPid   = (int) $extraction['patient_id'];
+        $docRefId    = (string) $extraction['doc_ref_id'];
+        $docType     = (string) $extraction['doc_type'];
+
+        // 8. Patient-id horizontal-escalation check.
+        //    The stored patient_id is the SENTINEL pid (999101-999104); the
+        //    session pid is the REAL OpenEMR pid.  We need to compare sentinel
+        //    → real via PersonaMap for the check to be meaningful.
+        //    If PersonaMap cannot resolve the session pid, deny access.
+        $expectedSentinelPid = PersonaMap::sentinelId($sessionPid);
+        if ($expectedSentinelPid === null || $storedPid !== $expectedSentinelPid) {
+            $this->logger->warning('ClinicalCopilot/reprocess: patient_id mismatch — possible horizontal escalation', [
+                'extraction_id' => $extractionId,
+            ]);
+            http_response_code(403);
+            echo json_encode(['status' => 'error', 'detail' => 'Patient context mismatch.']);
+            return;
+        }
+
+        // 9. Resolve document path.
+        $docIdInt = (int) $docRefId;
+        $filePath = $this->pathResolver->resolve($docIdInt);
+        if ($filePath === null) {
+            http_response_code(422);
+            echo json_encode(['status' => 'error', 'detail' => 'Document file could not be resolved.']);
+            return;
+        }
+
+        // 10. Mark prior attempts inactive before issuing new agent call.
+        $this->roundtripService->markPriorAttemptsInactive($docRefId, $docType);
+
+        // 11. Agent call with reprocess headers.
+        $response = $this->agentClient->attachAndExtract(
+            patientId:          $storedPid,
+            docRefId:           $docRefId,
+            docType:            $docType,
+            filePath:           $filePath,
+            userId:             $userId,
+            isReprocess:        true,
+            parentExtractionId: $extractionId,
+        );
+
+        $agentStatus    = is_string($response['status'] ?? null) ? $response['status'] : 'error';
+        $requestId      = is_string($response['request_id'] ?? null) ? $response['request_id'] : null;
+        $nBlocks        = is_int($response['n_blocks'] ?? null) ? $response['n_blocks'] : null;
+        $confidenceAvg  = isset($response['extraction_confidence_avg'])
+            ? (float) $response['extraction_confidence_avg']
+            : null;
+
+        $templateId     = is_string($response['template_id'] ?? null) ? $response['template_id'] : null;
+        $model          = is_string($response['model'] ?? null) ? $response['model'] : null;
+        $promptVariant  = is_string($response['prompt_variant'] ?? null) ? $response['prompt_variant'] : 'default';
+        $attemptN       = is_int($response['attempt_n'] ?? null) ? $response['attempt_n'] : 1;
+        $triggeredBy    = is_string($response['triggered_by'] ?? null) ? $response['triggered_by'] : 'manual_retry';
+        $rawCostUsd     = $response['cost_usd'] ?? null;
+        $costUsd        = (is_float($rawCostUsd) || is_int($rawCostUsd)) ? (float) $rawCostUsd : null;
+        $agentLatencyMs = is_int($response['latency_ms'] ?? null) ? $response['latency_ms'] : null;
+        $totalFields    = is_int($response['total_fields'] ?? null) ? $response['total_fields'] : null;
+        $strippedFields = is_int($response['stripped_fields'] ?? null) ? $response['stripped_fields'] : null;
+
+        $fieldVerdicts     = is_array($response['field_verdicts'] ?? null) ? $response['field_verdicts'] : [];
+        $doclingBlocks     = is_array($response['docling_blocks'] ?? null) ? $response['docling_blocks'] : [];
+        $doclingBlocksJson = $doclingBlocks !== []
+            ? json_encode($doclingBlocks, JSON_UNESCAPED_UNICODE)
+            : null;
+
+        $extractionJson = ($agentStatus === 'ok' && isset($response['extraction']))
+            ? json_encode($response['extraction'], JSON_UNESCAPED_UNICODE)
+            : null;
+
+        // 12. Persist new extraction row.
+        $newExtractionId = (int) QueryUtils::sqlInsert(
+            'INSERT INTO `co_pilot_extractions`
+                (`patient_id`, `doc_ref_id`, `doc_type`, `status`,
+                 `extraction_json`, `n_blocks`, `extraction_confidence_avg`,
+                 `agent_request_id`,
+                 `template_id`, `model`, `prompt_variant`,
+                 `attempt_n`, `triggered_by`,
+                 `cost_usd`, `latency_ms`, `total_fields`, `stripped_fields`,
+                 `docling_blocks_json`, `parent_extraction_id`)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+                $storedPid,
+                $docRefId,
+                $docType,
+                $agentStatus,
+                $extractionJson,
+                $nBlocks,
+                $confidenceAvg,
+                $requestId,
+                $templateId,
+                $model,
+                $promptVariant,
+                $attemptN,
+                $triggeredBy,
+                $costUsd,
+                $agentLatencyMs,
+                $totalFields,
+                $strippedFields,
+                $doclingBlocksJson,
+                $extractionId, // parent_extraction_id
+            ],
+        );
+
+        // 13. Write extracted field verdicts.
+        $verifiedFieldMap = [];
+        if ($newExtractionId > 0 && $fieldVerdicts !== []) {
+            $verifiedFieldMap = $this->fieldsWriter->writeAll(
+                $newExtractionId,
+                $fieldVerdicts,
+                $doclingBlocks,
+            );
+        }
+
+        // 14. FHIR round-trip.
+        if ($agentStatus === 'ok' && $extractionJson !== null && $newExtractionId > 0) {
+            $extractionPayload = json_decode($extractionJson, true);
+            if (is_array($extractionPayload)) {
+                $this->roundtripService->roundtrip(
+                    extractionId:     $newExtractionId,
+                    patientId:        $sessionPid,
+                    docType:          $docType,
+                    extraction:       $extractionPayload,
+                    docRefId:         $docRefId,
+                    verifiedFieldMap: $verifiedFieldMap,
+                    fieldsWriter:     $this->fieldsWriter,
+                );
+            }
+        }
+
+        $this->logger->info('ClinicalCopilot: reprocess completed', [
+            'parent_extraction_id' => $extractionId,
+            'new_extraction_id'    => $newExtractionId,
+            'agent_status'         => $agentStatus,
+        ]);
+
+        http_response_code(200);
+        echo json_encode([
+            'status'           => $agentStatus,
+            'new_extraction_id'=> $newExtractionId,
+            'total_fields'     => $totalFields,
+            'stripped_fields'  => $strippedFields,
+        ]);
     }
 
     /**

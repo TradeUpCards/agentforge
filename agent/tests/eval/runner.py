@@ -721,14 +721,7 @@ def _apply_extraction_mock_if_needed():
 
     _fixtures_dir = _Path(__file__).parent.parent.parent / "fixtures" / "patients"
 
-    async def _mock_async(
-        patient_id: int,
-        doc_ref_id: str,
-        doc_type: str,
-        pdf_path: object = None,
-        *,
-        stage1_only: bool = False,
-    ) -> _LabReport | _IntakeForm:
+    def _load_fixture(patient_id: int, doc_type: str) -> _LabReport | _IntakeForm:
         pattern = f"{patient_id}_{doc_type}*.json"
         matches = sorted(_fixtures_dir.glob(pattern))
         if not matches:
@@ -742,6 +735,42 @@ def _apply_extraction_mock_if_needed():
             return _IntakeForm.model_validate(data)
         raise ValueError(f"Unknown doc_type {doc_type!r}")
 
+    async def _mock_async(
+        patient_id: int,
+        doc_ref_id: str,
+        doc_type: str,
+        pdf_path: object = None,
+        *,
+        stage1_only: bool = False,
+        # P3 kwargs accepted (and ignored) so the mock signature matches
+        # the production function — the runner doesn't pass these today,
+        # but a future reprocess-CLI path may, and Python rejects unknown
+        # kwargs at the call boundary.
+        filename: str | None = None,
+        triggered_by: str = "initial",
+        parent_extraction_id: int | None = None,
+    ) -> _LabReport | _IntakeForm:
+        return _load_fixture(patient_id, doc_type)
+
+    async def _mock_async_with_metadata(
+        patient_id: int,
+        doc_ref_id: str,
+        doc_type: str,
+        pdf_path: object = None,
+        *,
+        stage1_only: bool = False,
+        filename: str | None = None,
+        triggered_by: str = "initial",
+        parent_extraction_id: int | None = None,
+    ) -> dict[str, object]:
+        # Return the P3 dict shape with empty metadata — eval cases don't
+        # assert on docling_blocks or field_verdicts, so empties are safe.
+        return {
+            "result": _load_fixture(patient_id, doc_type),
+            "docling_blocks": [],
+            "field_verdicts": [],
+        }
+
     import contextlib as _contextlib
 
     @_contextlib.contextmanager
@@ -752,6 +781,12 @@ def _apply_extraction_mock_if_needed():
         ), patch(
             "agent.main.attach_and_extract_async",
             side_effect=_mock_async,
+        ), patch(
+            "agent.extractors.attach_and_extract_with_metadata_async",
+            side_effect=_mock_async_with_metadata,
+        ), patch(
+            "agent.main.attach_and_extract_with_metadata_async",
+            side_effect=_mock_async_with_metadata,
         ):
             yield
 
