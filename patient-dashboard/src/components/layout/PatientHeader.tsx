@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { usePatient } from '../../hooks/usePatient'
 import {
   getPatientActiveStatus,
@@ -59,12 +58,6 @@ interface PatientHeaderProps {
 export function PatientHeader({ patientId, collapsed = false }: PatientHeaderProps) {
   const { data: patient, isLoading, error } = usePatient(patientId)
   const age = patient?.birthDate ? calculateAge(patient.birthDate) : undefined
-
-  // Mobile-landscape-only collapse state. Portrait stays statically
-  // expanded (2-line dense layout — toggling 3-to-2 lines isn't worth a
-  // tap). Landscape DOES toggle (collapsing reclaims meaningful vertical
-  // space in a ~390 px tall viewport).
-  const [landscapeExpanded, setLandscapeExpanded] = useState(false)
 
   if (isLoading) {
     return (
@@ -185,25 +178,19 @@ export function PatientHeader({ patientId, collapsed = false }: PatientHeaderPro
         </p>
       </header>
 
-      {/* <lg landscape: compact sticky (tap to expand) — phone landscape including iPhone 14+ at 844-932 px */}
-      <header className="hidden max-lg:landscape:block sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
-        <button
-          type="button"
-          onClick={() => setLandscapeExpanded((s) => !s)}
-          aria-expanded={landscapeExpanded}
-          aria-label={
-            landscapeExpanded ? 'Hide patient details' : 'Show patient details'
-          }
-          className="w-full px-4 py-2 min-h-11 flex items-center justify-between gap-2 text-left hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600"
-        >
-          <span className="flex items-center gap-2 min-w-0">
-            <span className="font-bold text-blue-700 truncate">{name}</span>
-            <ActiveBadge active={active} />
+      {/* <lg landscape: single-line dense sticky bar.
+          Vertical room is precious (~390 px before the keyboard) so the
+          whole identity packs onto one line. Name truncates if needed;
+          Active, DOB/Age/Sex/MRN have fixed-ish widths. No toggle —
+          everything visible at all times, just compact.
+          Phone landscape including iPhone 14+ at 844-932 px. */}
+      <header className="hidden max-lg:landscape:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-1.5 shadow-sm">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="font-bold text-blue-700 truncate min-w-0 flex-shrink">
+            {name}
           </span>
-          <ChevronIcon expanded={landscapeExpanded} />
-        </button>
-        {landscapeExpanded && (
-          <div className="px-4 pb-2 text-xs text-gray-700 leading-snug">
+          <ActiveBadge active={active} />
+          <span className="text-gray-700 ml-1 whitespace-nowrap">
             <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
             {age !== undefined && (
               <>
@@ -216,8 +203,8 @@ export function PatientHeader({ patientId, collapsed = false }: PatientHeaderPro
             {' · '}
             <span className="font-semibold">MRN:</span>{' '}
             <span className="font-mono">{mrn}</span>
-          </div>
-        )}
+          </span>
+        </div>
       </header>
     </>
   )
@@ -247,21 +234,6 @@ function ActiveBadge({ active }: { active: boolean }) {
     >
       {active ? 'Active' : 'Inactive'}
     </span>
-  )
-}
-
-function ChevronIcon({ expanded }: { expanded: boolean }) {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      width="14"
-      height="14"
-      fill="currentColor"
-      aria-hidden="true"
-      className={`text-gray-500 shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`}
-    >
-      <path d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708" />
-    </svg>
   )
 }
 
