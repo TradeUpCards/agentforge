@@ -45,7 +45,17 @@ final class CoPilotController
     // suite's W1-baseline cases (01-30); /graph_chat is the path the UI
     // exercises so the graph is on the production runtime path.
     private const AGENT_CHAT_PATH = '/graph_chat';
-    private const AGENT_TIMEOUT_SECONDS = 60;
+    // Bumped from 60s on 2026-05-08 after the W2 supervisor + responder graph
+    // landed (MR !37). Real-LLM end-to-end time on /graph_chat:
+    //   supervisor.decide (×2 hops Haiku, ~5s each) + worker tools (~1s) +
+    //   responder synthesis (Haiku ~21s) + verifier (~1s) +
+    //   Sonnet escalation when verifier rejects (~25-30s) ≈ 60s.
+    // 60s was hitting the wall exactly (curl timeout after 60002ms with 0
+    // bytes received, observed 2026-05-08). 120s gives headroom for
+    // worst-case escalation paths without sitting on the connection
+    // indefinitely. Tighten back once the synthesis prompt is shrunk or
+    // the verifier's substring matcher stops over-rejecting.
+    private const AGENT_TIMEOUT_SECONDS = 120;
     private const MAX_REQUEST_BYTES = 1_048_576; // 1 MiB cap on inbound JSON.
 
     private readonly LoggerInterface $logger;
