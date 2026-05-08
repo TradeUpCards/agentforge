@@ -80,14 +80,16 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
     if (open) setHasBeenOpened(true)
   }, [open])
 
-  // Lock body scroll when drawer is open on phone (full-screen overlay).
+  // Push-content mode: when the drawer is open, set a `data-copilot-open`
+  // attribute on <body>. CSS rules in `index.css` respond by padding
+  // body to make room for the drawer (right padding on tablet/desktop;
+  // bottom padding on phone portrait). The chart shrinks to fit; both
+  // chart and Co-Pilot remain scrollable / interactive at the same time.
+  // No modal, no backdrop, no scroll lock.
   useEffect(() => {
     if (!open) return
-    const previous = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.body.style.overflow = previous
-    }
+    document.body.setAttribute('data-copilot-open', '')
+    return () => document.body.removeAttribute('data-copilot-open')
   }, [open])
 
   // Close on Escape.
@@ -131,19 +133,12 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
         </button>
       )}
 
-      {/* Backdrop — always rendered so opacity transition fires on
-          open AND close. pointer-events gate prevents stealing clicks
-          when closed. Only on `<lg` where the drawer reaches the
-          dashboard area. */}
-      <div
-        aria-hidden="true"
-        onClick={() => setOpen(false)}
-        className={`
-          fixed inset-0 z-40 bg-black/30 lg:hidden
-          motion-safe:transition-opacity motion-safe:duration-200
-          ${open ? 'opacity-100' : 'opacity-0 pointer-events-none'}
-        `}
-      />
+      {/* No backdrop. Push-content mode (see body padding rules in
+          index.css) puts the chart alongside the drawer rather than
+          behind it, so there's no underlying surface to "tap to
+          dismiss." Close affordances are: the X button in the drawer
+          header, the Escape key, and (on phone portrait bottom sheet)
+          a swipe-down would be a future addition. */}
 
       {/* Drawer — always rendered so slide animations fire on open and
           close. Layout switches between phone portrait (bottom sheet,
