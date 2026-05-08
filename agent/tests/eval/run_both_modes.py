@@ -220,9 +220,24 @@ def main() -> None:
             mode_coverage["hybrid"] += 1
 
     out_path = _RESULTS / f"{live_report.stem}-all-modes.md"
+
+    # SHA stamp lets Tate (Director) skip a redundant post-merge eval re-run
+    # when the master HEAD already matches the SHA the eval ran against.
+    # Falls back to "unknown" if git isn't available; never blocks the run.
+    head_sha = "unknown"
+    try:
+        head_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(_RESULTS.parent.parent.parent.parent),
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
     lines: list[str] = []
     lines.append(f"# Eval run — all modes (merged)")
     lines.append("")
+    lines.append(f"**Generated against SHA:** `{head_sha}`  ")
     lines.append(f"**Live report:** [`{live_report.name}`](./{live_report.name})  ")
     lines.append(f"**Fixture report:** [`{fixture_report.name}`](./{fixture_report.name})  ")
     lines.append(f"**Hybrid report:** [`{hybrid_report.name}`](./{hybrid_report.name})  ")
