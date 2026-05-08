@@ -80,6 +80,43 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
     if (open) setHasBeenOpened(true)
   }, [open])
 
+  // Phone-portrait bottom-sheet has two heights — compact (40 vh, the
+  // default) and expanded (90 vh, double-tap the header to toggle).
+  // Resets to compact when the drawer closes so reopening always starts
+  // small.
+  const [bottomSheetExpanded, setBottomSheetExpanded] = useState(false)
+  useEffect(() => {
+    if (!open) setBottomSheetExpanded(false)
+  }, [open])
+
+  // Body sets a second attribute when the bottom sheet is expanded,
+  // so the CSS in index.css can collapse the chart's max-height
+  // accordingly. Only meaningful on phone portrait.
+  useEffect(() => {
+    if (open && bottomSheetExpanded && isPhonePortrait) {
+      document.body.setAttribute('data-copilot-expanded', '')
+      return () => document.body.removeAttribute('data-copilot-expanded')
+    }
+    return undefined
+  }, [open, bottomSheetExpanded, isPhonePortrait])
+
+  // Double-tap detection on the header → toggle bottom-sheet height.
+  // 350 ms threshold; ignores clicks on real buttons/links inside the
+  // header so the X and external-link controls work normally on a
+  // single tap.
+  const lastTapRef = useRef(0)
+  const handleHeaderTap = (e: React.MouseEvent<HTMLElement>) => {
+    if (!isPhonePortrait) return
+    if ((e.target as HTMLElement).closest('button, a')) return
+    const now = Date.now()
+    if (now - lastTapRef.current < 350) {
+      setBottomSheetExpanded((s) => !s)
+      lastTapRef.current = 0
+    } else {
+      lastTapRef.current = now
+    }
+  }
+
   // Push-content mode: when the drawer is open, set a `data-copilot-open`
   // attribute on <body>. CSS rules in `index.css` respond by padding
   // body to make room for the drawer (right padding on tablet/desktop;
@@ -164,7 +201,9 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
           motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-out
           ${
             isPhonePortrait
-              ? 'inset-x-0 bottom-0 h-1/2 border-t border-gray-200 rounded-t-2xl'
+              ? `inset-x-0 bottom-0 border-t border-gray-200 rounded-t-2xl ${
+                  bottomSheetExpanded ? 'h-[90vh]' : 'h-[40vh]'
+                }`
               : 'inset-y-0 right-0 w-96 md:w-[400px] lg:w-[480px] xl:w-[520px] border-l border-gray-200'
           }
           ${
@@ -177,9 +216,10 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
         `}
       >
         <header
+          onClick={handleHeaderTap}
           className={`
             relative flex items-center justify-between px-3 border-b border-gray-200 bg-gray-50
-            ${isPhonePortrait ? 'pt-4 pb-2' : 'py-2'}
+            ${isPhonePortrait ? 'pt-4 pb-2 cursor-pointer select-none' : 'py-2'}
           `}
         >
           {/* Drag-handle hint on bottom-sheet variant — pure decoration,
