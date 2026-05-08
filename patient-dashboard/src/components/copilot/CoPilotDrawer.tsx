@@ -105,7 +105,16 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
         />
       )}
 
-      {/* Drawer */}
+      {/* Drawer.
+          Width steps:
+            <sm  (phone portrait):     85% — leaves a ~58 px peek of the
+                                       dashboard visible at the left so
+                                       the user retains context AND has
+                                       a tap-target for the backdrop.
+            sm   (phone landscape):    384 px (w-96)
+            md   (tablet portrait):    400 px
+            lg   (tablet landscape):   480 px
+            xl   (desktop):            520 px */}
       {open && (
         <aside
           ref={drawerRef}
@@ -114,7 +123,7 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
           aria-label="Clinical Co-Pilot"
           className="
             fixed inset-y-0 right-0 z-50
-            w-full md:w-[400px] lg:w-[480px] xl:w-[520px]
+            w-[85%] sm:w-96 md:w-[400px] lg:w-[480px] xl:w-[520px]
             bg-white border-l border-gray-200 shadow-2xl
             flex flex-col
           "
