@@ -20,24 +20,29 @@ interface PatientHeaderProps {
  * Three layout variants by viewport (per the matrix in
  * PATIENT_DASHBOARD_MIGRATION.md §17):
  *
- *   ≥md (tablet / desktop)
+ *   ≥lg (tablet landscape / desktop)
  *     Full one-line layout: avatar | name | DOB · Age · Sex · MRN · Active.
- *     Not sticky — desktop has plenty of vertical room and the cards
- *     scroll under the OpenTabBar / heading bar separately.
+ *     Not sticky — wide screens have plenty of vertical room and the
+ *     cards scroll under the OpenTabBar / heading bar separately.
  *
- *   <md portrait (phone portrait)
+ *   <lg portrait (phone portrait, tablet portrait)
  *     Full layout but stacked vertically (name on first row, DOB/Age/Sex/MRN
  *     wrapped, Active pill at end). Sticky to the top of the scroll area
  *     so the clinician always knows which patient they are looking at while
  *     scrolling cards. Clinical safety: prevents "wrong patient" cognitive
  *     errors during a long med list.
  *
- *   <md landscape (phone landscape)
+ *   <lg landscape (phone landscape — including iPhone 14+ at ~844-932 px)
  *     COMPACT sticky variant: name + Active badge only, in a thin ~40 px
  *     bar. Tap to expand inline (reveals DOB/Age/Sex/MRN below). Defends
  *     the clinical-safety property at half the vertical cost — landscape
  *     phones have ~390 px of usable height before the keyboard, so every
  *     pixel matters.
+ *
+ * Breakpoint choice (lg, not md): modern phones in landscape exceed the
+ * md threshold (768 px) — iPhone 14 lands at 844, Pro Max at 932 — so
+ * gating the mobile variants at md would render the desktop layout on
+ * those devices. Aligned with MainNav's lg-breakpoint hamburger.
  *
  * The PDF requirement #2 demands name / DOB / sex / MRN / active status —
  * all five remain available in every variant. Compact landscape hides
@@ -52,7 +57,7 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
   if (isLoading) {
     return (
       <header
-        className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-2 max-md:sticky max-md:top-0 z-20"
+        className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-2 max-lg:sticky max-lg:top-0 z-20"
         aria-busy="true"
       >
         <Spinner label="Loading patient" />
@@ -64,7 +69,7 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
   if (error || !patient) {
     return (
       <header
-        className="bg-white border-b border-gray-200 px-4 py-3 max-md:sticky max-md:top-0 z-20"
+        className="bg-white border-b border-gray-200 px-4 py-3 max-lg:sticky max-lg:top-0 z-20"
         role="alert"
       >
         <p className="text-sm text-red-700">Failed to load patient.</p>
@@ -79,8 +84,8 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
 
   return (
     <>
-      {/* ≥md: full inline layout (desktop / tablet) */}
-      <header className="hidden md:block bg-white border-b border-gray-200 px-4 py-3">
+      {/* ≥lg: full inline layout (desktop / tablet landscape) */}
+      <header className="hidden lg:block bg-white border-b border-gray-200 px-4 py-3">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div className="flex items-start gap-3">
             <Avatar />
@@ -114,8 +119,8 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
         </div>
       </header>
 
-      {/* <md portrait: full stacked + sticky */}
-      <header className="hidden max-md:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-2 shadow-sm">
+      {/* <lg portrait: full stacked + sticky (phone portrait, tablet portrait) */}
+      <header className="hidden max-lg:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-2 shadow-sm">
         <div className="flex items-center gap-3">
           <Avatar small />
           <div className="min-w-0 flex-1">
@@ -141,8 +146,8 @@ export function PatientHeader({ patientId }: PatientHeaderProps) {
         </p>
       </header>
 
-      {/* <md landscape: compact sticky (tap to expand) */}
-      <header className="hidden max-md:landscape:block sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
+      {/* <lg landscape: compact sticky (tap to expand) — phone landscape including iPhone 14+ at 844-932 px */}
+      <header className="hidden max-lg:landscape:block sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
         <button
           type="button"
           onClick={() => setLandscapeExpanded((s) => !s)}
