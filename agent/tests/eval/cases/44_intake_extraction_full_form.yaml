@@ -12,7 +12,7 @@ user_id: 1
 doc_type: intake_form
 synthetic: true
 fixture_data_required: false
-tier: nightly
+tier: smoke
 difficulty: intermediate
 failure_mode: extraction_multi_section_truncation
 rubric: [schema_valid, factually_consistent]

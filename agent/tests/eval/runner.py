@@ -35,6 +35,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -645,38 +646,89 @@ def _run_graph_chat_case(client: TestClient, case: EvalCase, secret: str) -> Cas
     return result
 
 
+def _set_eval_trace_env(case: EvalCase, run_ts_iso: str) -> None:
+    """Set LANGFUSE_TRACE_TAGS / LANGFUSE_TRACE_METADATA env vars before the
+    request fires so the resulting Langfuse trace is filterable by eval case.
+
+    The agent's _langfuse() reads these env vars and calls
+    update_current_span() / update_current_trace() with the values once per
+    request.  These are process-level env vars, NOT thread-safe; they are
+    cleared in _clear_eval_trace_env() immediately after the request returns
+    so they do not bleed into subsequent cases.
+
+    The mode_label is derived from the USE_FIXTURE_LLM env var because the
+    EvalCase object doesn't carry it (it's a runner-level config concern).
+    """
+    mode_label = "fixture" if os.environ.get("USE_FIXTURE_LLM", "").lower() == "true" else "live"
+    tags = json.dumps([
+        "eval",
+        case.name,
+        case.category,
+        mode_label,
+        case.tier,
+    ])
+    metadata = json.dumps({
+        "eval_case_name": case.name,
+        "eval_category": case.category,
+        "eval_mode": mode_label,
+        "eval_tier": case.tier,
+        "eval_run_timestamp": run_ts_iso,
+    })
+    os.environ["LANGFUSE_TRACE_TAGS"] = tags
+    os.environ["LANGFUSE_TRACE_METADATA"] = metadata
+
+
+def _clear_eval_trace_env() -> None:
+    """Remove eval-specific Langfuse trace env vars after the request returns."""
+    os.environ.pop("LANGFUSE_TRACE_TAGS", None)
+    os.environ.pop("LANGFUSE_TRACE_METADATA", None)
+
+
+# Single run-level timestamp for this eval runner invocation.
+# Set at module import time; individual cases use this as eval_run_timestamp.
+_EVAL_RUN_TIMESTAMP = dt.datetime.now(dt.timezone.utc).isoformat()
+
+
 def _run_case_once(client: TestClient, case: EvalCase, secret: str) -> CaseResult:
     endpoint = _resolve_endpoint(case)
 
-    if endpoint == "/attach_and_extract":
-        return _run_extraction_case(client, case, secret)
-
-    if endpoint == "/graph_chat":
-        return _run_graph_chat_case(client, case, secret)
-
-    # --- /chat path (default, unchanged) ---
-    # Sign with current timestamp so the request stays inside the agent's
-    # 30s freshness window. Replay-protection coverage proper lives in the
-    # verify_hmac unit tests; here we just need the sig + body to validate.
-    timestamp = int(time.time())
-    sig = "deadbeef" * 8 if case.bad_hmac else _sign(case, secret, timestamp)
-    body = {
-        "user_id": case.user_id,
-        "patient_id": case.patient_id,
-        "timestamp": timestamp,
-        "hmac": sig,
-        "messages": case.messages,
-    }
-    t0 = time.perf_counter()
-    r = client.post("/chat", json=body)
-    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    # Set Langfuse trace tags + metadata env vars before request fires.
+    # These are read by agent.agent._langfuse() to tag the resulting trace
+    # so it's filterable by eval_case_name / eval_category in Langfuse Cloud.
+    # Cleared in the finally block so they never bleed into subsequent cases.
+    _set_eval_trace_env(case, _EVAL_RUN_TIMESTAMP)
     try:
-        payload = r.json()
-    except json.JSONDecodeError:
-        payload = {"status": "error", "raw_body": r.text}
-    result = _evaluate(case, r.status_code, payload)
-    result.latency_ms = elapsed_ms
-    return result
+        if endpoint == "/attach_and_extract":
+            return _run_extraction_case(client, case, secret)
+
+        if endpoint == "/graph_chat":
+            return _run_graph_chat_case(client, case, secret)
+
+        # --- /chat path (default, unchanged) ---
+        # Sign with current timestamp so the request stays inside the agent's
+        # 30s freshness window. Replay-protection coverage proper lives in the
+        # verify_hmac unit tests; here we just need the sig + body to validate.
+        timestamp = int(time.time())
+        sig = "deadbeef" * 8 if case.bad_hmac else _sign(case, secret, timestamp)
+        body = {
+            "user_id": case.user_id,
+            "patient_id": case.patient_id,
+            "timestamp": timestamp,
+            "hmac": sig,
+            "messages": case.messages,
+        }
+        t0 = time.perf_counter()
+        r = client.post("/chat", json=body)
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        try:
+            payload = r.json()
+        except json.JSONDecodeError:
+            payload = {"status": "error", "raw_body": r.text}
+        result = _evaluate(case, r.status_code, payload)
+        result.latency_ms = elapsed_ms
+        return result
+    finally:
+        _clear_eval_trace_env()
 
 
 def run_case(
@@ -1064,6 +1116,65 @@ def write_report(results: list[CaseResult], path: Path | None = None) -> Path:
                     lines.append("- Assertion failures:")
                     for f in r.failures:
                         lines.append(f"  - `{f}`")
+                # Enriched diagnostic detail for FAIL cases (not expected-to-fail).
+                # Every failure investigation previously required a re-run; this
+                # section surfaces the key signals inline so the report itself
+                # is the first-order debugging surface.
+                if r.failures and not r.case.expected_to_fail:
+                    from agent._phi_scrubber import mask_observability_patterns as _mask_obs
+                    lines.append("")
+                    lines.append("#### Diagnostic detail")
+                    lines.append("")
+                    # Claims
+                    claims = r.response.get("claims") or []
+                    lines.append(f"**claims_count:** {len(claims)}")
+                    if claims:
+                        lines.append("")
+                        lines.append("First 3 claims (text truncated to 120 chars):")
+                        for i, cl in enumerate(claims[:3]):
+                            raw_text = str(cl.get("text", ""))[:120]
+                            safe_text = _mask_obs(raw_text)
+                            lines.append(f"- [{i}] `{safe_text}`")
+                    # Citations
+                    citations = r.response.get("citations") or []
+                    lines.append("")
+                    lines.append(f"**citations_count:** {len(citations)}")
+                    if citations:
+                        by_src: dict[str, int] = {}
+                        for cit in citations:
+                            src = str(cit.get("source_type", "unknown")) if isinstance(cit, dict) else "unknown"
+                            by_src[src] = by_src.get(src, 0) + 1
+                        lines.append(f"citations by source_type: {by_src}")
+                    # Retrieved records
+                    retrieved = r.response.get("retrieved_records") or []
+                    lines.append("")
+                    lines.append(f"**retrieved_records_count:** {len(retrieved)}")
+                    if retrieved:
+                        by_table: dict[str, int] = {}
+                        guideline_chunks: list[str] = []
+                        for rec in retrieved:
+                            tbl = str(rec.get("table", "unknown")) if isinstance(rec, dict) else "unknown"
+                            by_table[tbl] = by_table.get(tbl, 0) + 1
+                            if tbl == "guideline_corpus":
+                                rec_id = str(rec.get("record_id", ""))
+                                if rec_id:
+                                    guideline_chunks.append(rec_id)
+                        lines.append(f"retrieved_records by table: {by_table}")
+                        if guideline_chunks:
+                            lines.append(f"guideline_corpus chunk IDs: {guideline_chunks[:5]}")
+                    # Tools called
+                    tools_called = r.response.get("tools_called") or []
+                    lines.append("")
+                    lines.append(f"**tools_called:** {[t.get('tool_name') for t in tools_called if isinstance(t, dict)]}")
+                    # Response prose (first ~600 chars, PHI-scrubbed)
+                    message_content = (r.response.get("message") or {}).get("content", "")
+                    if message_content:
+                        safe_prose = _mask_obs(str(message_content)[:600])
+                        lines.append("")
+                        lines.append("**response prose (first 600 chars, PHI-scrubbed):**")
+                        lines.append(f"```")
+                        lines.append(safe_prose)
+                        lines.append(f"```")
             lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")

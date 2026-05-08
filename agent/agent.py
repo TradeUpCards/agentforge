@@ -25,6 +25,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 import re
 import uuid
@@ -822,6 +823,36 @@ async def run_chat(
             "data_mode": "fixture" if settings.use_fixture_data else "live",
         }
     )
+
+    # If this request was dispatched by the eval runner, propagate the
+    # eval-case trace tags + metadata set by runner._set_eval_trace_env()
+    # into the Langfuse trace so the case is filterable by name/category/tier
+    # in Langfuse Cloud.
+    #
+    # Cross-workstream note (Bram): this is the minimal agent.py touch in the
+    # chore/eval-gate-hardening MR — reads two env vars set by the eval runner
+    # and forwards them to the OTel span / update_current_span() surfaces.
+    # Tags use the OTel attribute path (TRACE_TAGS); metadata uses the
+    # existing update_current_span() surface.  Wrapped in try/except so a
+    # JSON decode or SDK failure never crashes a request.
+    _eval_tags_raw = os.environ.get("LANGFUSE_TRACE_TAGS")
+    _eval_metadata_raw = os.environ.get("LANGFUSE_TRACE_METADATA")
+    if _eval_tags_raw:
+        try:
+            _eval_tags = json.loads(_eval_tags_raw)
+            if isinstance(_eval_tags, list):
+                current_otel_span.set_attribute(
+                    LangfuseOtelSpanAttributes.TRACE_TAGS, _eval_tags,
+                )
+        except (json.JSONDecodeError, ValueError, Exception):
+            pass
+    if _eval_metadata_raw:
+        try:
+            _eval_metadata = json.loads(_eval_metadata_raw)
+            if isinstance(_eval_metadata, dict):
+                get_client().update_current_span(metadata=_eval_metadata)
+        except (json.JSONDecodeError, ValueError, Exception):
+            pass
 
     # 1. HMAC check (fail closed). Returns None on success, or a
     # short failure-reason string for the audit log + trace metadata.
