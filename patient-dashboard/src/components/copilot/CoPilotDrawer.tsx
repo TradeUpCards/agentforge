@@ -69,19 +69,25 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
 
   return (
     <>
-      {/* Floating launch button */}
+      {/* Floating launch button — sized as a primary FAB on phone (56 px
+          tall, generous padding, lifted further from the corner to clear
+          iOS home-indicator + give thumb-reach room). On tablet+/desktop
+          where the cursor is precise, the button shrinks back to a 44 px
+          pill so it doesn't dominate. */}
       {!open && (
         <button
           type="button"
           onClick={() => setOpen(true)}
           aria-label="Open Co-Pilot"
           className="
-            fixed bottom-4 right-4 z-40
+            fixed z-40
+            right-5 bottom-6 md:right-4 md:bottom-4
             inline-flex items-center gap-2
-            px-4 py-3 min-h-11
+            px-5 py-4 md:px-4 md:py-3
+            min-h-14 md:min-h-11
             rounded-full shadow-lg
-            bg-blue-700 hover:bg-blue-800 text-white
-            font-medium text-sm
+            bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white
+            font-medium text-base md:text-sm
             focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
           "
         >
