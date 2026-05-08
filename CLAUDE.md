@@ -425,6 +425,88 @@ When modifying PHP files, ensure proper docblock:
 
 Preserve existing authors/copyrights when editing files.
 
+## AgentForge fork — CI source of truth and repo mirroring
+
+**This fork is GitLab-primary.** `labs.gauntletai.com/coryvandenberg/agentforge`
+is the source of truth for code review, MRs, and CI. The GitHub repo at
+`github.com/TradeUpCards/agentforge` is a **mirror only** — it exists so the
+work is publicly visible, and so the inherited upstream-OpenEMR GitHub Actions
+*can* run, but those Actions are not the gate this fork commits to.
+
+### CI rules
+
+- **GitLab `agent-eval` job in `.gitlab-ci.yml` is the only CI gate that
+  matters for this fork.** It runs on:
+  - merge requests targeting any branch
+  - pushes to `master`
+  - pushes to feature branches matching `agentforge/*` that don't yet have
+    an open MR (the MR pipeline takes over once an MR opens)
+- The `agent-eval` job further filters by `rules: changes:` to
+  `agent/**/*`, `scripts/git-hooks/pre-commit`, and `.gitlab-ci.yml`. **An MR
+  that touches none of those is correctly skipped — empty pipeline ≠ failure.**
+  Don't go hunting for a different CI signal when this happens; that's the
+  designed posture for PHP-only / docs-only changes.
+- A project-scoped GitLab Runner (`agentforge-droplet`, Docker executor,
+  `python:3.11`) is registered, so the job auto-runs whenever its rules match.
+  The job is fail-closed: a non-zero exit from `run_eval_gate.py` or
+  `run_strip_rate_gate.py` blocks the MR.
+- "Did this change pass CI?" = check the GitLab pipeline only:
+  `glab ci status -b <branch>` or visit the MR page on `labs.gauntletai.com`.
+  **Do not read GitHub Actions output for this question.**
+
+### Inherited upstream-OpenEMR GitHub Actions are noise
+
+The fork inherits ~30 GitHub Actions from upstream OpenEMR (PHPStan, Rector,
+Styling, Spell Check, Whitespace, JS Unit Test, Integration Tests, etc.). They
+fire on master pushes and on GitHub-native PRs, not on GitLab MRs. Several of
+them have been chronically red on every recent master merge for reasons
+unrelated to AgentForge work — upstream test debt, fork-divergence drift, or
+infrastructure gaps the fork hasn't backfilled. Don't read them as a regression
+signal for AgentForge changes unless one of them catches a real issue the
+GitLab gate misses, which is rare.
+
+### Mirror sync after a GitLab merge
+
+The `origin` remote is set up for **dual-push** to both GitLab and GitHub —
+one local push updates both. After a GitLab merge UI action (which only writes
+to GitLab), sync the GitHub mirror with one of:
+
+```bash
+# From any worktree (fast-forward; no force needed):
+git fetch origin master
+git push origin refs/remotes/origin/master:refs/heads/master
+
+# Or, if you have master checked out locally (only in the main checkout —
+# worktrees can't share the same branch):
+git push origin master
+```
+
+Verify with `git remote -v` — `origin` should list:
+```
+origin  https://labs.gauntletai.com/coryvandenberg/agentforge.git (fetch)
+origin  https://labs.gauntletai.com/coryvandenberg/agentforge.git (push)
+origin  https://github.com/TradeUpCards/agentforge.git            (push)
+```
+
+If the GitHub mirror falls out of sync (e.g. a GitLab merge that wasn't
+followed by a local push), GitHub Actions stop firing on master pushes — but
+this is a mirror-availability issue, not a CI gap. The GitLab gate is still
+the authoritative signal.
+
+### GitLab CLI (`glab`)
+
+Installed via `winget install --id GLab.GLab`. Common commands:
+
+```bash
+glab mr view <NUM>                       # MR metadata + body
+glab mr list                              # open MRs
+glab ci status -b <branch>                # latest pipeline on a branch
+glab api projects/<NS%2Frepo>/pipelines   # raw API for finer queries
+```
+
+If the binary isn't on `$PATH` in your shell, it's typically at
+`C:/Users/User/AppData/Local/Programs/glab/glab.exe`.
+
 ## Common Gotchas
 
 - Multiple template engines: check extension (.twig, .html, .php)
