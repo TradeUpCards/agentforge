@@ -49,6 +49,7 @@ def _make_state(**overrides: Any) -> SupervisorState:
         "worker_results": [],
         "final_response": None,
         "node_observability": [],
+        "retrieved_records": [],
         "_pending_route": None,
     }
     base.update(overrides)  # type: ignore[typeddict-item]
@@ -229,6 +230,135 @@ def test_terminal_state_propagates_citations() -> None:
     assert len(worker_results) >= 1
     assert worker_results[-1]["worker_name"] == "evidence_retriever"
     assert worker_results[-1]["citations_added"] == len(new_citations)
+
+
+# ---------------------------------------------------------------------------
+# Regression test (added 2026-05-08): worker→responder content bridging
+#
+# Background:
+#   On 2026-05-07 a production user reported that /graph_chat returned
+#   "no clinical content" responses even when the OpenEMR DB was populated
+#   with hundreds of problems / prescriptions / encounters per patient. Root
+#   cause: agent/graph/workers/evidence_retriever.py was building Citation
+#   objects with quote_or_value=f"{table}:{record_id}" but never threading
+#   the underlying RetrievedRecord.fields through to the responder. The
+#   responder's _citations_to_retrieved_records() reconstructed records
+#   with `fields={}`, so the LLM honestly reported "received record IDs
+#   but no clinical content."
+#
+#   The 67-case eval gate at 100% on all 5 rubrics did NOT catch this
+#   because (a) USE_FIXTURE_LLM=true short-circuits the supervisor LLM in
+#   CI, (b) the factually_consistent rubric's substring verifier matched
+#   the citation source_id against itself trivially. The bug only
+#   manifested under a real LLM doing honest reporting.
+#
+# This test pins the contract: when evidence_retriever runs against
+# tools that return RetrievedRecord objects with populated fields, the
+# state patch must carry those records (with fields) through to the
+# responder via state["retrieved_records"]. If the bridging regresses,
+# this test fails immediately in CI — no live-LLM deploy required.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_retriever_threads_record_fields_to_state() -> None:
+    """Regression: state["retrieved_records"] must carry the
+    RetrievedRecord.fields content (not just citation IDs) so the responder
+    can hydrate the LLM with actual diagnosis / drug / lab values.
+
+    See: 2026-05-08 fix/evidence-retriever-record-fields branch.
+    """
+    from agent.graph.workers.evidence_retriever import evidence_retriever_node
+    from agent.schemas import CitationStrength, RetrievedRecord
+
+    # Build a fixture-shaped RetrievedRecord with realistic populated fields.
+    fake_problem = RetrievedRecord(
+        table="lists",
+        record_id="1408",
+        citation_strength=CitationStrength.CODE_BACKED,
+        fields={
+            "title": "Type 2 diabetes mellitus",
+            "diagnosis": "ICD-10:E11.9",
+            "date_added": "2024-08-12",
+            "type": "medical_problem",
+        },
+    )
+    fake_med = RetrievedRecord(
+        table="prescriptions",
+        record_id="2231",
+        citation_strength=CitationStrength.CODE_BACKED,
+        fields={
+            "drug": "Metformin",
+            "dosage": "1000mg",
+            "frequency": "BID",
+            "rxnorm_drugcode": "860975",
+        },
+    )
+
+    state = _make_state(
+        query="pre-visit brief for this patient",
+        patient_id=999100,  # sentinel range per W2_ARCHITECTURE.md §8.2
+    )
+
+    # Stub execute_tool to return our fixture records for any tool call.
+    async def _stub_execute_tool(tool_name: str, tool_input: dict[str, Any]) -> list[Any]:
+        # Return both records on the first tool call, empty for others —
+        # mirrors the worker fanning out to 5 W1 tools.
+        if tool_name == "get_problem_list":
+            return [fake_problem]
+        if tool_name == "get_active_medications":
+            return [fake_med]
+        return []
+
+    with patch(
+        "agent.graph.workers.evidence_retriever.execute_tool",
+        side_effect=_stub_execute_tool,
+    ):
+        patch_result = evidence_retriever_node(state)
+
+    # 1. State patch MUST include retrieved_records key.
+    assert "retrieved_records" in patch_result, (
+        "evidence_retriever must return state[\"retrieved_records\"] so the "
+        "responder can hydrate the LLM with full record content"
+    )
+
+    records = patch_result["retrieved_records"]
+    assert len(records) == 2, (
+        f"Expected 2 RetrievedRecord objects (1 problem + 1 medication), "
+        f"got {len(records)}"
+    )
+
+    # 2. Each record must carry its full fields dict — NOT empty.
+    # This is the exact regression the production bug exhibited:
+    # citation IDs reached the responder but fields were lost en route.
+    by_table = {r.table: r for r in records}
+    assert "lists" in by_table and "prescriptions" in by_table, (
+        f"Expected lists + prescriptions tables, got {sorted(by_table.keys())}"
+    )
+
+    problem = by_table["lists"]
+    assert problem.fields, (
+        "RetrievedRecord(lists:1408).fields must be non-empty — the bug "
+        "this guards against had fields={} reaching the responder"
+    )
+    assert problem.fields.get("title") == "Type 2 diabetes mellitus", (
+        "Problem title content lost — the LLM would report 'no clinical "
+        f"content' instead of the diagnosis. Got: {problem.fields!r}"
+    )
+    assert problem.fields.get("diagnosis") == "ICD-10:E11.9", (
+        f"Problem diagnosis code lost. Got: {problem.fields!r}"
+    )
+
+    med = by_table["prescriptions"]
+    assert med.fields, "Medication fields must be non-empty"
+    assert med.fields.get("drug") == "Metformin", (
+        f"Medication drug name lost. Got: {med.fields!r}"
+    )
+
+    # 3. Citations should still be present (existing contract preserved).
+    new_citations = patch_result.get("citations", [])
+    assert len(new_citations) >= 2, (
+        f"Citations contract regressed: expected ≥2, got {len(new_citations)}"
+    )
 
 
 # ---------------------------------------------------------------------------

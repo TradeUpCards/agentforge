@@ -78,6 +78,7 @@ def evidence_retriever_node(state: SupervisorState) -> dict[str, Any]:
 
     t0 = time.monotonic()
     new_citations: list[Citation] = []
+    new_records: list[Any] = []
     n_citations_added = 0
     tools_called: list[str] = []
 
@@ -89,10 +90,11 @@ def evidence_retriever_node(state: SupervisorState) -> dict[str, Any]:
 
             if patient_id is not None:
                 # Decision #3: always fetch all 5 W1 patient tools in parallel.
-                patient_citations, patient_tools = _fetch_all_patient_records(
+                patient_citations, patient_records, patient_tools = _fetch_all_patient_records(
                     patient_id
                 )
                 new_citations.extend(patient_citations)
+                new_records.extend(patient_records)
                 tools_called.extend(patient_tools)
 
             # Additive: fetch guidelines when query has relevant keywords.
@@ -175,11 +177,18 @@ def evidence_retriever_node(state: SupervisorState) -> dict[str, Any]:
     existing_obs = list(state.get("node_observability", []))
     existing_obs.append(obs_entry)
 
+    # Accumulate full RetrievedRecord objects so the responder hydrates
+    # the LLM with real diagnosis text / drug names / lab values rather
+    # than just `table:id` references derived from citations.
+    existing_records = list(state.get("retrieved_records", []))
+    existing_records.extend(new_records)
+
     return {
         "citations": existing_citations,
         "tool_calls_accumulated": existing_tool_calls,
         "worker_results": existing_results,
         "node_observability": existing_obs,
+        "retrieved_records": existing_records,
     }
 
 
@@ -213,17 +222,25 @@ def _fetch_guidelines(query: str) -> tuple[list[Citation], str]:
 
 def _fetch_all_patient_records(
     patient_id: int,
-) -> tuple[list[Citation], list[str]]:
+) -> tuple[list[Citation], list[Any], list[str]]:
     """Fetch all 5 W1 patient tools in parallel (decision #3).
 
     Mirrors agent.py:fetch_baseline_context but adapted for the sync
     LangGraph node context. All 5 tools are always called regardless of
     query content — the evidence_retriever worker has no keyword router.
 
-    Returns (citations, tools_called_list).
+    Returns (citations, retrieved_records, tools_called_list).
+
+    The retrieved_records carry the full RetrievedRecord (table, record_id,
+    citation_strength, fields) so the responder can give the LLM the actual
+    record content (diagnosis text, drug names, lab values), not just
+    citation IDs. Without these, the LLM correctly reports
+    "no clinical content available" because the citations alone carry only
+    `table:id` references.
     """
     tool_input = {"patient_id": patient_id}
     citations: list[Citation] = []
+    retrieved_records: list[Any] = []
     tools_called: list[str] = []
 
     for tool_name in _ALL_PATIENT_TOOLS:
@@ -241,6 +258,10 @@ def _fetch_all_patient_records(
                         bbox=None,
                     )
                 )
+                # Preserve the full record (with fields) so the responder
+                # can hydrate retrieved_records with real content rather
+                # than empty `fields={}` from the citation-only conversion.
+                retrieved_records.append(rec)
         except Exception as exc:
             scrubbed = mask_observability_patterns(str(exc))
             logger.error(
@@ -251,7 +272,7 @@ def _fetch_all_patient_records(
             logger.debug("evidence_retriever tool error (scrubbed): %s", scrubbed)
             tools_called.append(tool_name)  # still record the attempt
 
-    return citations, tools_called
+    return citations, retrieved_records, tools_called
 
 
 def _run_tool_sync(tool_fn: Any, tool_name: str, tool_input: dict[str, Any]) -> list[Any]:

@@ -110,7 +110,18 @@ def responder_node(state: SupervisorState) -> dict[str, Any]:
 
             # Build inputs for synthesize_with_verifier.
             messages = [Message(role=Role.USER, content=query)]
-            retrieved_records = _citations_to_retrieved_records(citations)
+            # Prefer the worker-populated retrieved_records (full content:
+            # diagnosis text, drug names, lab values, etc.). Fall back to
+            # the citation-only conversion when the state hasn't been
+            # populated (e.g. intake_extractor-only path, or older callers
+            # that don't write `retrieved_records`). The citation-only
+            # records carry empty `fields={}` and produce "no clinical
+            # content" responses — that's the bug this guard prevents.
+            stored_records = list(state.get("retrieved_records", []))
+            if stored_records:
+                retrieved_records = stored_records
+            else:
+                retrieved_records = _citations_to_retrieved_records(citations)
 
             # Attempt 1: Haiku 4.5 (model_workhorse).
             result, _verdict = _run_synthesis_sync(

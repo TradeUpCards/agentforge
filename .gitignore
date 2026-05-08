@@ -62,3 +62,15 @@ docker/development-easy-redis/docker-compose.override.yml
 
 # Claude Code session state (local only)
 /.claude/
+
+# Working files at repo root that have repeatedly been accidentally
+# swept in by `git add -A` despite living outside .gauntlet/. Pin them
+# here so `git status` keeps them as ignored, not untracked.
+/CLAUDE_SESSION_HANDOFF.md
+/MEMORY_BANK_INDEX.md
+/LOCAL_DEV_RUNBOOK.md
+/AGENT_TEAMS_RUNBOOK.pdf
+/COST_ANALYSIS.pdf
+/Stack
+__pycache__/
+*.pyc
