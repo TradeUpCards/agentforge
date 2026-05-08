@@ -21,14 +21,26 @@ export function MedicalRecordHeading({ patientId }: { patientId: string }) {
         Medical Record Dashboard - {name}
       </p>
       <div className="flex items-center gap-3 text-gray-500" aria-hidden="true">
-        {/* The legacy "chat" icon was removed: it suggested a duplicate
-            Co-Pilot entry-point but the floating FAB at bottom-right is
-            the real launcher. Two affordances for the same drawer was
-            confusing and the small inline icon was harder to tap. */}
+        {/* Chat icon hidden on phone portrait specifically — that's the
+            viewport where it's hardest to tap reliably and where the
+            floating FAB at bottom-right is the obvious primary launcher.
+            On wider/landscape viewports, the chat icon stays for visual
+            familiarity with the legacy heading-bar trio. */}
+        <span className="max-md:portrait:hidden inline-flex">
+          <ChatIcon />
+        </span>
         <MinimizeIcon />
         <HelpIcon />
       </div>
     </div>
+  )
+}
+
+function ChatIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
+      <path d="M2.678 11.894a1 1 0 0 1 .287.801 11 11 0 0 1-.398 2c1.395-.323 2.247-.697 2.634-.893a1 1 0 0 1 .71-.074A8 8 0 0 0 8 14c3.996 0 7-2.807 7-6s-3.004-6-7-6-7 2.808-7 6c0 1.468.617 2.83 1.678 3.894M8 1c4.418 0 8 3.134 8 7s-3.582 7-8 7a9 9 0 0 1-2.347-.306c-.584.296-1.925.864-4.181 1.234-.2.032-.352-.176-.273-.362.354-.836.674-1.95.77-2.966C.744 11.37 0 9.76 0 8c0-3.866 3.582-7 8-7" />
+    </svg>
   )
 }
 
