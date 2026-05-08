@@ -69,7 +69,11 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
 
   return (
     <>
-      {/* Floating launch button */}
+      {/* Floating launch button — primary FAB.
+          Press feedback: bg-blue-900 active state + slight scale-down
+          (motion-safe so reduce-motion users get the color change but
+          not the geometry change). transition-all gives smooth state
+          changes between hover/active/focus. */}
       {!open && (
         <button
           type="button"
@@ -80,8 +84,10 @@ export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
             inline-flex items-center gap-2
             px-4 py-3 min-h-11
             rounded-full shadow-lg
-            bg-blue-700 hover:bg-blue-800 text-white
+            bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white
             font-medium text-sm
+            transition-colors duration-150
+            motion-safe:transition-all motion-safe:active:scale-95
             focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
           "
         >
