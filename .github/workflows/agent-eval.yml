@@ -122,6 +122,14 @@ jobs:
             --current /tmp/eval_results.json \
             --max-regression 0.05
 
+      - name: PR-blocking strip-rate regression gate
+        run: |
+          echo "--- PR-blocking strip-rate regression gate ---"
+          python scripts/run_strip_rate_gate.py \
+            --baseline agent/tests/eval/strip_rate_baseline.json \
+            --current-json /tmp/eval_results.json \
+            --max-regression 0.05
+
       # Failed runs leave the most recent run report in the artifact for
       # post-mortem — the runner writes per-run markdown to
       # agent/tests/eval/results/<timestamp>.md. Always upload (success or

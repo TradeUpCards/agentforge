@@ -12,11 +12,15 @@ The eval suite is the answer to *"what does this test that a happy-path demo wou
 
 **Three tiers** (selected per case via the `tier:` YAML field):
 
-- **Smoke** (6 cases) — runs in pre-commit hook on every commit. Fixture-mode only, ~4 seconds, no LLM cost. **This is the gate that blocks bad commits.**
-- **Full** (3 cases) — runs in CI / PR gate. Fixture-mode or live, ~30s if live. Catches behavior that smoke skips for budget.
-- **Nightly** (21 cases) — manual / cron. Live LLM + live MariaDB; ~$0.10–0.30 per full run. Adversarial cases + Synthea-deep-chart cases that need a real LLM.
+- **Smoke** (14 cases) — runs in pre-commit hook on every commit. Fixture-mode only, ~10–15 seconds, no LLM cost. **This is the gate that blocks bad commits.** Expanded from 8 to 14 on 2026-05-08 by promoting 6 PHI-scrubber + extraction cases from `full`/`nightly`.
+- **Full** (12 cases) — runs in CI / PR gate. Fixture-mode only, ~30s. Catches behavior that smoke skips for budget.
+- **Nightly** (39 cases) — manual / cron. Live LLM + live MariaDB; ~$0.10–0.30 per full run. Adversarial cases + Synthea-deep-chart cases that need a real LLM.
 
-### Why CI runs 9 of 30 cases (skip rationale)
+### Golden set definition
+
+The **golden set** is the entire eval suite: all 65 cases across smoke + full + nightly tiers. The PRD uses "golden set", "eval suite", and "golden dataset" interchangeably; this doc treats them as synonyms. The CI PR-blocking subset is the ~26 fixture-mode-eligible cases (smoke + full tiers, excluding cases with `live_llm_required: true` or `live_db_required: true`) that run on every push without Anthropic API cost.
+
+### Why CI skips most nightly cases (skip rationale)
 
 The CI pipeline runs the smoke + full tiers — 9 cases — and skips the 21 nightly-tier cases. **Skips are intentional, not a coverage gap.** Two reasons every nightly case carries a skip flag:
 
@@ -32,15 +36,26 @@ The CI pipeline runs the smoke + full tiers — 9 cases — and skips the 21 nig
 - **Fixture mode** (`USE_FIXTURE_LLM=true`, `USE_FIXTURE_DATA=true`) — deterministic, free, fast. Canned LLM responses + Maria fixture / sentinel-patient JSON. CI default.
 - **Live mode** (both flags `false`) — real Anthropic API + Synthea-imported MariaDB. Catches what canned responses can't simulate.
 
-**What's in the suite today** (counts as of 2026-05-02):
+**What's in the suite today** (counts as of 2026-05-08):
 
 | Layer | Count | Purpose |
 |---|---:|---|
 | Verifier unit tests (`agent/tests/unit/test_verifier.py`) | 16 | Pin matching rules: numeric, date, citation, absence, retry threshold, value-date tuple pairing |
 | PHI mask unit tests (`agent/tests/unit/test_mask.py`) | 12 | Pin year-month bucketing of day-precision dates in observability traces |
-| Eval Golden Set (`agent/tests/eval/cases/*.yaml`) | 30 | End-to-end behavior across 6 categories (see §3.2) |
+| Eval Golden Set (`agent/tests/eval/cases/*.yaml`) | 65 | End-to-end behavior across all categories (see §3.2). **This is the PRD "golden set" / "golden dataset" / "eval suite" — same entity, three names.** |
 | End-to-end smoke (`agent/tests/test_chat_endpoint.py`) | 3 | `/health` + `/chat` happy path + bad-HMAC refusal — proves the wiring boots |
-| **Total tests** | **61** | |
+| Rubric meta-tests (`agent/tests/eval/meta/`) | 9 | Self-test the gate machinery; verify the rubric regression gate itself catches regressions |
+| Strip-rate meta-tests (`agent/tests/eval/meta/`) | 5 | Self-test the strip-rate gate; verify the strip-rate regression detection |
+| **Total tests** | **110** | |
+
+**Tier breakdown** (post 2026-05-08 smoke expansion):
+
+| Tier | Cases | Runs in |
+|---|---:|---|
+| Smoke | 14 | Pre-commit + CI |
+| Full | 12 | CI PR gate |
+| Nightly | 39 | Manual / weekly cron |
+| **Golden set total** | **65** | — |
 
 Every case carries 6 metadata fields (`category`, `difficulty`, `tier`, `tool_mix`, `failure_mode`, `source_incident_id`) so a reviewer can slice by any axis. The runner emits a per-run markdown report with per-tier / per-category / per-difficulty pass rates to `agent/tests/eval/results/<timestamp>.md`. [`COVERAGE.md`](./agent/tests/eval/COVERAGE.md) is the static cross-section view.
 
@@ -271,8 +286,8 @@ Highlights of cases worth knowing about by name (for interview prep):
 `scripts/git-hooks/pre-commit` runs `pytest agent/tests/unit/ agent/tests/eval/ -q --tb=short` on every commit.
 
 - **Mode:** fixture (deterministic; no LLM cost)
-- **Tier:** smoke + verifier-unit + mask-unit + e2e-smoke (~34 tests)
-- **Wall time:** ~4–5 seconds
+- **Tier:** smoke + verifier-unit + mask-unit + e2e-smoke (~34+ tests, smoke expanded to 14 eval cases from 8 on 2026-05-08)
+- **Wall time:** ~10–15 seconds
 - **Auto-skipped:** `live_llm_required` / `live_db_required` cases + `tier: full|nightly` cases
 - **Bypass:** `git commit --no-verify` (sparingly — defeats the safety net)
 - **Install:** `git config core.hooksPath scripts/git-hooks` (one-time per clone)
@@ -305,14 +320,15 @@ HTML preview helper: `python -m agent.tests.eval.preview_latest` opens the lates
 
 ### 5.4 CI
 
-`.github/workflows/agent-eval.yml` mirrors the local pre-commit hook on every push to master / PR. The pipeline runs six steps in sequence:
+`.github/workflows/agent-eval.yml` mirrors the local pre-commit hook on every push to master / PR. The pipeline runs seven steps in sequence:
 
 1. Verifier + PHI mask unit tests (`agent/tests/unit/`)
 2. Eval Golden Set — smoke + full tiers, fixture mode (`agent/tests/eval/`)
 3. Rubric meta-tests — gate machinery self-test (`agent/tests/eval/meta/`)
 4. Generate eval JSON results (`--output-json /tmp/eval_results.json`)
-5. PR-blocking rubric regression gate (`scripts/run_eval_gate.py`)
-6. Upload eval run report artifact (always, 14-day retention)
+5. PR-blocking rubric regression gate (`scripts/run_eval_gate.py`) — checks per-rubric drop > 5pp AND absolute floor < 80%
+6. PR-blocking strip-rate regression gate (`scripts/run_strip_rate_gate.py`) — checks per-category claim strip-rate rise > 5pp
+7. Upload eval run report artifact (always, 14-day retention)
 
 The GitLab CI twin (`.gitlab-ci.yml`) runs the same sequence but remains `when: manual` because labs.gauntletai.com does not provision shared runners. The GitHub Actions workflow is the executing gate.
 
