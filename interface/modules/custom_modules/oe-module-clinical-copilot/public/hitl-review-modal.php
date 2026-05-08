@@ -174,7 +174,7 @@ header('Cache-Control: no-store');
             </div><!-- .modal-body -->
 
             <!-- Footer -->
-            <div class="modal-footer">
+            <div class="modal-footer" id="hitl-modal-footer">
                 <span class="hitl-footer-msg" id="hitl-footer-msg" aria-live="polite"></span>
                 <button type="button"
                         class="btn btn-secondary btn-sm"
@@ -187,6 +187,22 @@ header('Cache-Control: no-store');
                         disabled
                         title="<?php echo xla('No missed fields — reprocess is not needed'); ?>">
                     <?php echo xlt('Reprocess this document'); ?>
+                </button>
+                <!-- Approve + Reject: visible only when extraction status === pending_review.
+                     JS shows/hides these based on data-extraction-status on this footer. -->
+                <button type="button"
+                        class="btn btn-success btn-sm hitl-approve-btn"
+                        id="hitl-approve-btn"
+                        style="display:none;"
+                        aria-label="<?php echo xla('Approve extraction and write to chart'); ?>">
+                    <?php echo xlt('Approve'); ?>
+                </button>
+                <button type="button"
+                        class="btn btn-outline-danger btn-sm hitl-reject-btn"
+                        id="hitl-reject-btn"
+                        style="display:none;"
+                        aria-label="<?php echo xla('Reject extraction — will not be written to chart'); ?>">
+                    <?php echo xlt('Reject'); ?>
                 </button>
             </div>
 
@@ -204,18 +220,30 @@ window.OE_COPILOT_HITL_CONFIG = {
     csrfToken: <?php echo js_escape($csrfToken); ?>,
     extractionForDocUrl: <?php echo js_escape($publicRoot . '/extraction_for_doc.php'); ?>,
     reprocessUrl: <?php echo js_escape($publicRoot . '/reprocess.php'); ?>,
+    approveUrl:   <?php echo js_escape($publicRoot . '/approve_extraction.php'); ?>,
+    rejectUrl:    <?php echo js_escape($publicRoot . '/reject_extraction.php'); ?>,
     pdfWorkerSrc: <?php echo js_escape($publicRoot . '/vendor/pdfjs/pdf.worker.min.js?v=' . $pdfJsVer); ?>,
     labels: {
-        loadingDoc:     <?php echo js_escape(xl('Loading document…')); ?>,
-        pdfError:       <?php echo js_escape(xl('Unable to render PDF preview.')); ?>,
-        pdfPlaceholder: <?php echo js_escape(xl('PDF.js not loaded — install vendor/pdfjs/ bundle.')); ?>,
-        reprocessing:   <?php echo js_escape(xl('Reprocessing… (may take up to 30s)')); ?>,
-        reprocessOk:    <?php echo js_escape(xl('Reprocessed successfully.')); ?>,
-        errorCostCap:   <?php echo js_escape(xl('Reprocess refused: cost ceiling exceeded.')); ?>,
-        errorLowGround: <?php echo js_escape(xl('Reprocess refused: extraction low grounding.')); ?>,
-        errorGeneric:   <?php echo js_escape(xl('Reprocess failed. Please try again.')); ?>,
-        noFieldsMissed: <?php echo js_escape(xl('No missed fields — reprocess is not needed.')); ?>,
-        confirmReprocess: <?php echo js_escape(xl('Reprocess this document? This will consume API credits.')); ?>
+        loadingDoc:       <?php echo js_escape(xl('Loading document…')); ?>,
+        pdfError:         <?php echo js_escape(xl('Unable to render PDF preview.')); ?>,
+        pdfPlaceholder:   <?php echo js_escape(xl('PDF.js not loaded — install vendor/pdfjs/ bundle.')); ?>,
+        reprocessing:     <?php echo js_escape(xl('Reprocessing… (may take up to 30s)')); ?>,
+        reprocessOk:      <?php echo js_escape(xl('Reprocessed successfully.')); ?>,
+        errorCostCap:     <?php echo js_escape(xl('Reprocess refused: cost ceiling exceeded.')); ?>,
+        errorLowGround:   <?php echo js_escape(xl('Reprocess refused: extraction low grounding.')); ?>,
+        errorGeneric:     <?php echo js_escape(xl('Reprocess failed. Please try again.')); ?>,
+        noFieldsMissed:   <?php echo js_escape(xl('No missed fields — reprocess is not needed.')); ?>,
+        confirmReprocess: <?php echo js_escape(xl('Reprocess this document? This will consume API credits.')); ?>,
+        approving:        <?php echo js_escape(xl('Approving…')); ?>,
+        approveOk:        <?php echo js_escape(xl('Approved — written to chart.')); ?>,
+        approveError:     <?php echo js_escape(xl('Approve failed. Please try again.')); ?>,
+        approveForbidden: <?php echo js_escape(xl('Approve not allowed for this account.')); ?>,
+        confirmReject:    <?php echo js_escape(xl('Reject this extraction? It will not be written to the chart.')); ?>,
+        rejecting:        <?php echo js_escape(xl('Rejecting…')); ?>,
+        rejectOk:         <?php echo js_escape(xl('Extraction rejected.')); ?>,
+        rejectError:      <?php echo js_escape(xl('Reject failed. Please try again.')); ?>,
+        rejectForbidden:  <?php echo js_escape(xl('Reject not allowed for this account.')); ?>,
+        errorForbidden:   <?php echo js_escape(xl('Action not allowed for this account.')); ?>
     }
 };
 </script>

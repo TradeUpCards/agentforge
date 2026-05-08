@@ -102,6 +102,8 @@
             cntPossibly:   document.getElementById('hitl-count-possibly'),
             footerMsg:     document.getElementById('hitl-footer-msg'),
             reprocessBtn:  document.getElementById('hitl-reprocess-btn'),
+            approveBtn:    document.getElementById('hitl-approve-btn'),
+            rejectBtn:     document.getElementById('hitl-reject-btn'),
         };
 
         // ---- 3. Micro event bus for bbox highlight ----------------------
@@ -168,6 +170,196 @@
             el.footerMsg.textContent = text || '';
             el.footerMsg.className = 'hitl-footer-msg' +
                 (modifier ? (' hitl-footer-msg--' + modifier) : '');
+        }
+
+        // ---- 6a. Footer button visibility ---------------------------------
+
+        /**
+         * Show/hide Approve + Reject based on the extraction status.
+         * Both buttons are visible only when status === 'pending_review'.
+         * Reprocess stays visible per existing P3 logic (disabled state
+         * is managed separately by renderRightPane).
+         *
+         * @param {string} status  e.g. 'pending_review', 'approved', 'ok', …
+         */
+        function updateFooterButtons(status) {
+            var isPending = status === 'pending_review';
+            if (el.approveBtn) {
+                el.approveBtn.style.display = isPending ? '' : 'none';
+                el.approveBtn.disabled = false;
+            }
+            if (el.rejectBtn) {
+                el.rejectBtn.style.display = isPending ? '' : 'none';
+                el.rejectBtn.disabled = false;
+            }
+        }
+
+        // ---- 6b. Approve POST flow ----------------------------------------
+
+        /**
+         * POST to approve_extraction.php.
+         * Body: { extraction_id: <int> }
+         * On 200: show inline toast, dispatch refresh-banner event, close modal.
+         * On error: show structural message, re-enable button.
+         *
+         * @param {string} docId
+         * @param {number} extractionId
+         */
+        function triggerApprove(docId, extractionId) {
+            if (!extractionId || !docId) return;
+
+            var csrfToken  = cfg.csrfToken  || '';
+            var approveUrl = cfg.approveUrl || '';
+
+            if (el.approveBtn) {
+                el.approveBtn.disabled = true;
+                el.approveBtn.innerHTML =
+                    '<span class="hitl-spinner"></span> ' +
+                    (labels.approving || 'Approving…');
+            }
+            if (el.rejectBtn) el.rejectBtn.disabled = true;
+            setFooterMsg(labels.approving || 'Approving…');
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', approveUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) return;
+
+                // Parse body once. NEVER log or display patient data.
+                var body = null;
+                try { body = JSON.parse(xhr.responseText); } catch (parseErr) { /* ignore */ }
+
+                if (xhr.status === 200) {
+                    setFooterMsg(labels.approveOk || 'Approved — written to chart.', 'success');
+
+                    // Dispatch refresh-banner event so hitl-banner.js re-fetches.
+                    try {
+                        var refreshEvent = new CustomEvent('oe-copilot-hitl/extraction-updated', {
+                            bubbles: true,
+                            detail: { docId: docId }
+                        });
+                        document.dispatchEvent(refreshEvent);
+                    } catch (evtErr) { /* non-critical */ }
+
+                    // Close modal after brief pause so the user sees the toast.
+                    setTimeout(function () {
+                        var modalEl = document.getElementById('hitl-review-modal');
+                        if (modalEl && typeof window.$ === 'function') {
+                            window.$('#hitl-review-modal').modal('hide');
+                        } else if (modalEl) {
+                            modalEl.classList.remove('show');
+                            modalEl.style.display = 'none';
+                            document.body.classList.remove('modal-open');
+                        }
+                    }, 1200);
+                } else {
+                    // Map known error tokens to structural messages.
+                    var errMsg = labels.approveError || 'Approve failed. Please try again.';
+                    if (body) {
+                        var errCode = (typeof body.detail === 'string' ? body.detail : '') ||
+                                      (typeof body.error  === 'string' ? body.error  : '');
+                        if (errCode === 'forbidden' || errCode === 'access_denied') {
+                            errMsg = labels.approveForbidden || 'Approve not allowed for this account.';
+                        }
+                        // All other backend detail strings fall through to the generic
+                        // message so we never expose backend internals to the user.
+                    }
+                    setFooterMsg(errMsg, 'error');
+                    if (el.approveBtn) {
+                        el.approveBtn.textContent = labels.approveBtn || 'Approve';
+                        el.approveBtn.disabled = false;
+                    }
+                    if (el.rejectBtn) el.rejectBtn.disabled = false;
+                }
+            };
+            xhr.send(JSON.stringify({ extraction_id: extractionId }));
+        }
+
+        // ---- 6c. Reject POST flow -----------------------------------------
+
+        /**
+         * Confirm + POST to reject_extraction.php.
+         * Body: { extraction_id: <int> }
+         * On 200: dispatch refresh-banner event; close modal; show toast.
+         * On error: show structural message, re-enable button.
+         *
+         * @param {string} docId
+         * @param {number} extractionId
+         */
+        function triggerReject(docId, extractionId) {
+            if (!extractionId || !docId) return;
+
+            var confirmed = window.confirm(
+                labels.confirmReject ||
+                'Reject this extraction? It will not be written to the chart.'
+            );
+            if (!confirmed) return;
+
+            var csrfToken = cfg.csrfToken  || '';
+            var rejectUrl = cfg.rejectUrl  || '';
+
+            if (el.rejectBtn) {
+                el.rejectBtn.disabled = true;
+                el.rejectBtn.innerHTML =
+                    '<span class="hitl-spinner"></span> ' +
+                    (labels.rejecting || 'Rejecting…');
+            }
+            if (el.approveBtn) el.approveBtn.disabled = true;
+            setFooterMsg(labels.rejecting || 'Rejecting…');
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', rejectUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) return;
+
+                var body = null;
+                try { body = JSON.parse(xhr.responseText); } catch (parseErr) { /* ignore */ }
+
+                if (xhr.status === 200) {
+                    // Dispatch refresh-banner event.
+                    try {
+                        var refreshEvent = new CustomEvent('oe-copilot-hitl/extraction-updated', {
+                            bubbles: true,
+                            detail: { docId: docId }
+                        });
+                        document.dispatchEvent(refreshEvent);
+                    } catch (evtErr) { /* non-critical */ }
+
+                    setFooterMsg(labels.rejectOk || 'Extraction rejected.', 'success');
+
+                    // Close modal.
+                    setTimeout(function () {
+                        var modalEl = document.getElementById('hitl-review-modal');
+                        if (modalEl && typeof window.$ === 'function') {
+                            window.$('#hitl-review-modal').modal('hide');
+                        } else if (modalEl) {
+                            modalEl.classList.remove('show');
+                            modalEl.style.display = 'none';
+                            document.body.classList.remove('modal-open');
+                        }
+                    }, 1200);
+                } else {
+                    var errMsg = labels.rejectError || 'Reject failed. Please try again.';
+                    if (body) {
+                        var errCode = (typeof body.detail === 'string' ? body.detail : '') ||
+                                      (typeof body.error  === 'string' ? body.error  : '');
+                        if (errCode === 'forbidden' || errCode === 'access_denied') {
+                            errMsg = labels.rejectForbidden || 'Reject not allowed for this account.';
+                        }
+                    }
+                    setFooterMsg(errMsg, 'error');
+                    if (el.rejectBtn) {
+                        el.rejectBtn.textContent = labels.rejectBtn || 'Reject';
+                        el.rejectBtn.disabled = false;
+                    }
+                    if (el.approveBtn) el.approveBtn.disabled = false;
+                }
+            };
+            xhr.send(JSON.stringify({ extraction_id: extractionId }));
         }
 
         // ---- 6. Render right pane ----------------------------------------
@@ -597,6 +789,23 @@
             setFooterMsg('');
             if (el.reprocessBtn) el.reprocessBtn.disabled = true;
 
+            // Show/hide Approve + Reject based on current extraction status.
+            var extractionStatus = (extraction && typeof extraction.status === 'string')
+                ? extraction.status : '';
+            updateFooterButtons(extractionStatus);
+
+            // Store docId + extractionId on approve/reject buttons so their
+            // click handlers can read them (mirrors the reprocess button pattern).
+            var extractionId = String((extraction && extraction.extraction_id) ? extraction.extraction_id : '');
+            if (el.approveBtn) {
+                el.approveBtn.setAttribute('data-doc-id', docId || '');
+                el.approveBtn.setAttribute('data-extraction-id', extractionId);
+            }
+            if (el.rejectBtn) {
+                el.rejectBtn.setAttribute('data-doc-id', docId || '');
+                el.rejectBtn.setAttribute('data-extraction-id', extractionId);
+            }
+
             renderHeader(extraction || {});
             renderRightPane(extraction || { fields: [], docling_blocks: [] });
 
@@ -778,6 +987,26 @@
                 );
             }
         });
+
+        // Approve button click.
+        if (el.approveBtn) {
+            el.approveBtn.addEventListener('click', function () {
+                var docId       = el.approveBtn.getAttribute('data-doc-id') || '';
+                var extractionId = el.approveBtn.getAttribute('data-extraction-id') || '';
+                if (!docId || !extractionId) return;
+                triggerApprove(docId, Number(extractionId));
+            });
+        }
+
+        // Reject button click.
+        if (el.rejectBtn) {
+            el.rejectBtn.addEventListener('click', function () {
+                var docId        = el.rejectBtn.getAttribute('data-doc-id') || '';
+                var extractionId = el.rejectBtn.getAttribute('data-extraction-id') || '';
+                if (!docId || !extractionId) return;
+                triggerReject(docId, Number(extractionId));
+            });
+        }
 
         // Bootstrap 4 modal close — clean up backdrop (fallback path).
         var modalEl = document.getElementById('hitl-review-modal');

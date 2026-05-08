@@ -114,13 +114,14 @@
     /**
      * Inject (or replace) the banner above the #file_preview iframe.
      *
-     * @param {'warning'|'danger'} level  Bootstrap alert level.
-     * @param {string}             msg    Escaped message HTML.
-     * @param {string|null}        docId  doc_id this banner is for.
-     * @param {boolean}            showReviewBtn
-     * @param {boolean}            showReprocessBtn
+     * @param {string}      level           Bootstrap alert level class(es).
+     * @param {string}      msg             Escaped message HTML.
+     * @param {string|null} docId           doc_id this banner is for.
+     * @param {boolean}     showReviewBtn
+     * @param {boolean}     showReprocessBtn
+     * @param {string}      [reviewBtnText] Optional override for review button label.
      */
-    function renderBanner(level, msg, docId, showReviewBtn, showReprocessBtn) {
+    function renderBanner(level, msg, docId, showReviewBtn, showReprocessBtn, reviewBtnText) {
         removeBanner();
 
         var previewContainer = hostDoc.querySelector('div.doc-doc-ls-8-preview');
@@ -151,7 +152,7 @@
             reviewBtn.type = 'button';
             reviewBtn.className = 'btn btn-sm btn-outline-dark py-0';
             reviewBtn.style.cssText = 'font-size:12px;white-space:nowrap;';
-            reviewBtn.textContent = 'Review what was missed';
+            reviewBtn.textContent = reviewBtnText || 'Review what was missed';
             reviewBtn.setAttribute('data-hitl-action', 'review');
             banner.appendChild(reviewBtn);
         }
@@ -244,7 +245,32 @@
         var total = Number(data.total_fields) || 0;
         var stripped = Number(data.stripped_fields) || 0;
 
-        if (status === 'refused') {
+        // pending_review → blue alert-info: clinician must approve before round-trip.
+        if (status === 'pending_review') {
+            renderBanner(
+                'info',
+                '<strong>Review before saving.</strong> This extraction has not been written to the chart yet.',
+                docId,
+                true,               // show review button
+                false,              // no Reprocess button on pending_review
+                'Review extraction' // button label per spec
+            );
+            return;
+        }
+
+        // approved → quiet green alert-success: round-trip already fired.
+        if (status === 'approved') {
+            renderBanner(
+                'success hitl-banner--approved',
+                'Extraction approved and written to chart.',
+                docId,
+                false,  // no review button
+                false   // no reprocess button
+            );
+            return;
+        }
+
+        if (status === 'refused' || status === 'error') {
             renderBanner(
                 'danger',
                 'This extraction was refused (all 3 attempts failed).',
@@ -527,6 +553,20 @@
             topBodyObserver.observe(hostDoc.body, { childList: true, subtree: true });
         }
     }
+
+    // ---- 11. Listen for post-approve/reject banner refresh ---------------
+
+    // hitl-review.js dispatches `oe-copilot-hitl/extraction-updated` after a
+    // successful approve or reject POST.  Force a re-fetch so the banner
+    // transitions to the new status (approved → green, rejected → silent).
+    hostDoc.addEventListener('oe-copilot-hitl/extraction-updated', function (e) {
+        var detail = (e && e.detail) ? e.detail : {};
+        var updatedDocId = detail.docId || null;
+        if (!updatedDocId) return;
+        // Force re-fetch regardless of currentDocId cache.
+        currentDocId = null;
+        onDocumentOpened(updatedDocId);
+    });
 
     if (hostDoc.readyState === 'loading') {
         hostDoc.addEventListener('DOMContentLoaded', init);

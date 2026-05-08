@@ -34,6 +34,7 @@ namespace OpenEMR\Tests\Unit\CoPilotModule;
 
 use OpenEMR\Modules\ClinicalCopilot\EventSubscriber\DocumentSavedSubscriber;
 use OpenEMR\Modules\ClinicalCopilot\Events\DocumentCreatedEvent;
+use OpenEMR\Modules\ClinicalCopilot\ExtractionStatus;
 use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
 use OpenEMR\Modules\ClinicalCopilot\Service\DocumentPathResolver;
 use OpenEMR\Modules\ClinicalCopilot\Service\RoundtripService;
@@ -383,7 +384,10 @@ final class DocumentSavedSubscriberTest extends TestCase
         $subscriber->onDocumentCreated($event);
 
         $this->assertCount(1, $subscriber->persistedRows, 'One extraction row should be persisted.');
-        $this->assertSame('ok', $subscriber->persistedRows[0]['status']);
+        // P4 R1: successful agent extractions land in pending_review (gated)
+        // instead of writing directly to clinical tables. The agent's "ok" status
+        // is translated to ExtractionStatus::PENDING_REVIEW by the subscriber.
+        $this->assertSame(ExtractionStatus::PENDING_REVIEW, $subscriber->persistedRows[0]['status']);
         $this->assertSame('lab_pdf', $subscriber->persistedRows[0]['docType']);
         $this->assertSame(999101, $subscriber->persistedRows[0]['pid']);
     }

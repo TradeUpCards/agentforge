@@ -377,3 +377,73 @@
     border-top: 1px solid #e5e7eb;
     margin: 10px 0;
 }
+
+/* ---- P4 R1: Approve / Reject footer buttons ----------------------------- */
+
+/* Approve button — Bootstrap btn-success base + slight size nudge to match
+   the existing Reprocess (btn-warning btn-sm) button. */
+.hitl-approve-btn.btn-success {
+    background-color: #16a34a;
+    border-color: #15803d;
+    color: #ffffff;
+    font-weight: 500;
+}
+
+.hitl-approve-btn.btn-success:hover:not(:disabled) {
+    background-color: #15803d;
+    border-color: #166534;
+}
+
+.hitl-approve-btn.btn-success:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+}
+
+/* Reject button — Bootstrap btn-outline-danger base. */
+.hitl-reject-btn.btn-outline-danger {
+    color: #dc2626;
+    border-color: #dc2626;
+    background-color: transparent;
+    font-weight: 500;
+}
+
+.hitl-reject-btn.btn-outline-danger:hover:not(:disabled) {
+    background-color: #fee2e2;
+    border-color: #b91c1c;
+    color: #b91c1c;
+}
+
+.hitl-reject-btn.btn-outline-danger:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+}
+
+/* ---- P4 R1: Banner status-pill color tokens ----------------------------- */
+
+/* pending_review → Bootstrap alert-info (blue).  The banner uses Bootstrap's
+   built-in alert-info class; these tokens document the semantic colour for
+   any non-Bootstrap usage (e.g. a status pill in a future table view). */
+.hitl-status-pill--pending-review {
+    background: #dbeafe;
+    color: #1e40af;
+    border-color: #93c5fd;
+}
+
+/* approved → quiet green.  Mirrors Bootstrap alert-success but with subdued
+   padding so it does not dominate the document viewer. */
+.hitl-status-pill--approved {
+    background: #d1fae5;
+    color: #065f46;
+    border-color: #6ee7b7;
+}
+
+/* Approved banner override: keep the Bootstrap alert-success base but reduce
+   visual weight so it does not cover the document viewer area. */
+#oe-copilot-hitl-banner.alert-success.hitl-banner--approved {
+    background-color: #f0fdf4;
+    border-color: #bbf7d0;
+    color: #166534;
+    font-size: 12px;
+    padding-top: 3px;
+    padding-bottom: 3px;
+}
