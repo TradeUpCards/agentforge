@@ -25,7 +25,7 @@
  *   - The per-tab refresh / lock / close icons are decorative.
  */
 
-import { openemrHome } from '../../utils/openemrLinks'
+import { openemrMenuLink } from '../../utils/openemrLinks'
 
 const TABS = [
   'Calendar',
@@ -62,7 +62,7 @@ export function OpenTabBar({ active = 'Dashboard' }: OpenTabBarProps) {
                 <span className={labelClass}>{name}</span>
               ) : (
                 <a
-                  href={openemrHome()}
+                  href={openemrMenuLink(name)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className={labelClass}

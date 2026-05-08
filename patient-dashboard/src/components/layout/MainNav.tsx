@@ -27,7 +27,7 @@ import { useState, useRef, useEffect } from 'react'
  * adaptation, not a deviation.
  */
 
-import { openemrHome } from '../../utils/openemrLinks'
+import { openemrHome, openemrMenuLink } from '../../utils/openemrLinks'
 
 const NAV_ITEMS = [
   'Calendar',
@@ -45,7 +45,8 @@ const NAV_ITEMS = [
   'Popups',
 ]
 
-const NAV_HREF = openemrHome()
+/** Logo links to OpenEMR's main shell (no specific destination implied). */
+const LOGO_HREF = openemrHome()
 
 export function MainNav() {
   const auth = useAuth()
@@ -92,7 +93,7 @@ export function MainNav() {
         {/* Left: logo + (≥md) horizontal nav items */}
         <div className="flex items-center gap-4 min-w-0">
           <a
-            href={NAV_HREF}
+            href={LOGO_HREF}
             target="_blank"
             rel="noopener noreferrer"
             className="shrink-0 inline-block focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 rounded-full"
@@ -105,7 +106,7 @@ export function MainNav() {
             {NAV_ITEMS.map((item) => (
               <li key={item}>
                 <a
-                  href={NAV_HREF}
+                  href={openemrMenuLink(item)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="font-semibold text-gray-800 hover:text-blue-700 hover:underline"
@@ -188,7 +189,7 @@ export function MainNav() {
                     <li key={item}>
                       <a
                         role="menuitem"
-                        href={NAV_HREF}
+                        href={openemrMenuLink(item)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="block px-4 py-3 min-h-11 text-sm font-semibold text-gray-800 hover:bg-gray-50 hover:text-blue-700 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600"
