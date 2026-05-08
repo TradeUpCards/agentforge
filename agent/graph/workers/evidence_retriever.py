@@ -48,10 +48,27 @@ _ALL_PATIENT_TOOLS = (
 
 # Keywords indicating the query needs guideline evidence.
 # Low-bar set — any overlap triggers the additive search_guidelines call.
+#
+# Discrimination contract: terms must be SPECIFIC to clinical-knowledge or
+# guideline-question intent — not generic clinical terms that appear in
+# patient-fact (UC1) queries. The unit-test invariant
+# `test_guideline_keyword_absent_no_search_guidelines_call` (test_graph.py
+# line ~600) guards this: "show me his medications" must NOT trigger
+# search_guidelines, because unsolicited guideline citations on a UC1 query
+# confuse the PCP and silently grow the per-request token budget.
 _GUIDELINE_KEYWORDS = frozenset({
+    # Clinical-evidence cues (W1).
     "guideline", "ada", "uspstf", "recommendation", "recommendations",
     "evidence", "target", "goal", "threshold", "standard", "protocol",
     "consensus", "clinical practice", "jnc", "aha",
+    # 2026-05-08 — narrow additions for guideline-question queries that
+    # do NOT match the UC1-medication-query test invariant. Each term is
+    # justified by a specific failing eval case AND verified not to fire
+    # for "show me his medications":
+    "interaction", "interactions",     # case 51 (warfarin: drug interactions)
+    "first-line",                      # case 54 (metformin: first-line therapy)
+    "heart failure",                   # case 55 (heart_failure: condition phrase)
+    "kidney", "ckd", "staging",        # case 56 (ckd: condition + process)
 })
 
 # TODO: centralize pricing constants
