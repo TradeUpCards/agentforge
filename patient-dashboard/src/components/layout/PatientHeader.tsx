@@ -59,6 +59,15 @@ interface PatientHeaderProps {
 export function PatientHeader({ patientId, collapsed = false }: PatientHeaderProps) {
   const { data: patient, isLoading, error } = usePatient(patientId)
   const age = patient?.birthDate ? calculateAge(patient.birthDate) : undefined
+
+  // Mobile-only collapse state per orientation. Independent so rotating
+  // doesn't disrupt the user's explicit choice.
+  //   - Portrait: starts EXPANDED (vertical room is plentiful; show full
+  //     identity by default, tap to compact if user wants more space for
+  //     cards).
+  //   - Landscape: starts COMPACT (vertical room is precious — keyboard
+  //     can take 50% of height; tap to expand if user needs DOB/Sex/MRN).
+  const [portraitCollapsed, setPortraitCollapsed] = useState(false)
   const [landscapeExpanded, setLandscapeExpanded] = useState(false)
 
   if (isLoading) {
@@ -146,31 +155,56 @@ export function PatientHeader({ patientId, collapsed = false }: PatientHeaderPro
         </header>
       )}
 
-      {/* <lg portrait: full stacked + sticky (phone portrait, tablet portrait) */}
-      <header className="hidden max-lg:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 px-4 py-2 shadow-sm">
-        <div className="flex items-center gap-3">
-          <Avatar small />
-          <div className="min-w-0 flex-1">
-            <h1 className="text-base font-bold text-blue-700 m-0 leading-tight truncate">
-              {name}
-            </h1>
-            <div className="flex items-center gap-2 mt-0.5">
-              <ActiveBadge active={active} />
-              <span className="text-xs text-gray-600 font-mono truncate">MRN {mrn}</span>
+      {/* <lg portrait: tappable header (phone portrait, tablet portrait).
+          Default expanded; tap to collapse to compact (just name + Active). */}
+      <header className="hidden max-lg:portrait:block sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
+        <button
+          type="button"
+          onClick={() => setPortraitCollapsed((s) => !s)}
+          aria-expanded={!portraitCollapsed}
+          aria-label={
+            portraitCollapsed ? 'Show patient details' : 'Hide patient details'
+          }
+          className="w-full px-4 py-2 min-h-11 text-left hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600"
+        >
+          <div className="flex items-center gap-3">
+            <Avatar small />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <h1 className="text-base font-bold text-blue-700 m-0 leading-tight truncate">
+                  {name}
+                </h1>
+                <ChevronIcon expanded={!portraitCollapsed} />
+              </div>
+              {!portraitCollapsed && (
+                <div className="flex items-center gap-2 mt-0.5">
+                  <ActiveBadge active={active} />
+                  <span className="text-xs text-gray-600 font-mono truncate">
+                    MRN {mrn}
+                  </span>
+                </div>
+              )}
+              {portraitCollapsed && (
+                <div className="flex items-center gap-2 mt-0.5">
+                  <ActiveBadge active={active} />
+                </div>
+              )}
             </div>
           </div>
-        </div>
-        <p className="text-xs text-gray-700 mt-2 leading-snug">
-          <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
-          {age !== undefined && (
-            <>
-              {' '}
-              · <span className="font-semibold">Age:</span> {age}
-            </>
+          {!portraitCollapsed && (
+            <p className="text-xs text-gray-700 mt-2 leading-snug m-0">
+              <span className="font-semibold">DOB:</span> {formatDate(patient.birthDate)}
+              {age !== undefined && (
+                <>
+                  {' '}
+                  · <span className="font-semibold">Age:</span> {age}
+                </>
+              )}
+              {' · '}
+              <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
+            </p>
           )}
-          {' · '}
-          <span className="font-semibold">Sex:</span> {capitalize(patient.gender)}
-        </p>
+        </button>
       </header>
 
       {/* <lg landscape: compact sticky (tap to expand) — phone landscape including iPhone 14+ at 844-932 px */}
