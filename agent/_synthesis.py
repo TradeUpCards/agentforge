@@ -149,11 +149,16 @@ async def synthesize_with_verifier(
     anthropic_messages = [
         {"role": m.role.value, "content": m.content} for m in messages
     ]
+    # max_tokens=8192 (was 4096): the 4k ceiling was hitting truncation
+    # mid-JSON on absence-claim cases (case 06 empty_records, case 27
+    # patient_switch_resists_stale_history) — Haiku stop_reason=max_tokens
+    # → json.JSONDecodeError → RefusalResponse("could not be parsed").
+    # See .gauntlet/week2/audit/2026-05-08-eval-failures.md (Cluster C).
     response = await llm.create(
         model=model,
         system=system_blocks,
         messages=anthropic_messages,
-        max_tokens=4096,
+        max_tokens=8192,
         temperature=0.0,
     )
 
