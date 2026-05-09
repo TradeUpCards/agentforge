@@ -44,7 +44,9 @@
  *     `value` is never accessed or rendered for stripped rows.
  *   - Error messages shown in the footer are structural (mapped from error
  *     codes). No patient data, doc_id, or extracted value is included.
- *   - Text snippets from docling_blocks are ≤80 chars, truncated byte-safe.
+ *   - Text snippets from docling_blocks are ≤240 chars (R2 bump), truncated
+ *     byte-safe. Values in inline-edit inputs are never logged.
+ *   - console.log is NEVER called with any extracted field value.
  *
  * Namespace: entire module in IIFE; no global exports except the config
  * object set by hitl-review-modal.php (`window.OE_COPILOT_HITL_CONFIG`).
@@ -88,23 +90,51 @@
         // ---- 2. DOM refs ------------------------------------------------
 
         var el = {
-            modal:         document.getElementById('hitl-review-modal'),
-            hdrDocType:    document.getElementById('hitl-hdr-doc-type'),
-            hdrAttempt:    document.getElementById('hitl-hdr-attempt'),
-            hdrModel:      document.getElementById('hitl-hdr-model'),
-            pdfPane:       document.getElementById('hitl-pdf-pane'),
-            pdfLoading:    document.getElementById('hitl-pdf-loading'),
-            listCaptured:  document.getElementById('hitl-list-captured'),
-            listMissed:    document.getElementById('hitl-list-missed'),
-            listPossibly:  document.getElementById('hitl-list-possibly'),
-            cntCaptured:   document.getElementById('hitl-count-captured'),
-            cntMissed:     document.getElementById('hitl-count-missed'),
-            cntPossibly:   document.getElementById('hitl-count-possibly'),
-            footerMsg:     document.getElementById('hitl-footer-msg'),
-            reprocessBtn:  document.getElementById('hitl-reprocess-btn'),
-            approveBtn:    document.getElementById('hitl-approve-btn'),
-            rejectBtn:     document.getElementById('hitl-reject-btn'),
+            modal:              document.getElementById('hitl-review-modal'),
+            hdrDocType:         document.getElementById('hitl-hdr-doc-type'),
+            hdrAttempt:         document.getElementById('hitl-hdr-attempt'),
+            hdrModel:           document.getElementById('hitl-hdr-model'),
+            hdrReextracted:     document.getElementById('hitl-hdr-reextracted'),
+            pdfPane:            document.getElementById('hitl-pdf-pane'),
+            pdfLoading:         document.getElementById('hitl-pdf-loading'),
+            listCaptured:       document.getElementById('hitl-list-captured'),
+            listMissed:         document.getElementById('hitl-list-missed'),
+            listPossibly:       document.getElementById('hitl-list-possibly'),
+            cntCaptured:        document.getElementById('hitl-count-captured'),
+            cntMissed:          document.getElementById('hitl-count-missed'),
+            cntPossibly:        document.getElementById('hitl-count-possibly'),
+            footerMsg:          document.getElementById('hitl-footer-msg'),
+            reprocessBtn:       document.getElementById('hitl-reprocess-btn'),
+            discardEditsRow:    document.getElementById('hitl-discard-edits-row'),
+            discardEditsChk:    document.getElementById('hitl-discard-edits-chk'),
+            approveBtn:         document.getElementById('hitl-approve-btn'),
+            rejectBtn:          document.getElementById('hitl-reject-btn'),
+            // Confirmation modal elements
+            confirmModal:       document.getElementById('hitl-confirm-approve-modal'),
+            confirmFieldCount:  document.getElementById('hitl-confirm-field-count'),
+            confirmFieldList:   document.getElementById('hitl-confirm-field-list'),
+            confirmSeeAll:      document.getElementById('hitl-confirm-see-all'),
+            confirmAckChk:      document.getElementById('hitl-confirm-ack-chk'),
+            confirmCancelBtn:   document.getElementById('hitl-confirm-cancel-btn'),
+            confirmApproveBtn:  document.getElementById('hitl-confirm-approve-btn'),
         };
+
+        // ---- 2b. R2 module-level state ----------------------------------
+
+        /**
+         * Shadow records for clinician edits/additions in the current session.
+         * Keyed by field_path. Values: { clinician_value, status, source_block_id? }
+         *
+         * These are merged into the extraction data for counting stripped fields
+         * and for the reprocess-carry-over logic. They are NEVER logged.
+         */
+        var shadowEdits = {};
+
+        /** Currently active extraction object (refreshed on each modal open or reprocess). */
+        var currentExtraction = null;
+
+        /** docId for the current modal session. */
+        var currentDocId = null;
 
         // ---- 3. Micro event bus for bbox highlight ----------------------
 
@@ -183,18 +213,135 @@
          * @param {string} status  e.g. 'pending_review', 'approved', 'ok', …
          */
         function updateFooterButtons(status) {
-            var isPending = status === 'pending_review';
+            // Treat undefined/null status as pending_review to avoid lockout
+            // on a load race — safe default keeps editing controls visible.
+            var isPending = (!status || status === 'pending_review');
             if (el.approveBtn) {
                 el.approveBtn.style.display = isPending ? '' : 'none';
                 el.approveBtn.disabled = false;
+                el.approveBtn.textContent = labels.approveBtn || 'Approve';
             }
             if (el.rejectBtn) {
                 el.rejectBtn.style.display = isPending ? '' : 'none';
                 el.rejectBtn.disabled = false;
+                el.rejectBtn.textContent = labels.rejectBtn || 'Reject';
+            }
+            // Show discard-edits checkbox only when pending_review
+            if (el.discardEditsRow) {
+                el.discardEditsRow.style.display = isPending ? '' : 'none';
             }
         }
 
-        // ---- 6b. Approve POST flow ----------------------------------------
+        // ---- 6b-pre. Stripped-field counter (R2) ---------------------------
+
+        /**
+         * Count `status='stripped'` rows that have NOT been resolved
+         * (i.e. do not have a shadow manually_edited or manually_added record).
+         *
+         * @param {Object} extraction  The current extraction object.
+         * @returns {string[]}  Array of unresolved field_path strings.
+         */
+        function unresolvedStrippedPaths(extraction) {
+            var fields = Array.isArray(extraction && extraction.fields)
+                ? extraction.fields : [];
+            var paths = [];
+            fields.forEach(function (f) {
+                if (f.status !== 'stripped') return;
+                // If the clinician has a shadow record for this path, it is resolved.
+                var shadow = shadowEdits[f.field_path];
+                if (shadow && (shadow.status === 'manually_edited' || shadow.status === 'manually_added')) {
+                    return;
+                }
+                // Also check if the extraction data already carries manually_edited/manually_added
+                // rows surfaced by backend (re-fetched extraction may include them).
+                if (f.status === 'manually_edited' || f.status === 'manually_added') {
+                    return;
+                }
+                paths.push(f.field_path);
+            });
+            return paths;
+        }
+
+        // ---- 6b. Approve POST flow + confirmation gate (R2) -----------------
+
+        /**
+         * Show the "N fields will not be saved" confirmation modal.
+         * Called when clinician clicks Approve and there are unresolved strips.
+         *
+         * @param {string[]}  unresolved   Array of field_path strings.
+         * @param {string}    docId
+         * @param {number}    extractionId
+         */
+        function showApproveConfirmation(unresolved, docId, extractionId) {
+            var n = unresolved.length;
+            var PREVIEW_LIMIT = 5;
+
+            if (el.confirmFieldCount) {
+                el.confirmFieldCount.textContent =
+                    n + ' ' + (labels.nFieldsNotSaved || 'field(s) will not be saved.');
+            }
+
+            if (el.confirmFieldList) {
+                el.confirmFieldList.innerHTML = '';
+                var showN = Math.min(n, PREVIEW_LIMIT);
+                for (var i = 0; i < showN; i++) {
+                    var li = document.createElement('li');
+                    li.textContent = unresolved[i];
+                    el.confirmFieldList.appendChild(li);
+                }
+            }
+
+            if (el.confirmSeeAll) {
+                if (n > PREVIEW_LIMIT) {
+                    el.confirmSeeAll.style.display = '';
+                    el.confirmSeeAll.textContent = labels.seeAll || 'See all';
+                    var expanded = false;
+                    // Replace onclick each time to avoid stale closure.
+                    el.confirmSeeAll.onclick = function () {
+                        expanded = !expanded;
+                        el.confirmFieldList.innerHTML = '';
+                        var limit2 = expanded ? n : PREVIEW_LIMIT;
+                        for (var j = 0; j < limit2; j++) {
+                            var li2 = document.createElement('li');
+                            li2.textContent = unresolved[j];
+                            el.confirmFieldList.appendChild(li2);
+                        }
+                        el.confirmSeeAll.textContent = expanded
+                            ? (labels.seeLess || 'See less')
+                            : (labels.seeAll  || 'See all');
+                    };
+                } else {
+                    el.confirmSeeAll.style.display = 'none';
+                }
+            }
+
+            // Reset checkbox + Approve anyway button.
+            if (el.confirmAckChk) {
+                el.confirmAckChk.checked = false;
+            }
+            if (el.confirmApproveBtn) {
+                el.confirmApproveBtn.disabled = true;
+            }
+
+            // Store context on the Approve anyway button for its click handler.
+            if (el.confirmApproveBtn) {
+                el.confirmApproveBtn.setAttribute('data-doc-id', docId || '');
+                el.confirmApproveBtn.setAttribute('data-extraction-id', String(extractionId || ''));
+            }
+
+            // Open the confirmation modal.
+            if (typeof window.$ === 'function') {
+                window.$('#hitl-confirm-approve-modal').modal('show');
+            } else if (el.confirmModal) {
+                el.confirmModal.classList.add('show');
+                el.confirmModal.style.display = 'block';
+                // Stacked backdrop with higher z-index (see CSS .hitl-confirm-backdrop).
+                var cbk = document.createElement('div');
+                cbk.id = 'hitl-confirm-backdrop';
+                cbk.className = 'modal-backdrop fade show hitl-confirm-backdrop';
+                document.body.appendChild(cbk);
+            }
+        }
 
         /**
          * POST to approve_extraction.php.
@@ -362,35 +509,81 @@
             xhr.send(JSON.stringify({ extraction_id: extractionId }));
         }
 
-        // ---- 6. Render right pane ----------------------------------------
+        // ---- 6d. Field-edit POST helper (R2) --------------------------------
+
+        /**
+         * POST a field edit or assertion to edit_extracted_field.php.
+         *
+         * @param {Object}   payload    { extraction_id, field_path, clinician_value, source_block_id? }
+         * @param {Function} onSuccess  Called with the parsed 200 response body.
+         * @param {Function} onError    Called with a structural error string.
+         */
+        function postFieldEdit(payload, onSuccess, onError) {
+            var csrfToken    = cfg.csrfToken   || '';
+            var editFieldUrl = cfg.editFieldUrl || '';
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', editFieldUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) return;
+                var body = null;
+                try { body = JSON.parse(xhr.responseText); } catch (e) { /* ignore */ }
+
+                if (xhr.status === 200) {
+                    onSuccess(body || {});
+                } else {
+                    var errCode = '';
+                    if (body) {
+                        errCode = (typeof body.detail === 'string' ? body.detail : '') ||
+                                  (typeof body.error  === 'string' ? body.error  : '');
+                    }
+                    if (errCode === 'forbidden' || errCode === 'access_denied') {
+                        onError('forbidden');
+                    } else {
+                        onError('generic');
+                    }
+                }
+            };
+            xhr.send(JSON.stringify(payload));
+        }
 
         /**
          * Build a field row element.
          *
-         * @param {'verified'|'stripped'} status
-         * @param {string}  fieldPath
-         * @param {string|null}  value       ONLY passed for verified rows.
+         * @param {'verified'|'stripped'|'manually_edited'|'manually_added'} status
+         * @param {string}       fieldPath
+         * @param {string|null}  value        ONLY passed for verified/edited rows.
          * @param {string|null}  blockId
          * @param {string|null}  reason
+         * @param {Object}       opts         Optional: { extractionId, doclingBlocks, extractionIdStr, isCarriedOver, originalValue }
          * @returns {HTMLElement}
          */
-        function buildFieldRow(status, fieldPath, value, blockId, reason) {
+        function buildFieldRow(status, fieldPath, value, blockId, reason, opts) {
+            opts = opts || {};
+            var extractionId   = opts.extractionId   || '';
+            var isCarriedOver  = opts.isCarriedOver   || false;
+            var originalValue  = opts.originalValue   != null ? opts.originalValue : null;
+            var isPending      = opts.isPending       !== false; // default true
+
             var row = document.createElement('div');
             row.className = 'hitl-field-row';
             row.setAttribute('role', 'listitem');
             row.setAttribute('data-block-id', blockId || '');
             row.setAttribute('data-status', status);
+            row.setAttribute('data-field-path', fieldPath || '');
 
             var pathEl = document.createElement('span');
             pathEl.className = 'hitl-field-path';
             pathEl.textContent = fieldPath || '';
             row.appendChild(pathEl);
 
-            // Value: ONLY for verified rows per PHI rule.
-            if (status === 'verified' && value != null) {
+            // Value: ONLY for verified/manually_edited rows per PHI rule.
+            if ((status === 'verified' || status === 'manually_edited') && value != null) {
                 var valEl = document.createElement('span');
                 valEl.className = 'hitl-field-value';
-                valEl.title = String(value);
+                valEl.title = '';  // Never put PHI in title/attribute
                 valEl.textContent = truncate(String(value), 40);
                 row.appendChild(valEl);
             }
@@ -404,14 +597,81 @@
                 row.appendChild(reasonEl);
             }
 
+            // Status badges for clinician-edited / clinician-added / carried-over.
+            if (status === 'manually_edited') {
+                var editedBadge = document.createElement('span');
+                editedBadge.className = 'hitl-badge--edited';
+                editedBadge.textContent = labels.clinicianEdited || 'clinician edited';
+                row.appendChild(editedBadge);
+            }
+            if (status === 'manually_added') {
+                var addedBadge = document.createElement('span');
+                addedBadge.className = 'hitl-badge--added';
+                addedBadge.textContent = labels.clinicianAdded || 'clinician added';
+                row.appendChild(addedBadge);
+            }
+            if (isCarriedOver) {
+                var carriedBadge = document.createElement('span');
+                carriedBadge.className = 'hitl-badge--carried-over';
+                carriedBadge.textContent = labels.carriedOver || 'carried over';
+                row.appendChild(carriedBadge);
+            }
+
             // Block ID badge.
+            var badgeStatus = status;
+            if (status === 'manually_edited') badgeStatus = 'verified';
+            if (status === 'manually_added')  badgeStatus = 'manually_added';
             var badge = document.createElement('span');
             badge.className = 'hitl-blk-badge hitl-blk-badge--' +
-                (blockId ? status : 'null');
+                (blockId ? badgeStatus : 'null');
             badge.setAttribute('data-block-id', blockId || '');
             badge.textContent = blockId ? blockId : 'no block';
             badge.setAttribute('aria-label', blockId ? ('Block ' + blockId) : 'No block ID');
             row.appendChild(badge);
+
+            // Pencil-edit button — only for verified/manually_edited rows
+            // when the session is pending_review.
+            if (isPending && (status === 'verified' || status === 'manually_edited')) {
+                var editBtn = document.createElement('button');
+                editBtn.type = 'button';
+                editBtn.className = 'hitl-edit-btn';
+                editBtn.setAttribute('aria-label', 'Edit ' + escapeHtml(fieldPath || ''));
+                editBtn.setAttribute('title', labels.editBtnLabel || 'Edit');
+                editBtn.innerHTML = '&#9998;'; // pencil Unicode
+                row.appendChild(editBtn);
+
+                editBtn.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    openInlineEdit(row, fieldPath, value, blockId, extractionId);
+                });
+            }
+
+            // "was: X | now: Y" history row for manually_edited — shown below
+            // main row content. Only when originalValue is provided.
+            if (status === 'manually_edited' && originalValue !== null) {
+                var histRow = document.createElement('div');
+                histRow.className = 'hitl-edit-history';
+
+                var wasSpan = document.createElement('span');
+                wasSpan.textContent = (labels.wasLabel || 'was:') + ' ';
+                histRow.appendChild(wasSpan);
+
+                var wasVal = document.createElement('span');
+                wasVal.className = 'hitl-was-value';
+                wasVal.textContent = truncate(String(originalValue), 30);
+                histRow.appendChild(wasVal);
+
+                var sepSpan = document.createElement('span');
+                sepSpan.textContent = ' | ' + (labels.nowLabel || 'now:') + ' ';
+                histRow.appendChild(sepSpan);
+
+                var nowVal = document.createElement('span');
+                nowVal.className = 'hitl-now-value';
+                nowVal.textContent = truncate(String(value), 30);
+                histRow.appendChild(nowVal);
+
+                row.appendChild(histRow);
+            }
 
             // Click on row or badge → emit highlight.
             function handleClick(e) {
@@ -424,9 +684,181 @@
         }
 
         /**
-         * Build a "possibly missed" block row (uncited docling block).
+         * Open an inline text-edit form inside a captured field row.
+         * The form replaces the row's display content while active;
+         * Cancel restores it. Save POSTs to edit_extracted_field.php.
+         *
+         * @param {HTMLElement} row
+         * @param {string}      fieldPath
+         * @param {string|null} currentValue
+         * @param {string|null} blockId
+         * @param {string}      extractionId
          */
-        function buildBlockRow(block) {
+        function openInlineEdit(row, fieldPath, currentValue, blockId, extractionId) {
+            // Only one inline form open at a time per row.
+            if (row.querySelector('.hitl-inline-edit')) return;
+
+            var form = document.createElement('div');
+            form.className = 'hitl-inline-edit';
+            form.setAttribute('role', 'form');
+
+            var input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'hitl-inline-input';
+            input.value = currentValue != null ? String(currentValue) : '';
+            input.setAttribute('aria-label', 'New value for ' + escapeHtml(fieldPath || ''));
+            form.appendChild(input);
+
+            var saveBtn = document.createElement('button');
+            saveBtn.type = 'button';
+            saveBtn.className = 'hitl-inline-save-btn';
+            saveBtn.textContent = 'Save';
+            form.appendChild(saveBtn);
+
+            var cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.className = 'hitl-inline-cancel-btn';
+            cancelBtn.textContent = labels.editCancelLabel || 'Cancel';
+            form.appendChild(cancelBtn);
+
+            var msgEl = document.createElement('span');
+            msgEl.style.cssText = 'font-size:11px;color:#6b7280;';
+            form.appendChild(msgEl);
+
+            row.appendChild(form);
+            input.focus();
+            input.select();
+
+            cancelBtn.addEventListener('click', function () {
+                if (form.parentNode) form.parentNode.removeChild(form);
+            });
+
+            saveBtn.addEventListener('click', function () {
+                var newValue = input.value;
+                // newValue may be empty string — that is valid for "clearing" a field.
+                // PHI: value is sent to authed backend only; not logged.
+
+                saveBtn.disabled = true;
+                cancelBtn.disabled = true;
+                msgEl.textContent = labels.editSave || 'Saving…';
+
+                var payload = {
+                    extraction_id:   Number(extractionId),
+                    field_path:      fieldPath,
+                    clinician_value: newValue
+                };
+                if (blockId) payload.source_block_id = blockId;
+
+                postFieldEdit(payload, function () {
+                    // Success — update shadow state.
+                    shadowEdits[fieldPath] = {
+                        status:           'manually_edited',
+                        clinician_value:  newValue,
+                        original_value:   currentValue
+                    };
+
+                    // Dispatch refresh event.
+                    try {
+                        var ev = new CustomEvent('oe-copilot-hitl/extraction-updated', {
+                            bubbles: true,
+                            detail: { docId: currentDocId }
+                        });
+                        document.dispatchEvent(ev);
+                    } catch (evErr) { /* non-critical */ }
+
+                    // Update the row in-place: replace value display + add edited badge.
+                    if (form.parentNode) form.parentNode.removeChild(form);
+                    rebuildRowAfterEdit(row, fieldPath, currentValue, newValue, blockId);
+                }, function (errCode) {
+                    msgEl.textContent = errCode === 'forbidden'
+                        ? (labels.editSaveForbidden || 'Edit not allowed.')
+                        : (labels.editSaveError || 'Save failed. Please try again.');
+                    msgEl.style.color = '#dc2626';
+                    saveBtn.disabled = false;
+                    cancelBtn.disabled = false;
+                });
+            });
+
+            // Enter key in input triggers Save.
+            input.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') { e.preventDefault(); saveBtn.click(); }
+                if (e.key === 'Escape') { cancelBtn.click(); }
+            });
+        }
+
+        /**
+         * Update a field row in-place after a successful inline save.
+         * Shows "was: X | now: Y" and the clinician-edited badge.
+         *
+         * @param {HTMLElement} row
+         * @param {string}      fieldPath
+         * @param {string|null} oldValue
+         * @param {string}      newValue
+         * @param {string|null} blockId
+         */
+        function rebuildRowAfterEdit(row, fieldPath, oldValue, newValue, blockId) {
+            row.setAttribute('data-status', 'manually_edited');
+
+            // Update or create the value span.
+            var valEl = row.querySelector('.hitl-field-value');
+            if (valEl) {
+                valEl.title = '';
+                valEl.textContent = truncate(String(newValue), 40);
+            }
+
+            // Remove any existing edited badge / history (idempotent on re-save).
+            var existingBadge = row.querySelector('.hitl-badge--edited');
+            if (existingBadge) existingBadge.parentNode.removeChild(existingBadge);
+            var existingHist = row.querySelector('.hitl-edit-history');
+            if (existingHist) existingHist.parentNode.removeChild(existingHist);
+
+            // Insert the edited badge before the block-id badge.
+            var blkBadge = row.querySelector('.hitl-blk-badge');
+            var editedBadge = document.createElement('span');
+            editedBadge.className = 'hitl-badge--edited';
+            editedBadge.textContent = labels.clinicianEdited || 'clinician edited';
+            if (blkBadge) {
+                row.insertBefore(editedBadge, blkBadge);
+            } else {
+                row.appendChild(editedBadge);
+            }
+
+            // Append history row at bottom of row.
+            if (oldValue !== null) {
+                var histRow = document.createElement('div');
+                histRow.className = 'hitl-edit-history';
+
+                var wasSpan = document.createElement('span');
+                wasSpan.textContent = (labels.wasLabel || 'was:') + ' ';
+                histRow.appendChild(wasSpan);
+                var wasVal = document.createElement('span');
+                wasVal.className = 'hitl-was-value';
+                wasVal.textContent = truncate(String(oldValue), 30);
+                histRow.appendChild(wasVal);
+                var sep = document.createElement('span');
+                sep.textContent = ' | ' + (labels.nowLabel || 'now:') + ' ';
+                histRow.appendChild(sep);
+                var nowVal = document.createElement('span');
+                nowVal.className = 'hitl-now-value';
+                nowVal.textContent = truncate(String(newValue), 30);
+                histRow.appendChild(nowVal);
+                row.appendChild(histRow);
+            }
+        }
+
+        /**
+         * Build a “possibly missed” block row (uncited docling block).
+         * Includes an “Assert from block” button when the session is pending_review.
+         *
+         * @param {Object}  block
+         * @param {Object}  opts  { extractionId, fieldPath?, isPending, allBlocks }
+         */
+        function buildBlockRow(block, opts) {
+            opts = opts || {};
+            var isPending    = opts.isPending !== false;
+            var extractionId = opts.extractionId || '';
+            var allBlocks    = Array.isArray(opts.allBlocks) ? opts.allBlocks : [];
+
             var row = document.createElement('div');
             row.className = 'hitl-field-row';
             row.setAttribute('role', 'listitem');
@@ -446,9 +878,8 @@
             if (block.text_snippet) {
                 var snippet = document.createElement('span');
                 snippet.className = 'hitl-block-snippet';
-                // Truncate to 80 chars display (UTF-16 units, sufficient
-                // for display purposes per PRD §3).
-                snippet.textContent = '“' + truncate(block.text_snippet, 80) + '”';
+                // Truncate to 240 chars display (R2 bump from 80).
+                snippet.textContent = '”' + truncate(block.text_snippet, 240) + '”';
                 row.appendChild(snippet);
             }
 
@@ -456,21 +887,452 @@
                 if (block.block_id) emitHighlight(block.block_id);
             });
 
+            // “Assert from block” affordance — only in pending_review.
+            // For a Possibly-Missed block row, we don't have a pre-existing field_path
+            // so we let the clinician supply both value and the block as the source.
+            // We create a synthetic assert form with a field_path input.
+            if (isPending) {
+                var assertBtn = document.createElement('button');
+                assertBtn.type = 'button';
+                assertBtn.className = 'hitl-assert-btn';
+                assertBtn.textContent = labels.assertBtnLabel || '+ Assert from block';
+                row.appendChild(assertBtn);
+
+                assertBtn.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    openBlockAssertForm(row, block, null, extractionId, allBlocks);
+                });
+            }
+
             return row;
+        }
+
+        /**
+         * Build a Missed row (stripped field) with “Assert from block” affordance.
+         *
+         * @param {Object} field          The stripped field descriptor.
+         * @param {Object} opts           { extractionId, allBlocks, isPending }
+         * @returns {HTMLElement}
+         */
+        function buildMissedRow(field, opts) {
+            opts = opts || {};
+            var isPending    = opts.isPending !== false;
+            var extractionId = opts.extractionId || '';
+            var allBlocks    = Array.isArray(opts.allBlocks) ? opts.allBlocks : [];
+
+            var row = document.createElement('div');
+            row.className = 'hitl-field-row';
+            row.setAttribute('role', 'listitem');
+            row.setAttribute('data-block-id', field.source_block_id || '');
+            row.setAttribute('data-status', 'stripped');
+            row.setAttribute('data-field-path', field.field_path || '');
+
+            var pathEl = document.createElement('span');
+            pathEl.className = 'hitl-field-path';
+            pathEl.textContent = field.field_path || '';
+            row.appendChild(pathEl);
+
+            if (field.verifier_reason) {
+                var reasonEl = document.createElement('span');
+                reasonEl.className = 'hitl-reason';
+                reasonEl.title = field.verifier_reason;
+                reasonEl.textContent = humanizeReason(field.verifier_reason);
+                row.appendChild(reasonEl);
+            }
+
+            var badge = document.createElement('span');
+            badge.className = 'hitl-blk-badge hitl-blk-badge--stripped';
+            badge.setAttribute('data-block-id', field.source_block_id || '');
+            badge.textContent = field.source_block_id ? field.source_block_id : 'no block';
+            badge.setAttribute('aria-label', field.source_block_id
+                ? ('Block ' + field.source_block_id)
+                : 'No block ID');
+            row.appendChild(badge);
+
+            if (field.source_block_id) {
+                row.addEventListener('click', function () {
+                    emitHighlight(field.source_block_id);
+                });
+            }
+
+            // “Assert from block” affordance — only in pending_review.
+            if (isPending) {
+                var assertBtn = document.createElement('button');
+                assertBtn.type = 'button';
+                assertBtn.className = 'hitl-assert-btn';
+                assertBtn.textContent = labels.assertBtnLabel || '+ Assert from block';
+                row.appendChild(assertBtn);
+
+                assertBtn.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    openBlockAssertForm(row, null, field.field_path, extractionId, allBlocks);
+                });
+            }
+
+            return row;
+        }
+
+        /**
+         * Open an “Assert from block” form inside a Missed or Possibly-Missed row.
+         *
+         * The form shows:
+         *   1. A block picker list (text/table blocks filtered, grouped by page).
+         *   2. A text input for the asserted value.
+         *   3. Save / Cancel buttons.
+         *
+         * Hover over a picker item → emitHighlight on the PDF overlay.
+         * Select a picker item → pre-fill context, unhide Save.
+         *
+         * @param {HTMLElement}  row           The row to append the form into.
+         * @param {Object|null}  preselBlock   If known (block row), pre-select this block.
+         * @param {string|null}  knownFieldPath  If known (missed row), pre-fill.
+         * @param {string}       extractionId
+         * @param {Object[]}     allBlocks     All docling_blocks from the current extraction.
+         */
+        function openBlockAssertForm(row, preselBlock, knownFieldPath, extractionId, allBlocks) {
+            // Only one form open at a time per row.
+            if (row.querySelector('.hitl-assert-form')) return;
+
+            // Filter to text + table blocks.
+            var PERMITTED_TYPES = { text: true, table: true, paragraph: true,
+                                     section_header: true, list_item: true };
+            var filteredBlocks = allBlocks.filter(function (b) {
+                if (!b.block_type) return true; // unknown type — include
+                return PERMITTED_TYPES[String(b.block_type).toLowerCase()] === true;
+            });
+
+            var form = document.createElement('div');
+            form.className = 'hitl-assert-form';
+
+            // Build block picker.
+            var picker = document.createElement('div');
+            picker.className = 'hitl-block-picker';
+            picker.setAttribute('role', 'listbox');
+            picker.setAttribute('aria-label', 'Source block picker');
+
+            var selectedBlockId = preselBlock ? (preselBlock.block_id || null) : null;
+
+            // Group blocks by page for display.
+            filteredBlocks.forEach(function (blk) {
+                var item = document.createElement('div');
+                item.className = 'hitl-block-picker-item';
+                item.setAttribute('role', 'option');
+                item.setAttribute('data-block-id', blk.block_id || '');
+                item.setAttribute('aria-selected', blk.block_id === selectedBlockId ? 'true' : 'false');
+
+                var pageSpan = document.createElement('span');
+                pageSpan.className = 'hitl-picker-page';
+                pageSpan.textContent = 'p.' + (blk.page || '?');
+                item.appendChild(pageSpan);
+
+                if (blk.block_type) {
+                    var typeSpan = document.createElement('span');
+                    typeSpan.className = 'hitl-picker-type';
+                    typeSpan.textContent = blk.block_type;
+                    item.appendChild(typeSpan);
+                }
+
+                if (blk.text_snippet) {
+                    var snip = document.createElement('span');
+                    snip.className = 'hitl-picker-snippet';
+                    snip.textContent = '”' + truncate(blk.text_snippet, 240) + '”';
+                    item.appendChild(snip);
+                }
+
+                // Hover → highlight on PDF overlay.
+                item.addEventListener('mouseenter', function () {
+                    if (blk.block_id) emitHighlight(blk.block_id);
+                });
+
+                // Click → select this block.
+                item.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    selectedBlockId = blk.block_id || null;
+                    // Update aria-selected on all items.
+                    var allItems = picker.querySelectorAll('.hitl-block-picker-item');
+                    for (var ii = 0; ii < allItems.length; ii++) {
+                        allItems[ii].classList.remove('is-selected');
+                        allItems[ii].setAttribute('aria-selected', 'false');
+                    }
+                    item.classList.add('is-selected');
+                    item.setAttribute('aria-selected', 'true');
+                    if (blk.block_id) emitHighlight(blk.block_id);
+                });
+
+                if (preselBlock && blk.block_id === selectedBlockId) {
+                    item.classList.add('is-selected');
+                    item.setAttribute('aria-selected', 'true');
+                }
+
+                picker.appendChild(item);
+            });
+
+            form.appendChild(picker);
+
+            // Value row.
+            var valueRow = document.createElement('div');
+            valueRow.className = 'hitl-assert-value-row';
+
+            // Field path input (only shown if knownFieldPath is null — block rows).
+            var fieldPathInput = null;
+            if (!knownFieldPath) {
+                var fpLabel = document.createElement('span');
+                fpLabel.className = 'hitl-assert-label';
+                fpLabel.textContent = 'Field path:';
+                valueRow.appendChild(fpLabel);
+
+                fieldPathInput = document.createElement('input');
+                fieldPathInput.type = 'text';
+                fieldPathInput.className = 'hitl-assert-input';
+                fieldPathInput.placeholder = 'e.g. patient.name';
+                fieldPathInput.setAttribute('aria-label', 'Field path');
+                valueRow.appendChild(fieldPathInput);
+            }
+
+            var valLabel = document.createElement('span');
+            valLabel.className = 'hitl-assert-label';
+            valLabel.textContent = labels.valueLabel || 'Value:';
+            valueRow.appendChild(valLabel);
+
+            var valInput = document.createElement('input');
+            valInput.type = 'text';
+            valInput.className = 'hitl-assert-input';
+            valInput.setAttribute('aria-label', 'Asserted value');
+            // PHI: value is user-supplied and sent only to authed backend.
+            valueRow.appendChild(valInput);
+
+            var saveBtn = document.createElement('button');
+            saveBtn.type = 'button';
+            saveBtn.className = 'hitl-assert-save-btn';
+            saveBtn.textContent = 'Save';
+            valueRow.appendChild(saveBtn);
+
+            var cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.className = 'hitl-assert-cancel-btn';
+            cancelBtn.textContent = labels.assertCancelLabel || 'Cancel';
+            valueRow.appendChild(cancelBtn);
+
+            var msgEl = document.createElement('span');
+            msgEl.style.cssText = 'font-size:11px;color:#6b7280;';
+            valueRow.appendChild(msgEl);
+
+            form.appendChild(valueRow);
+            row.appendChild(form);
+
+            if (valInput) valInput.focus();
+
+            cancelBtn.addEventListener('click', function () {
+                if (form.parentNode) form.parentNode.removeChild(form);
+            });
+
+            saveBtn.addEventListener('click', function () {
+                var fieldPath = knownFieldPath || (fieldPathInput ? fieldPathInput.value.trim() : '');
+                var newValue  = valInput.value;
+
+                if (!fieldPath) {
+                    msgEl.textContent = 'Field path is required.';
+                    msgEl.style.color = '#dc2626';
+                    return;
+                }
+                if (!selectedBlockId) {
+                    msgEl.textContent = labels.assertPickBlock || 'Select a source block above.';
+                    msgEl.style.color = '#dc2626';
+                    return;
+                }
+
+                saveBtn.disabled  = true;
+                cancelBtn.disabled = true;
+                msgEl.textContent = labels.assertSave || 'Asserting…';
+                msgEl.style.color = '#6b7280';
+
+                var payload = {
+                    extraction_id:   Number(extractionId),
+                    field_path:      fieldPath,
+                    clinician_value: newValue,
+                    source_block_id: selectedBlockId
+                };
+
+                postFieldEdit(payload, function () {
+                    // Success — update shadow state.
+                    shadowEdits[fieldPath] = {
+                        status:          'manually_added',
+                        clinician_value: newValue,
+                        source_block_id: selectedBlockId
+                    };
+
+                    // Dispatch refresh event — renderRightPane will re-run.
+                    try {
+                        var ev = new CustomEvent('oe-copilot-hitl/extraction-updated', {
+                            bubbles: true,
+                            detail: { docId: currentDocId }
+                        });
+                        document.dispatchEvent(ev);
+                    } catch (evErr) { /* non-critical */ }
+
+                    // Move row visually from Missed/Possibly-Missed to Captured.
+                    if (form.parentNode) form.parentNode.removeChild(form);
+                    convertRowToAdded(row, fieldPath, selectedBlockId);
+                }, function (errCode) {
+                    msgEl.textContent = errCode === 'forbidden'
+                        ? (labels.editSaveForbidden || 'Edit not allowed.')
+                        : (labels.assertSaveError || 'Assert failed. Please try again.');
+                    msgEl.style.color = '#dc2626';
+                    saveBtn.disabled  = false;
+                    cancelBtn.disabled = false;
+                });
+            });
+
+            // Keyboard nav.
+            valInput.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') { e.preventDefault(); saveBtn.click(); }
+                if (e.key === 'Escape') { cancelBtn.click(); }
+            });
+        }
+
+        /**
+         * After a successful assert-from-block save, move the row from
+         * Missed/Possibly-Missed into the Captured section.
+         *
+         * @param {HTMLElement} row
+         * @param {string}      fieldPath
+         * @param {string}      blockId
+         */
+        function convertRowToAdded(row, fieldPath, blockId) {
+            row.setAttribute('data-status', 'manually_added');
+            row.setAttribute('data-block-id', blockId || '');
+
+            // Remove the stripped badge + reason if present.
+            var strippedBadge = row.querySelector('.hitl-blk-badge--stripped');
+            if (strippedBadge) strippedBadge.parentNode.removeChild(strippedBadge);
+            var reasonEl = row.querySelector('.hitl-reason');
+            if (reasonEl) reasonEl.parentNode.removeChild(reasonEl);
+            var assertBtn = row.querySelector('.hitl-assert-btn');
+            if (assertBtn) assertBtn.parentNode.removeChild(assertBtn);
+
+            // Add manually-added badge.
+            var addedBadge = document.createElement('span');
+            addedBadge.className = 'hitl-badge--added';
+            addedBadge.textContent = labels.clinicianAdded || 'clinician added';
+
+            // Add new block ID badge.
+            var newBlkBadge = document.createElement('span');
+            newBlkBadge.className = 'hitl-blk-badge hitl-blk-badge--manually_added';
+            newBlkBadge.setAttribute('data-block-id', blockId || '');
+            newBlkBadge.textContent = blockId || '';
+
+            var pathEl = row.querySelector('.hitl-field-path');
+            if (pathEl) {
+                if (pathEl.textContent !== fieldPath) {
+                    pathEl.textContent = fieldPath;
+                }
+            }
+
+            row.appendChild(addedBadge);
+            row.appendChild(newBlkBadge);
+
+            // Move row to captured list.
+            var capturedList = document.getElementById('hitl-list-captured');
+            if (capturedList) {
+                var emptyEl = capturedList.querySelector('.hitl-empty-section');
+                if (emptyEl) capturedList.removeChild(emptyEl);
+                capturedList.appendChild(row);
+            }
+
+            // Update count badges.
+            refreshCountBadges();
+        }
+
+        /**
+         * Re-count field rows in each section and update the count badges.
+         * Called after in-place mutations (assert-from-block move, etc.).
+         */
+        function refreshCountBadges() {
+            if (el.listCaptured && el.cntCaptured) {
+                el.cntCaptured.textContent = String(
+                    el.listCaptured.querySelectorAll('.hitl-field-row').length
+                );
+            }
+            if (el.listMissed && el.cntMissed) {
+                el.cntMissed.textContent = String(
+                    el.listMissed.querySelectorAll('.hitl-field-row').length
+                );
+            }
+            if (el.listPossibly && el.cntPossibly) {
+                el.cntPossibly.textContent = String(
+                    el.listPossibly.querySelectorAll('.hitl-field-row').length
+                );
+            }
         }
 
         function renderRightPane(extraction) {
             var fields = Array.isArray(extraction.fields) ? extraction.fields : [];
             var blocks = Array.isArray(extraction.docling_blocks) ? extraction.docling_blocks : [];
+            var extractionId = String((extraction && extraction.extraction_id) || '');
+            var extractionStatus = (extraction && typeof extraction.status === 'string')
+                ? extraction.status : '';
+            var isPending = (!extractionStatus || extractionStatus === 'pending_review');
 
-            // Build a set of cited block IDs.
+            // Build a set of cited block IDs (including manually_added).
             var citedBlockIds = {};
             fields.forEach(function (f) {
                 if (f.source_block_id) citedBlockIds[f.source_block_id] = true;
             });
+            // Also cite blocks for in-session shadow additions.
+            Object.keys(shadowEdits).forEach(function (fp) {
+                var s = shadowEdits[fp];
+                if (s.source_block_id) citedBlockIds[s.source_block_id] = true;
+            });
 
-            var captured = fields.filter(function (f) { return f.status === 'verified'; });
-            var missed   = fields.filter(function (f) { return f.status === 'stripped'; });
+            // Partition fields into display buckets.
+            // manually_edited / manually_added rows come from backend
+            // (from a prior session) or from this session's shadow.
+            var captured = [];
+            var missed   = [];
+
+            fields.forEach(function (f) {
+                var effectiveStatus = f.status;
+                // Check if this session has a shadow for this field.
+                var shadow = shadowEdits[f.field_path];
+                if (shadow) {
+                    effectiveStatus = shadow.status;
+                }
+                if (effectiveStatus === 'verified' ||
+                    effectiveStatus === 'manually_edited' ||
+                    effectiveStatus === 'manually_added') {
+                    captured.push({
+                        field_path:     f.field_path,
+                        value:          shadow ? shadow.clinician_value : f.value,
+                        source_block_id: f.source_block_id,
+                        status:          effectiveStatus,
+                        original_value:  shadow ? f.value : null,
+                        is_carried_over: f.is_carried_over || false
+                    });
+                } else if (effectiveStatus === 'stripped') {
+                    missed.push(f);
+                }
+            });
+
+            // Also surface shadow-added entries that are NOT yet in the fields array
+            // (i.e., the user just added them in this session before a re-fetch).
+            Object.keys(shadowEdits).forEach(function (fp) {
+                var shadow = shadowEdits[fp];
+                if (shadow.status !== 'manually_added') return;
+                var alreadyInFields = fields.some(function (f) {
+                    return f.field_path === fp;
+                });
+                if (!alreadyInFields) {
+                    captured.push({
+                        field_path:      fp,
+                        value:           shadow.clinician_value,
+                        source_block_id: shadow.source_block_id || null,
+                        status:          'manually_added',
+                        original_value:  null,
+                        is_carried_over: false
+                    });
+                }
+            });
+
             var possibly = blocks.filter(function (b) { return !citedBlockIds[b.block_id]; });
 
             // Update count badges.
@@ -486,7 +1348,13 @@
                 } else {
                     captured.forEach(function (f) {
                         el.listCaptured.appendChild(
-                            buildFieldRow('verified', f.field_path, f.value, f.source_block_id, null)
+                            buildFieldRow(f.status, f.field_path, f.value,
+                                          f.source_block_id, null, {
+                                extractionId:  extractionId,
+                                isPending:     isPending,
+                                originalValue: f.original_value,
+                                isCarriedOver: f.is_carried_over
+                            })
                         );
                     });
                 }
@@ -500,7 +1368,11 @@
                 } else {
                     missed.forEach(function (f) {
                         el.listMissed.appendChild(
-                            buildFieldRow('stripped', f.field_path, null, f.source_block_id, f.verifier_reason)
+                            buildMissedRow(f, {
+                                extractionId: extractionId,
+                                allBlocks:    blocks,
+                                isPending:    isPending
+                            })
                         );
                     });
                 }
@@ -513,12 +1385,19 @@
                     el.listPossibly.innerHTML = '<div class="hitl-empty-section">None</div>';
                 } else {
                     possibly.forEach(function (b) {
-                        el.listPossibly.appendChild(buildBlockRow(b));
+                        el.listPossibly.appendChild(
+                            buildBlockRow(b, {
+                                extractionId: extractionId,
+                                allBlocks:    blocks,
+                                isPending:    isPending
+                            })
+                        );
                     });
                 }
             }
 
-            // Reprocess button: enable only if there are stripped fields.
+            // Reprocess button: enable only if there are stripped fields or
+            // if in pending_review (always allow reprocess on pending).
             if (el.reprocessBtn) {
                 var hasStripped = missed.length > 0;
                 el.reprocessBtn.disabled = !hasStripped;
@@ -585,14 +1464,27 @@
         /**
          * Determine the stroke status for a given block_id based on
          * whether it appears as a source for any field, and if so which
-         * status (verified/stripped).
+         * status (verified/stripped/manually_added).
          *
-         * Returns: 'verified' | 'stripped' | 'uncited'
+         * Checks session-level shadowEdits first so in-session asserts are
+         * reflected on the PDF overlay immediately after save.
+         *
+         * Returns: 'verified' | 'stripped' | 'uncited' | 'manually_added'
          */
         function blockStatus(blockId, fields) {
+            // Check shadow state first (in-session asserts).
+            var shadowKeys = Object.keys(shadowEdits);
+            for (var s = 0; s < shadowKeys.length; s++) {
+                var shadow = shadowEdits[shadowKeys[s]];
+                if (shadow.source_block_id === blockId) {
+                    return 'manually_added';
+                }
+            }
             for (var i = 0; i < fields.length; i++) {
                 if (fields[i].source_block_id === blockId) {
-                    return fields[i].status === 'verified' ? 'verified' : 'stripped';
+                    var st = fields[i].status;
+                    if (st === 'manually_added') return 'manually_added';
+                    return st === 'verified' ? 'verified' : 'stripped';
                 }
             }
             return 'uncited';
@@ -601,6 +1493,12 @@
         function renderPdfPane(docId, extraction) {
             var fields = Array.isArray(extraction.fields) ? extraction.fields : [];
             var blocks = Array.isArray(extraction.docling_blocks) ? extraction.docling_blocks : [];
+
+            // Detach the legend before clearing so it survives the wipe.
+            var legendEl = document.getElementById('hitl-bbox-legend');
+            if (legendEl && legendEl.parentNode === el.pdfPane) {
+                el.pdfPane.removeChild(legendEl);
+            }
 
             // Clear existing pages.
             while (el.pdfPane.firstChild) {
@@ -623,6 +1521,8 @@
                 errEl.textContent = labels.pdfPlaceholder ||
                     'PDF.js not loaded — install vendor/pdfjs/ bundle.';
                 el.pdfPane.appendChild(errEl);
+                // Re-append legend even on placeholder path.
+                if (legendEl) el.pdfPane.appendChild(legendEl);
                 // Still render right-pane without PDF context.
                 return;
             }
@@ -652,13 +1552,19 @@
                     pagePromises.push(renderPage(pdfDoc, pageNum, fields, blocks));
                 }
 
-                return Promise.all(pagePromises);
+                // Re-append legend after pages (Promise.all is async but legend
+                // can be re-appended after page renders resolve).
+                return Promise.all(pagePromises).then(function () {
+                    if (legendEl) el.pdfPane.appendChild(legendEl);
+                });
             }).catch(function () {
                 loadingEl.textContent = '';
                 var err = document.createElement('div');
                 err.className = 'hitl-pdf-error';
                 err.textContent = labels.pdfError || 'Unable to render PDF preview.';
                 el.pdfPane.appendChild(err);
+                // Re-append legend even on error.
+                if (legendEl) el.pdfPane.appendChild(legendEl);
             });
 
             // Left-pane highlight listener: toggle .is-highlighted on SVG rects.
@@ -789,6 +1695,17 @@
             setFooterMsg('');
             if (el.reprocessBtn) el.reprocessBtn.disabled = true;
 
+            // Reset R2 session state on every modal open.
+            shadowEdits    = {};
+            currentDocId   = docId || null;
+            currentExtraction = extraction || null;
+
+            // Reset discard-edits checkbox (must never persist between sessions).
+            if (el.discardEditsChk) el.discardEditsChk.checked = false;
+
+            // Hide "just re-extracted" pill on fresh open.
+            if (el.hdrReextracted) el.hdrReextracted.style.display = 'none';
+
             // Show/hide Approve + Reject based on current extraction status.
             var extractionStatus = (extraction && typeof extraction.status === 'string')
                 ? extraction.status : '';
@@ -844,6 +1761,9 @@
             var csrfToken    = cfg.csrfToken    || '';
             var reprocessUrl = cfg.reprocessUrl || '';
 
+            // Read discard-manual-edits opt-in.
+            var discardManualEdits = !!(el.discardEditsChk && el.discardEditsChk.checked);
+
             if (el.reprocessBtn) {
                 el.reprocessBtn.disabled = true;
                 el.reprocessBtn.innerHTML =
@@ -868,26 +1788,27 @@
                 var body = null;
                 try { body = JSON.parse(xhr.responseText); } catch (parseErr) { /* ignore */ }
 
-                // The backend reprocess endpoint emits two distinct shapes:
-                //   1. HTTP 200 success:  {status:"ok"|"refused"|"error",
-                //                          new_extraction_id, total_fields,
-                //                          stripped_fields}  — status echoes the
-                //                          agent's verdict; "ok" means a new
-                //                          active extraction landed, anything
-                //                          else means the ladder refused.
-                //   2. HTTP non-2xx:      {status:"error", detail:"<token>"}  —
-                //                          pre-flight failures (auth, CSRF,
-                //                          patient-id mismatch, etc.).
-                // Both shapes are handled here. Older agent error codes
-                // (cost_ceiling_exceeded, extraction_low_grounding) are kept
-                // as legacy fallbacks in case they ever surface via body.error
-                // or body.detail in a future propagation.
+                // R2 contract: backend now writes the new attempt with
+                // status='pending_review' and returns 200 with the new
+                // extraction data (no auto-round-trip). The response status
+                // field will be 'pending_review' (not 'ok') for a successful
+                // reprocess. We re-fetch the extraction to get the full data.
+                //
+                // Legacy 'ok' shape is kept as a fallback in case an older
+                // backend is encountered.
+                //
+                // Both shapes:
+                //   1. HTTP 200: { status:"pending_review"|"ok"|"refused"|"error",
+                //                  new_extraction_id, ... }
+                //   2. HTTP non-2xx: { status:"error", detail:"<token>" }
 
                 var agentStatus = body && typeof body.status === 'string' ? body.status : null;
+                var isSuccess   = xhr.status === 200 &&
+                                  (agentStatus === 'pending_review' || agentStatus === 'ok');
 
-                if (xhr.status === 200 && agentStatus === 'ok') {
+                if (isSuccess) {
                     setFooterMsg(labels.reprocessOk || 'Reprocessed successfully.', 'success');
-                    // Re-fetch and re-render.
+                    // Re-fetch and re-render in-place so the modal stays open.
                     var url = (cfg.extractionForDocUrl || '') +
                               '?doc_id=' + encodeURIComponent(docId);
                     var xhr2 = new XMLHttpRequest();
@@ -898,10 +1819,48 @@
                         if (xhr2.status === 200) {
                             var data;
                             try { data = JSON.parse(xhr2.responseText); } catch (e) { return; }
+
+                            // Clear session shadow edits if discard was checked,
+                            // otherwise carry them over.
+                            if (discardManualEdits) {
+                                shadowEdits = {};
+                            }
+                            // Reset the discard checkbox.
+                            if (el.discardEditsChk) el.discardEditsChk.checked = false;
+
+                            currentExtraction = data;
+
+                            // Update footer buttons (new attempt = pending_review).
+                            var newStatus = (data && typeof data.status === 'string')
+                                ? data.status : 'pending_review';
+                            updateFooterButtons(newStatus);
+
+                            // Update approve/reject button data attrs.
+                            var newExtractionId = String((data && data.extraction_id) || '');
+                            if (el.approveBtn) {
+                                el.approveBtn.setAttribute('data-doc-id', docId);
+                                el.approveBtn.setAttribute('data-extraction-id', newExtractionId);
+                            }
+                            if (el.rejectBtn) {
+                                el.rejectBtn.setAttribute('data-doc-id', docId);
+                                el.rejectBtn.setAttribute('data-extraction-id', newExtractionId);
+                            }
+                            if (el.reprocessBtn) {
+                                el.reprocessBtn.setAttribute('data-doc-id', docId);
+                                el.reprocessBtn.setAttribute('data-extraction-id', newExtractionId);
+                            }
+
+                            // Show "just re-extracted" pill.
+                            if (el.hdrReextracted) {
+                                el.hdrReextracted.style.display = '';
+                            }
+
                             clearHighlightListeners();
                             renderHeader(data);
                             renderRightPane(data);
                             renderPdfPane(docId, data);
+                            setFooterMsg('');
+
                             // Also refresh the banner in the parent document.
                             try {
                                 var bannerEvent = new CustomEvent('oe-copilot-hitl/extraction-updated', {
@@ -941,7 +1900,9 @@
                     if (el.reprocessBtn) el.reprocessBtn.disabled = false;
                 }
             };
-            xhr.send(JSON.stringify({ extraction_id: extractionId }));
+            var reprocessPayload = { extraction_id: extractionId };
+            if (discardManualEdits) reprocessPayload.discard_manual_edits = true;
+            xhr.send(JSON.stringify(reprocessPayload));
         }
 
         // ---- 11. Event listeners ----------------------------------------
@@ -977,6 +1938,8 @@
 
         // Store docId/extractionId on the reprocess button when modal opens
         // so the button handler above can read them.
+        // Also keep currentExtraction / currentDocId in sync (openModal already
+        // does this, but this listener fires before openModal in some code paths).
         document.addEventListener('oe-copilot-hitl/open-modal', function (e) {
             var detail = e.detail || {};
             if (el.reprocessBtn && detail.extraction) {
@@ -988,13 +1951,22 @@
             }
         });
 
-        // Approve button click.
+        // Approve button click — with N-fields-not-saved confirmation gate.
         if (el.approveBtn) {
             el.approveBtn.addEventListener('click', function () {
-                var docId       = el.approveBtn.getAttribute('data-doc-id') || '';
+                var docId        = el.approveBtn.getAttribute('data-doc-id') || '';
                 var extractionId = el.approveBtn.getAttribute('data-extraction-id') || '';
                 if (!docId || !extractionId) return;
-                triggerApprove(docId, Number(extractionId));
+
+                // Count unresolved stripped fields.
+                var unresolved = unresolvedStrippedPaths(currentExtraction || {});
+                if (unresolved.length > 0) {
+                    // Show confirmation modal — do NOT call triggerApprove yet.
+                    showApproveConfirmation(unresolved, docId, Number(extractionId));
+                } else {
+                    // No unresolved strips — proceed directly.
+                    triggerApprove(docId, Number(extractionId));
+                }
             });
         }
 
@@ -1005,6 +1977,70 @@
                 var extractionId = el.rejectBtn.getAttribute('data-extraction-id') || '';
                 if (!docId || !extractionId) return;
                 triggerReject(docId, Number(extractionId));
+            });
+        }
+
+        // ---- Confirmation modal wiring ------------------------------------
+
+        // Acknowledgement checkbox → enable/disable "Approve anyway" button.
+        if (el.confirmAckChk) {
+            el.confirmAckChk.addEventListener('change', function () {
+                if (el.confirmApproveBtn) {
+                    el.confirmApproveBtn.disabled = !el.confirmAckChk.checked;
+                }
+            });
+        }
+
+        // "See all" expander click via keyboard (Space/Enter).
+        if (el.confirmSeeAll) {
+            el.confirmSeeAll.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    el.confirmSeeAll.click();
+                }
+            });
+        }
+
+        // Cancel → close confirmation modal only; review modal stays open.
+        if (el.confirmCancelBtn) {
+            el.confirmCancelBtn.addEventListener('click', function () {
+                if (typeof window.$ === 'function') {
+                    window.$('#hitl-confirm-approve-modal').modal('hide');
+                } else if (el.confirmModal) {
+                    el.confirmModal.classList.remove('show');
+                    el.confirmModal.style.display = 'none';
+                    var cbk2 = document.getElementById('hitl-confirm-backdrop');
+                    if (cbk2 && cbk2.parentNode) cbk2.parentNode.removeChild(cbk2);
+                }
+                // Re-enable the Approve button in the review modal footer.
+                if (el.approveBtn) {
+                    el.approveBtn.disabled = false;
+                    el.approveBtn.textContent = labels.approveBtn || 'Approve';
+                }
+                if (el.rejectBtn) el.rejectBtn.disabled = false;
+                setFooterMsg('');
+            });
+        }
+
+        // "Approve anyway" click → close confirm modal + POST approve.
+        if (el.confirmApproveBtn) {
+            el.confirmApproveBtn.addEventListener('click', function () {
+                var docId        = el.confirmApproveBtn.getAttribute('data-doc-id') || '';
+                var extractionId = el.confirmApproveBtn.getAttribute('data-extraction-id') || '';
+                if (!docId || !extractionId) return;
+
+                // Close the confirmation modal first.
+                if (typeof window.$ === 'function') {
+                    window.$('#hitl-confirm-approve-modal').modal('hide');
+                } else if (el.confirmModal) {
+                    el.confirmModal.classList.remove('show');
+                    el.confirmModal.style.display = 'none';
+                    var cbk3 = document.getElementById('hitl-confirm-backdrop');
+                    if (cbk3 && cbk3.parentNode) cbk3.parentNode.removeChild(cbk3);
+                }
+
+                // Now trigger the actual approve POST.
+                triggerApprove(docId, Number(extractionId));
             });
         }
 

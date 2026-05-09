@@ -91,6 +91,13 @@ header('Cache-Control: no-store');
                           style="display:none;"
                           aria-label="<?php echo xla('Model'); ?>">
                     </span>
+                    <!-- "Just re-extracted" pill — shown by JS after a reprocess -->
+                    <span class="hitl-chip hitl-chip--reextracted"
+                          id="hitl-hdr-reextracted"
+                          style="display:none;"
+                          aria-label="<?php echo xla('Just re-extracted'); ?>">
+                        &#8635; <?php echo xlt('Just re-extracted'); ?>
+                    </span>
                 </h5>
                 <button type="button"
                         class="close"
@@ -111,6 +118,28 @@ header('Cache-Control: no-store');
                             <?php echo xlt('Loading document…'); ?>
                         </div>
                         <!-- hitl-review.js appends .hitl-pdf-page-wrap elements here -->
+
+                        <!-- Bbox colour legend (sticky bottom of left pane) -->
+                        <div class="hitl-bbox-legend" id="hitl-bbox-legend"
+                             role="note"
+                             aria-label="<?php echo xla('Bbox colour legend'); ?>">
+                            <span class="hitl-bbox-legend-item">
+                                <span class="hitl-bbox-swatch hitl-bbox-swatch--verified"></span>
+                                <?php echo xlt('Verified'); ?>
+                            </span>
+                            <span class="hitl-bbox-legend-item">
+                                <span class="hitl-bbox-swatch hitl-bbox-swatch--stripped"></span>
+                                <?php echo xlt('Stripped'); ?>
+                            </span>
+                            <span class="hitl-bbox-legend-item">
+                                <span class="hitl-bbox-swatch hitl-bbox-swatch--uncited"></span>
+                                <?php echo xlt('Uncited'); ?>
+                            </span>
+                            <span class="hitl-bbox-legend-item">
+                                <span class="hitl-bbox-swatch hitl-bbox-swatch--manually_added"></span>
+                                <?php echo xlt('Clinician added'); ?>
+                            </span>
+                        </div>
                     </div>
 
                     <!-- Right pane: field sections -->
@@ -181,6 +210,13 @@ header('Cache-Control: no-store');
                         data-dismiss="modal">
                     <?php echo xlt('Close'); ?>
                 </button>
+                <!-- Discard manual edits checkbox — shown above Reprocess. Reset
+                     to unchecked on every modal open (JS handles this). -->
+                <label class="hitl-discard-edits-row" id="hitl-discard-edits-row"
+                       style="display:none;">
+                    <input type="checkbox" id="hitl-discard-edits-chk">
+                    <?php echo xlt('Discard manual edits on reprocess'); ?>
+                </label>
                 <button type="button"
                         class="btn btn-warning btn-sm"
                         id="hitl-reprocess-btn"
@@ -210,6 +246,73 @@ header('Cache-Control: no-store');
     </div><!-- .modal-dialog -->
 </div><!-- #hitl-review-modal -->
 
+<!-- ====================================================================
+     Confirmation modal — "N fields will not be saved"
+     Stacked above the review modal. data-backdrop="static" and
+     data-keyboard="false" force explicit clinician choice.
+     z-index override in hitl-review.css (.hitl-confirm-backdrop + #hitl-confirm-approve-modal).
+     ==================================================================== -->
+<div class="modal fade"
+     id="hitl-confirm-approve-modal"
+     tabindex="-1"
+     role="dialog"
+     data-backdrop="static"
+     data-keyboard="false"
+     aria-labelledby="hitl-confirm-approve-label"
+     aria-modal="true">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="hitl-confirm-approve-label">
+                    <?php echo xlt('Confirm approval'); ?>
+                </h5>
+                <!-- No close X — static backdrop; must pick Cancel or Approve anyway -->
+            </div>
+            <div class="modal-body">
+                <!-- JS writes the count + field list into these elements -->
+                <p id="hitl-confirm-field-count" class="mb-1" style="font-weight:600;">
+                    &mdash;
+                </p>
+                <ul class="hitl-confirm-field-list"
+                    id="hitl-confirm-field-list"
+                    aria-label="<?php echo xla('Fields that will not be saved'); ?>">
+                </ul>
+                <span id="hitl-confirm-see-all"
+                      class="hitl-confirm-see-all"
+                      style="display:none;"
+                      role="button"
+                      tabindex="0">
+                    <?php echo xlt('See all'); ?>
+                </span>
+
+                <!-- Required acknowledgement checkbox -->
+                <div class="hitl-confirm-checkbox-row">
+                    <input type="checkbox"
+                           id="hitl-confirm-ack-chk"
+                           aria-required="true">
+                    <label for="hitl-confirm-ack-chk" style="margin:0;cursor:pointer;">
+                        <?php echo xlt('I understand these fields will not be saved to the chart'); ?>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button"
+                        class="btn btn-secondary btn-sm"
+                        id="hitl-confirm-cancel-btn">
+                    <?php echo xlt('Cancel'); ?>
+                </button>
+                <button type="button"
+                        class="btn btn-success btn-sm hitl-confirm-approve-btn"
+                        id="hitl-confirm-approve-btn"
+                        disabled
+                        aria-label="<?php echo xla('Approve despite missing fields'); ?>">
+                    <?php echo xlt('Approve anyway'); ?>
+                </button>
+            </div>
+        </div><!-- .modal-content -->
+    </div><!-- .modal-dialog -->
+</div><!-- #hitl-confirm-approve-modal -->
+
 <script>
 /**
  * HITL config block — mirrors OE_COPILOT_CONFIG pattern from chat-panel.php.
@@ -217,33 +320,56 @@ header('Cache-Control: no-store');
  * above prevents caching of this fragment.
  */
 window.OE_COPILOT_HITL_CONFIG = {
-    csrfToken: <?php echo js_escape($csrfToken); ?>,
+    csrfToken:           <?php echo js_escape($csrfToken); ?>,
     extractionForDocUrl: <?php echo js_escape($publicRoot . '/extraction_for_doc.php'); ?>,
-    reprocessUrl: <?php echo js_escape($publicRoot . '/reprocess.php'); ?>,
-    approveUrl:   <?php echo js_escape($publicRoot . '/approve_extraction.php'); ?>,
-    rejectUrl:    <?php echo js_escape($publicRoot . '/reject_extraction.php'); ?>,
-    pdfWorkerSrc: <?php echo js_escape($publicRoot . '/vendor/pdfjs/pdf.worker.min.js?v=' . $pdfJsVer); ?>,
+    reprocessUrl:        <?php echo js_escape($publicRoot . '/reprocess.php'); ?>,
+    approveUrl:          <?php echo js_escape($publicRoot . '/approve_extraction.php'); ?>,
+    rejectUrl:           <?php echo js_escape($publicRoot . '/reject_extraction.php'); ?>,
+    editFieldUrl:        <?php echo js_escape($publicRoot . '/edit_extracted_field.php'); ?>,
+    pdfWorkerSrc:        <?php echo js_escape($publicRoot . '/vendor/pdfjs/pdf.worker.min.js?v=' . $pdfJsVer); ?>,
     labels: {
-        loadingDoc:       <?php echo js_escape(xl('Loading document…')); ?>,
-        pdfError:         <?php echo js_escape(xl('Unable to render PDF preview.')); ?>,
-        pdfPlaceholder:   <?php echo js_escape(xl('PDF.js not loaded — install vendor/pdfjs/ bundle.')); ?>,
-        reprocessing:     <?php echo js_escape(xl('Reprocessing… (may take up to 30s)')); ?>,
-        reprocessOk:      <?php echo js_escape(xl('Reprocessed successfully.')); ?>,
-        errorCostCap:     <?php echo js_escape(xl('Reprocess refused: cost ceiling exceeded.')); ?>,
-        errorLowGround:   <?php echo js_escape(xl('Reprocess refused: extraction low grounding.')); ?>,
-        errorGeneric:     <?php echo js_escape(xl('Reprocess failed. Please try again.')); ?>,
-        noFieldsMissed:   <?php echo js_escape(xl('No missed fields — reprocess is not needed.')); ?>,
-        confirmReprocess: <?php echo js_escape(xl('Reprocess this document? This will consume API credits.')); ?>,
-        approving:        <?php echo js_escape(xl('Approving…')); ?>,
-        approveOk:        <?php echo js_escape(xl('Approved — written to chart.')); ?>,
-        approveError:     <?php echo js_escape(xl('Approve failed. Please try again.')); ?>,
-        approveForbidden: <?php echo js_escape(xl('Approve not allowed for this account.')); ?>,
-        confirmReject:    <?php echo js_escape(xl('Reject this extraction? It will not be written to the chart.')); ?>,
-        rejecting:        <?php echo js_escape(xl('Rejecting…')); ?>,
-        rejectOk:         <?php echo js_escape(xl('Extraction rejected.')); ?>,
-        rejectError:      <?php echo js_escape(xl('Reject failed. Please try again.')); ?>,
-        rejectForbidden:  <?php echo js_escape(xl('Reject not allowed for this account.')); ?>,
-        errorForbidden:   <?php echo js_escape(xl('Action not allowed for this account.')); ?>
+        loadingDoc:           <?php echo js_escape(xl('Loading document…')); ?>,
+        pdfError:             <?php echo js_escape(xl('Unable to render PDF preview.')); ?>,
+        pdfPlaceholder:       <?php echo js_escape(xl('PDF.js not loaded — install vendor/pdfjs/ bundle.')); ?>,
+        reprocessing:         <?php echo js_escape(xl('Reprocessing… (may take up to 30s)')); ?>,
+        reprocessOk:          <?php echo js_escape(xl('Reprocessed successfully.')); ?>,
+        errorCostCap:         <?php echo js_escape(xl('Reprocess refused: cost ceiling exceeded.')); ?>,
+        errorLowGround:       <?php echo js_escape(xl('Reprocess refused: extraction low grounding.')); ?>,
+        errorGeneric:         <?php echo js_escape(xl('Reprocess failed. Please try again.')); ?>,
+        noFieldsMissed:       <?php echo js_escape(xl('No missed fields — reprocess is not needed.')); ?>,
+        confirmReprocess:     <?php echo js_escape(xl('Reprocess this document? This will consume API credits.')); ?>,
+        approving:            <?php echo js_escape(xl('Approving…')); ?>,
+        approveOk:            <?php echo js_escape(xl('Approved — written to chart.')); ?>,
+        approveError:         <?php echo js_escape(xl('Approve failed. Please try again.')); ?>,
+        approveForbidden:     <?php echo js_escape(xl('Approve not allowed for this account.')); ?>,
+        confirmReject:        <?php echo js_escape(xl('Reject this extraction? It will not be written to the chart.')); ?>,
+        rejecting:            <?php echo js_escape(xl('Rejecting…')); ?>,
+        rejectOk:             <?php echo js_escape(xl('Extraction rejected.')); ?>,
+        rejectError:          <?php echo js_escape(xl('Reject failed. Please try again.')); ?>,
+        rejectForbidden:      <?php echo js_escape(xl('Reject not allowed for this account.')); ?>,
+        errorForbidden:       <?php echo js_escape(xl('Action not allowed for this account.')); ?>,
+        editSave:             <?php echo js_escape(xl('Saving…')); ?>,
+        editSaveOk:           <?php echo js_escape(xl('Saved.')); ?>,
+        editSaveError:        <?php echo js_escape(xl('Save failed. Please try again.')); ?>,
+        editSaveForbidden:    <?php echo js_escape(xl('Edit not allowed for this account.')); ?>,
+        assertSave:           <?php echo js_escape(xl('Asserting…')); ?>,
+        assertSaveOk:         <?php echo js_escape(xl('Field asserted.')); ?>,
+        assertSaveError:      <?php echo js_escape(xl('Assert failed. Please try again.')); ?>,
+        assertPickBlock:      <?php echo js_escape(xl('Select a source block above, then enter the value.')); ?>,
+        assertBtnLabel:       <?php echo js_escape(xl('+ Assert from block')); ?>,
+        editBtnLabel:         <?php echo js_escape(xl('Edit')); ?>,
+        editCancelLabel:      <?php echo js_escape(xl('Cancel')); ?>,
+        assertCancelLabel:    <?php echo js_escape(xl('Cancel')); ?>,
+        clinicianEdited:      <?php echo js_escape(xl('clinician edited')); ?>,
+        clinicianAdded:       <?php echo js_escape(xl('clinician added')); ?>,
+        carriedOver:          <?php echo js_escape(xl('carried over')); ?>,
+        wasLabel:             <?php echo js_escape(xl('was:')); ?>,
+        nowLabel:             <?php echo js_escape(xl('now:')); ?>,
+        valueLabel:           <?php echo js_escape(xl('Value:')); ?>,
+        nFieldsNotSaved:      <?php echo js_escape(xl('field(s) will not be saved.')); ?>,
+        confirmApproveBtn:    <?php echo js_escape(xl('Approve anyway')); ?>,
+        seeAll:               <?php echo js_escape(xl('See all')); ?>,
+        seeLess:              <?php echo js_escape(xl('See less')); ?>
     }
 };
 </script>

@@ -25,9 +25,30 @@
  *       "source_block_id": "blk_4",
  *       "bbox_json": {"x":72.0,"y":540.0,"w":240.0,"h":18.0},
  *       "verifier_reason": null,
- *       "value": "Cholesterol, Total",     // ONLY for status=verified
+ *       "value": "Cholesterol, Total",     // ONLY for status=verified (post-approve)
  *       "clinical_table": "procedure_result",
  *       "clinical_row_id": 1234
+ *     },
+ *     {
+ *       "field_path": "allergies[0].substance",
+ *       "status": "manually_edited",        // R2: clinician edited the LLM value
+ *       "source_block_id": "blk_2",
+ *       "bbox_json": null,
+ *       "verifier_reason": null,
+ *       "value": "Penicillin",              // LLM-verified value (only if clinical_row_id set, i.e. post-approve)
+ *       "clinician_value": "Penicillin G",  // clinician-asserted value (always present for manually_edited)
+ *       "clinical_table": "lists",
+ *       "clinical_row_id": 88              // null if pre-approve
+ *     },
+ *     {
+ *       "field_path": "allergies[1].substance",
+ *       "status": "manually_added",         // R2: clinician-asserted row; no LLM value
+ *       "source_block_id": null,
+ *       "bbox_json": null,
+ *       "verifier_reason": null,
+ *       "clinician_value": "Aspirin",       // clinician-asserted value (always present for manually_added)
+ *       "clinical_table": null,
+ *       "clinical_row_id": null            // null if pre-approve
  *     },
  *     ...
  *   ],
@@ -41,7 +62,12 @@
  *   - For status=verified fields, the "value" is sourced from the clinical
  *     table row (NOT from extraction_json), so what the UI sees is what was
  *     actually persisted in OpenEMR — no unverified agent output shown.
- *   - For status=stripped fields, no "value" field is included.
+ *   - For status=manually_edited fields, "clinician_value" (always present) is
+ *     the clinician-asserted value; "value" (the LLM-side verified value) is
+ *     included only if clinical_row_id is set (post-approve).
+ *   - For status=manually_added fields, only "clinician_value" is present; no
+ *     "value" field (there is no LLM-side value for a clinician-added row).
+ *   - For status=stripped fields, no "value" and no "clinician_value" is included.
  *   - The raw extraction_json column is never returned to the browser.
  *   - docling_blocks text_snippet is included (it is document layout text,
  *     not agent-extracted field values).
@@ -137,7 +163,8 @@ $extractionId = (int) $ext['id'];
 $fieldRows = QueryUtils::fetchRecords(
     'SELECT `id`, `field_path`, `status`, `source_block_id`,
             `bbox_json`, `verifier_reason`,
-            `clinical_table`, `clinical_row_id`
+            `clinical_table`, `clinical_row_id`,
+            `clinician_value`
        FROM `co_pilot_extracted_fields`
       WHERE `extraction_id` = ?
       ORDER BY `id` ASC',
@@ -175,16 +202,48 @@ foreach ($fieldRows as $fieldRow) {
             : null,
     ];
 
-    // PHI custody: "value" is only included for verified fields, and sourced
-    // from the clinical table row (NOT from extraction_json).
+    // PHI custody: "value" is sourced from the clinical table row only (NOT
+    // from extraction_json).  clinician_value surfaces the clinician-asserted
+    // value for manually_edited / manually_added rows.
     if ($fieldStatus === 'verified' && $clinicalTable !== null && $clinicalRowId !== null) {
+        // Verified: value from clinical table; no clinician_value.
         $clinicalValue = fetchClinicalValue($clinicalTable, $clinicalRowId);
         if ($clinicalValue !== null) {
             $entry['value'] = $clinicalValue;
         }
         $entry['clinical_table']  = $clinicalTable;
         $entry['clinical_row_id'] = $clinicalRowId;
+    } elseif ($fieldStatus === 'manually_edited') {
+        // Manually edited: clinician_value always present.
+        // LLM-side value only if clinical_row_id is set (post-approve).
+        $clinicianValue = isset($fieldRow['clinician_value']) && $fieldRow['clinician_value'] !== null
+            ? (string) $fieldRow['clinician_value']
+            : null;
+        if ($clinicianValue !== null) {
+            $entry['clinician_value'] = $clinicianValue;
+        }
+        if ($clinicalTable !== null && $clinicalRowId !== null) {
+            $llmValue = fetchClinicalValue($clinicalTable, $clinicalRowId);
+            if ($llmValue !== null) {
+                $entry['value'] = $llmValue;
+            }
+            $entry['clinical_table']  = $clinicalTable;
+            $entry['clinical_row_id'] = $clinicalRowId;
+        }
+    } elseif ($fieldStatus === 'manually_added') {
+        // Manually added: clinician_value always present; no LLM-side value.
+        $clinicianValue = isset($fieldRow['clinician_value']) && $fieldRow['clinician_value'] !== null
+            ? (string) $fieldRow['clinician_value']
+            : null;
+        if ($clinicianValue !== null) {
+            $entry['clinician_value'] = $clinicianValue;
+        }
+        if ($clinicalTable !== null && $clinicalRowId !== null) {
+            $entry['clinical_table']  = $clinicalTable;
+            $entry['clinical_row_id'] = $clinicalRowId;
+        }
     }
+    // status='stripped': no value, no clinician_value — entry is already complete.
 
     $fields[] = $entry;
 }

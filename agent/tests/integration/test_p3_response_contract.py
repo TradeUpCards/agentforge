@@ -4,7 +4,7 @@ Pins the shape of _serialize_blocks_for_response output and verifies:
   - docling_blocks keys: block_id, page, bbox, text_snippet
   - bbox keys are exactly {x, y, w, h} (NOT x0/y0/x1/y1, NOT left/top/right/bottom)
   - page is 1-based (UI assumes 1-based; this test pins the convention)
-  - text_snippet is byte-truncated to ≤80 chars after rstrip
+  - text_snippet is byte-truncated to ≤240 chars after rstrip (P4 R2: bumped from 80)
   - All blocks (cited AND uncited) appear in the serialized list
   - field_verdicts shape: each entry has field_path, source_block_id, status, verifier_reason
 
@@ -15,7 +15,7 @@ PHI discipline:
 
 W2_ARCHITECTURE.md references:
   P3 brief §4 — docling_blocks_json ships in P3 response
-  P3 brief §5 — 80-char text snippets, PHI-acceptable
+  P3 brief §5 — 80-char text snippets, PHI-acceptable (bumped to 240 in P4 R2)
   P3 brief §6 — bbox format {x, y, w, h} origin bottom-left
 
 Cross-teammate contract:
@@ -119,15 +119,19 @@ class TestDoclingBlockRequiredKeys:
         assert "text_snippet" in result[0], "Each block must have 'text_snippet' key."
 
     def test_no_unexpected_top_level_keys(self) -> None:
-        """The four required keys are the only ones emitted (no leakage of internals)."""
+        """Required keys are the only ones emitted (no leakage of internals).
+
+        P4 R2: block_type added to the required set.  Pinned for quality-lead
+        review — test widened from the original 4-key set.
+        """
         doc = _make_doc([_make_block("blk_0", "test text")])
         result = _serialize_blocks_for_response(doc)
 
         actual_keys = set(result[0].keys())
-        expected_keys = {"block_id", "page", "bbox", "text_snippet"}
+        expected_keys = {"block_id", "page", "bbox", "text_snippet", "block_type"}
         assert actual_keys == expected_keys, (
             f"Unexpected keys in block: {actual_keys - expected_keys}. "
-            "The block dict must contain exactly block_id, page, bbox, text_snippet."
+            "The block dict must contain exactly block_id, page, bbox, text_snippet, block_type."
         )
 
 
@@ -262,12 +266,19 @@ class TestPageNumberingContract:
 
 
 # ---------------------------------------------------------------------------
-# Contract §4: text_snippet truncation at ≤80 chars after rstrip
+# Contract §4: text_snippet truncation at ≤240 chars after rstrip (P4 R2)
+#
+# QUALITY-LEAD NOTE: bumped from 80 → 240 in P4 R2.  User-decided PHI posture:
+# same response payload already carries verified values; longer previews enable
+# the "Assert from block" HITL affordance without fetch-on-demand.
 # ---------------------------------------------------------------------------
 
 
 class TestTextSnippetTruncation:
-    """text_snippet must be rstripped then truncated to at most 80 chars."""
+    """text_snippet must be rstripped then truncated to at most 240 chars.
+
+    P4 R2: bumped from 80 → 240.  Tests widened accordingly.
+    """
 
     def test_short_text_is_not_truncated(self) -> None:
         short_text = "Hemoglobin A1c 7.8 %"
@@ -276,28 +287,28 @@ class TestTextSnippetTruncation:
 
         assert result[0]["text_snippet"] == short_text
 
-    def test_text_exceeding_80_chars_is_truncated(self) -> None:
-        long_text = "A" * 100  # 100 chars — must be cut to 80
+    def test_text_exceeding_240_chars_is_truncated(self) -> None:
+        long_text = "A" * 300  # 300 chars — must be cut to 240
         doc = _make_doc([_make_block("blk_0", long_text)])
         result = _serialize_blocks_for_response(doc)
 
-        assert len(result[0]["text_snippet"]) == 80, (
-            f"text_snippet must be truncated to 80 chars, got {len(result[0]['text_snippet'])}"
+        assert len(result[0]["text_snippet"]) == 240, (
+            f"text_snippet must be truncated to 240 chars, got {len(result[0]['text_snippet'])}"
         )
-        assert result[0]["text_snippet"] == "A" * 80
+        assert result[0]["text_snippet"] == "A" * 240
 
-    def test_text_exactly_80_chars_is_not_modified(self) -> None:
-        text_80 = "B" * 80
-        doc = _make_doc([_make_block("blk_0", text_80)])
+    def test_text_exactly_240_chars_is_not_modified(self) -> None:
+        text_240 = "B" * 240
+        doc = _make_doc([_make_block("blk_0", text_240)])
         result = _serialize_blocks_for_response(doc)
 
-        assert result[0]["text_snippet"] == text_80
-        assert len(result[0]["text_snippet"]) == 80
+        assert result[0]["text_snippet"] == text_240
+        assert len(result[0]["text_snippet"]) == 240
 
     def test_trailing_whitespace_is_stripped_before_truncation(self) -> None:
-        """rstrip happens before the 80-char slice."""
+        """rstrip happens before the 240-char slice."""
         # 70 meaningful chars + 15 trailing spaces = 85 chars total.
-        # After rstrip: 70 chars (under the limit, no further truncation).
+        # After rstrip: 70 chars (under the 240 limit, no further truncation).
         text_with_trailing = "C" * 70 + "   " * 5
         doc = _make_doc([_make_block("blk_0", text_with_trailing)])
         result = _serialize_blocks_for_response(doc)
@@ -307,15 +318,18 @@ class TestTextSnippetTruncation:
         assert len(snippet) == 70, f"After rstrip, snippet should be 70 chars, got {len(snippet)}"
 
     def test_truncation_is_bytewise_not_word_boundary(self) -> None:
-        """Truncation cuts at character position 80, not at a word boundary."""
-        # 78 chars + space + word — the word is cut mid-way
-        text = "X" * 79 + "Y complete word after boundary"
+        """Truncation cuts at character position 240, not at a word boundary.
+
+        P4 R2: updated boundary from 80 → 240.
+        """
+        # 239 chars + Y + trailing word — the trailing word is cut
+        text = "X" * 239 + "Y complete word after boundary"
         doc = _make_doc([_make_block("blk_0", text)])
         result = _serialize_blocks_for_response(doc)
 
         snippet = result[0]["text_snippet"]
-        assert len(snippet) == 80
-        assert snippet[79] == "Y", "80th character must be 'Y' (position 79 in 0-index)"
+        assert len(snippet) == 240
+        assert snippet[239] == "Y", "240th character must be 'Y' (position 239 in 0-index)"
 
 
 # ---------------------------------------------------------------------------
