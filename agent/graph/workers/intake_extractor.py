@@ -26,7 +26,7 @@ from typing import Any
 
 from agent._phi_scrubber import mask_observability_patterns
 from agent.document_schemas import IntakeForm, LabReport
-from agent.extractors import attach_and_extract_async
+from agent.extractors import attach_and_extract_with_metadata_async
 from agent.graph.state import SupervisorState
 from agent.schemas import Citation
 
@@ -64,8 +64,8 @@ def intake_extractor_node(state: SupervisorState) -> dict[str, Any]:
                     "intake_extractor_node: no doc context in state — skipping extraction"
                 )
             else:
-                result = _run_extraction(doc_ctx)
-                new_citations = _build_citations(result, doc_ctx)
+                result, docling_blocks = _run_extraction(doc_ctx)
+                new_citations = _build_citations(result, doc_ctx, docling_blocks)
                 n_citations_added = len(new_citations)
         except Exception as exc:
             scrubbed = mask_observability_patterns(str(exc))
@@ -126,12 +126,26 @@ def _find_doc_context(state: SupervisorState) -> dict[str, Any] | None:
     return None
 
 
-def _run_extraction(doc_ctx: dict[str, Any]) -> LabReport | IntakeForm:
-    """Call attach_and_extract_async() synchronously.
+def _run_extraction(
+    doc_ctx: dict[str, Any],
+) -> tuple[LabReport | IntakeForm, list[dict[str, Any]]]:
+    """Call attach_and_extract_with_metadata_async() synchronously.
 
-    attach_and_extract_async() is the preferred async entry point (avoids
-    the asyncio.run() footgun documented in Stage-2). We use a thread-pool
-    workaround when an event loop is already running (e.g. pytest-asyncio).
+    Returns the (extraction_result, docling_blocks) tuple needed by
+    _build_citations() so the citations can carry the source block's page
+    number (page_or_section) and an actual extracted-value string
+    (quote_or_value), per PRD §5 minimum citation shape.
+
+    docling_blocks is the list of {block_id, page (1-based), bbox, text_snippet,
+    block_type} dicts returned by the metadata variant; used for block_id→page
+    lookup in _build_citations.
+
+    attach_and_extract_with_metadata_async() is preferred over the legacy
+    attach_and_extract_async() here because the legacy variant returns ONLY
+    the validated LabReport/IntakeForm and discards the Docling block
+    inventory; we'd then have to re-run Stage-1 just to get page numbers.
+
+    Thread-pool workaround for event-loop-already-running case (pytest-asyncio).
     """
     patient_id = int(doc_ctx["patient_id"])
     doc_ref_id = str(doc_ctx["doc_ref_id"])
@@ -139,7 +153,7 @@ def _run_extraction(doc_ctx: dict[str, Any]) -> LabReport | IntakeForm:
     pdf_path_str = doc_ctx.get("pdf_path")
     pdf_path = Path(pdf_path_str) if pdf_path_str else None
 
-    coro = attach_and_extract_async(
+    coro = attach_and_extract_with_metadata_async(
         patient_id=patient_id,
         doc_ref_id=doc_ref_id,
         doc_type=doc_type,
@@ -158,57 +172,148 @@ def _run_extraction(doc_ctx: dict[str, Any]) -> LabReport | IntakeForm:
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(asyncio.run, coro)
-            return future.result(timeout=120)
+            payload = future.result(timeout=120)
     else:
-        return asyncio.run(coro)
+        payload = asyncio.run(coro)
+
+    # payload is dict[str, Any] from attach_and_extract_with_metadata_async
+    # with keys: result, docling_blocks, field_verdicts, original_values.
+    result = payload.get("result")
+    docling_blocks = payload.get("docling_blocks") or []
+    if not isinstance(docling_blocks, list):
+        docling_blocks = []
+    return result, docling_blocks
 
 
 def _build_citations(
     result: LabReport | IntakeForm,
     doc_ctx: dict[str, Any],
+    docling_blocks: list[dict[str, Any]] | None = None,
 ) -> list[Citation]:
     """Convert an extraction result into Citation objects.
 
     Each Citation has source_type='extracted_document' and a block_id
     pointing back to the Docling bbox (the two-stage grounding contract).
-    No raw field values are included in the citation's quote_or_value beyond
-    the structural block reference — see §8.3.
+
+    PRD §5 minimum citation shape requires page_or_section (page number)
+    and quote_or_value (the extracted text/value), both populated.  Prior
+    to this change both were stubbed (`page_or_section=None`,
+    `quote_or_value=block_id`).  We now:
+
+    - Look up page_or_section via a block_id → page map built from the
+      docling_blocks list passed in by the caller (no DoclingDoc thread
+      refactor required — caller already has the metadata variant's
+      block list).
+    - Populate quote_or_value with a concise rendering of the actual
+      extracted value: lab result reading for LabReport entries; the
+      first item's primary attribute (with "+N more" suffix for lists)
+      for IntakeForm entries.
+
+    BBox stays None on the citation itself — frontend resolves bbox at
+    click time via the OpenEMR /resolve_citation.php endpoint.  This
+    keeps the agent-side payload light and the bbox value in a single
+    canonical store (co_pilot_extracted_fields.bbox_json or
+    co_pilot_extractions.docling_blocks_json).
     """
     citations: list[Citation] = []
     doc_ref_id = str(doc_ctx.get("doc_ref_id", "unknown"))
 
+    # Build block_id → page map for page_or_section lookup.
+    block_pages: dict[str, int] = {}
+    for block in docling_blocks or []:
+        if not isinstance(block, dict):
+            continue
+        bid = block.get("block_id")
+        page = block.get("page")
+        if isinstance(bid, str) and isinstance(page, int):
+            block_pages[bid] = page
+
+    def _page_str(block_id: str | None) -> str | None:
+        if block_id is None:
+            return None
+        page = block_pages.get(block_id)
+        return str(page) if page is not None else None
+
     if isinstance(result, LabReport):
         for lab_result in result.results:
-            # LabResult carries source_block_id (Docling block ref) but not
-            # the BBox itself — the BBox lives in the DoclingBlock, which is
-            # not threaded to the worker at this stage. Citation bbox=None is
-            # correct here; the click-to-source overlay resolves bbox from
-            # the block_id at render time (via the stored DoclingDoc).
+            # quote_or_value: actual extracted reading.  Truncated to
+            # ~80 chars to keep response compact; not PHI-sensitive
+            # since the agent already returns this in the structured
+            # extraction payload.
+            quote = f"{lab_result.test_name}: {lab_result.value} {lab_result.unit}".strip()
+            if len(quote) > 80:
+                quote = quote[:77] + "..."
             citations.append(
                 Citation(
                     source_type="extracted_document",
                     source_id=doc_ref_id,
-                    page_or_section=None,  # resolved at render time via block_id
+                    page_or_section=_page_str(lab_result.source_block_id),
                     field_or_chunk_id=lab_result.source_block_id,
-                    quote_or_value=lab_result.source_block_id,  # block ref, not field value
-                    bbox=None,
+                    quote_or_value=quote,
+                    bbox=None,  # client resolves via /resolve_citation.php
                 )
             )
     elif isinstance(result, IntakeForm):
-        # IntakeForm cites via source_citations: field_name → source_block_id
+        # IntakeForm cites via source_citations: field_name → source_block_id.
+        # We synthesise a meaningful quote_or_value from the structured
+        # fields rather than echoing the block_id.
         for field_name, block_id in (result.source_citations or {}).items():
+            quote = _intake_quote_for_field(result, field_name)
             citations.append(
                 Citation(
                     source_type="extracted_document",
                     source_id=doc_ref_id,
-                    page_or_section=None,
+                    page_or_section=_page_str(block_id),
                     field_or_chunk_id=block_id,
-                    quote_or_value=f"{field_name}:{block_id}",
+                    quote_or_value=quote,
                     bbox=None,
                 )
             )
 
     return citations
+
+
+def _intake_quote_for_field(form: IntakeForm, field_name: str) -> str:
+    """Return a concise human-readable quote for an IntakeForm citation.
+
+    Walks the structured fields to surface the actual extracted value.
+    For list-valued fields, returns the first item's primary attribute
+    plus a "+N more" suffix when the list has more entries.  Quote is
+    capped at ~80 chars.
+    """
+    def _cap(s: str) -> str:
+        s = s.strip()
+        return s if len(s) <= 80 else s[:77] + "..."
+
+    if field_name == "demographics":
+        if form.demographics is not None and form.demographics.name:
+            return _cap(form.demographics.name)
+    if field_name == "chief_concern":
+        if form.chief_concern:
+            return _cap(form.chief_concern)
+    if field_name == "current_medications":
+        meds = form.current_medications or []
+        if meds:
+            head = meds[0].name
+            extra = len(meds) - 1
+            return _cap(head if extra == 0 else f"{head} (+{extra} more)")
+    if field_name == "allergies":
+        allergies = form.allergies or []
+        if allergies:
+            head = allergies[0].substance
+            extra = len(allergies) - 1
+            return _cap(head if extra == 0 else f"{head} (+{extra} more)")
+    if field_name == "family_history":
+        history = form.family_history or []
+        if history:
+            head = history[0].condition
+            relation = history[0].relation or "?"
+            extra = len(history) - 1
+            base = f"{relation}: {head}"
+            return _cap(base if extra == 0 else f"{base} (+{extra} more)")
+    # Fallback: keep the field_name as the quote so the citation is
+    # never empty.  Better than echoing the opaque block_id.
+    return field_name
 
 
 class _langfuse_span:
