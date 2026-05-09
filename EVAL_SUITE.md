@@ -156,9 +156,25 @@ source_incident_id: <ref>   # provenance — DECISIONS.md anchor or SYNTHETIC_DA
 - `status: ok | refused | error` — required
 - `min_claims: <int>` / `max_claims: <int>` — claim count bounds
 - `min_citations: <int>` — distinct `record_id`s cited
+- `min_guideline_citations: <int>` — citations with `source_type == "guideline"`
 - `must_mention: [substr, ...]` / `must_not_mention: [substr, ...]` — case-insensitive substring assertions on response text
 - `expect_tools_called: [name, ...]` — tools whose `success: true` must appear
 - `expect_refusal_reason_contains: <substr>` — for `status: refused` cases
+- `citation_has_quote: bool` — every citation has populated `quote_or_value` distinct from `source_id` / `field_or_chunk_id` (PRD §5 minimum citation shape — added 2026-05-09 alongside Aria's HITL → citation-bbox-overlay pivot)
+- `citation_has_page: bool` — every `extracted_document` citation has populated `page_or_section` (PRD §5 — added 2026-05-09; `patient_record` citations N/A by design, `guideline` citations scoped out)
+- `expect_extraction_n_results_gte: <int>` — for `/attach_and_extract` doc-extraction cases
+- `expect_extraction_field: [{...}, ...]` — assert specific extracted fields equal expected values
+
+**`citation_has_quote` tautology guards** (any one trips the failure):
+
+1. `quote_or_value` is empty (legacy `agent.py:1244` "week-3 enhancement" stub)
+2. `quote_or_value == source_id` (e.g., `f"{table}:{record_id}"` echo — old `evidence_retriever.py` patient_record path)
+3. `quote_or_value == field_or_chunk_id` (e.g., `lab_result.source_block_id` echo — old `intake_extractor.py` LabReport path)
+4. `quote_or_value` matches `<field_name>:<block_id>` shape (old `intake_extractor.py` IntakeForm path: `f"{field_name}:{block_id}"`)
+
+The IntakeForm guard requires both `quote.endswith(f":{field_or_chunk_id}")` AND a field-name-shaped prefix (alphanumeric + `_` + `.` only) — narrow enough to avoid false-positives on legitimate quotes that end with `:<id>`.
+
+Failure messages cap rendered citation list at 5 entries with `+N more` suffix to keep the eval report readable; the count is always accurate.
 
 ### 3.3 Synthetic patient fixtures (12 sentinel patients)
 

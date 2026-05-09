@@ -21,6 +21,8 @@ Assertion DSL (in each case YAML's `expected:` block):
     expect_tools_called: [name1, name2, ...] # tools whose `success: true` must appear
     phi_log_scan: [str, ...]                 # PHI strings that must be masked by the scrubber
     min_guideline_citations: <int>           # citations with source_type == "guideline" >= N
+    citation_has_quote: bool                 # every citation has populated quote_or_value distinct from source_id / field_or_chunk_id (PRD §5)
+    citation_has_page: bool                  # extracted_document citations have populated page_or_section (PRD §5)
     expect_extraction_n_results_gte: <int>   # extraction.results list length >= N
     expect_extraction_field: {...}           # named field in extraction equals a value
 
@@ -237,6 +239,12 @@ _DSL_CHECKS: set[str] = {
     "expect_tools_called",
     "phi_log_scan",
     "min_guideline_citations",
+    # PRD §5 minimum citation shape — added 2026-05-09 alongside Aria's
+    # citation-bbox-overlay pivot (resolver endpoint at ab5d19a24 + her
+    # paired population fix in agent/graph/workers/intake_extractor.py
+    # and agent.py:1244). Locks the population in for regression-defense.
+    "citation_has_quote",
+    "citation_has_page",
     "expect_extraction_n_results_gte",
     "expect_extraction_field",
 }
@@ -462,6 +470,105 @@ def _evaluate(case: EvalCase, status_code: int, response: dict[str, Any]) -> Cas
             failures.append(
                 f"min_guideline_citations: expected >= {expected['min_guideline_citations']}, "
                 f"got {len(guideline_cites)}"
+            )
+
+    # citation_has_quote: PRD §5 minimum citation shape — quote_or_value must
+    # be populated with the actual quoted text or value, NOT a tautology that
+    # echoes source_id or field_or_chunk_id.  Closes the historical "stub"
+    # population in two of three citation builders:
+    #   - patient_record (evidence_retriever.py:309): quote_or_value
+    #     hardcoded to f"{rec.table}:{rec.record_id}" — equal to source_id.
+    #   - extracted_document LabReport (intake_extractor.py:193): quote_or_value
+    #     hardcoded to lab_result.source_block_id — equal to field_or_chunk_id.
+    #   - extracted_document IntakeForm (intake_extractor.py:206): quote_or_value
+    #     was f"{field_name}:{block_id}" — composite that ENDS WITH
+    #     ":{field_or_chunk_id}".
+    #   - legacy /chat path (agent.py:1244): quote_or_value="" with comment
+    #     "full threading is a week-3 enhancement" — empty string.
+    #
+    # This rubric pairs with Aria's HITL → citation-bbox-overlay pivot
+    # (feat/citation-bbox-overlay branch off ab5d19a24). It is robust to either
+    # citation-population state — runs against whatever the response carries.
+    # Pre-Aria-fix it would flag the stubs; post-fix it locks the populated
+    # state in for regression-defense.
+    #
+    # Tautology guards (any one trips the failure):
+    #   1. quote_or_value is empty.
+    #   2. quote_or_value == source_id (patient_record stub form).
+    #   3. quote_or_value == field_or_chunk_id (LabReport stub form).
+    #   4. quote_or_value endswith f":{field_or_chunk_id}" AND startswith
+    #      a field-name-shaped prefix (IntakeForm stub form). The prefix
+    #      check is intentionally narrow to avoid false-positives on a
+    #      legitimate quote that happens to end with ":<id>".
+    if expected.get("citation_has_quote"):
+        citations = response.get("citations") or []
+        bad_citations: list[str] = []
+        for c in citations:
+            if not isinstance(c, dict):
+                continue
+            quote = c.get("quote_or_value") or ""
+            source_id = c.get("source_id") or ""
+            field_or_chunk_id = c.get("field_or_chunk_id") or ""
+            source_type = c.get("source_type") or "?"
+            label = f"{source_type}:{source_id}"
+            if not quote:
+                bad_citations.append(f"{label} (empty quote_or_value)")
+            elif quote == source_id:
+                bad_citations.append(f"{label} (quote == source_id)")
+            elif quote == field_or_chunk_id:
+                bad_citations.append(f"{label} (quote == field_or_chunk_id)")
+            elif (
+                field_or_chunk_id
+                and quote.endswith(f":{field_or_chunk_id}")
+                and quote[: -len(f":{field_or_chunk_id}")].replace("_", "").replace(".", "").isalnum()
+            ):
+                bad_citations.append(f"{label} (quote == 'field_name:block_id' stub)")
+        if bad_citations:
+            # Cap the rendered list at 5 to keep failure messages report-readable;
+            # the count is still accurate, just the names are truncated.
+            preview = bad_citations[:5]
+            suffix = f", +{len(bad_citations) - 5} more" if len(bad_citations) > 5 else ""
+            failures.append(
+                f"citation_has_quote: {len(bad_citations)} citation(s) with stub/empty "
+                f"quote_or_value: {preview}{suffix}"
+            )
+
+    # citation_has_page: PRD §5 minimum citation shape — page_or_section must
+    # be populated for extracted_document citations (Docling block.page).
+    # Closes intake_extractor.py:191/204 page_or_section=None stub.
+    #
+    # Source-type scoping (by design):
+    #   - extracted_document: REQUIRED. Page number from the underlying
+    #     Docling block; without it the click-to-source resolver can't
+    #     surface the right page.
+    #   - patient_record: N/A (no PDF, no page coordinate).
+    #   - guideline: N/A here — guideline citations populate page_or_section
+    #     with the section identifier (e.g. "S2.3"), which is structurally
+    #     identical but logically a different concept. We don't enforce on
+    #     guideline citations because their population path is separate
+    #     (evidence_retriever._fetch_guidelines, lines 246-255) and was
+    #     already correct pre-pivot.
+    #
+    # Pairs with Aria's intake_extractor.py fix on feat/citation-bbox-overlay.
+    if expected.get("citation_has_page"):
+        citations = response.get("citations") or []
+        bad_citations: list[str] = []
+        for c in citations:
+            if not isinstance(c, dict):
+                continue
+            if c.get("source_type") != "extracted_document":
+                continue  # patient_record N/A; guideline scoped out by design
+            page = c.get("page_or_section")
+            if not page:
+                source_id = c.get("source_id") or "?"
+                block_id = c.get("field_or_chunk_id") or "?"
+                bad_citations.append(f"{source_id}#{block_id}")
+        if bad_citations:
+            preview = bad_citations[:5]
+            suffix = f", +{len(bad_citations) - 5} more" if len(bad_citations) > 5 else ""
+            failures.append(
+                f"citation_has_page: {len(bad_citations)} extracted_document citation(s) "
+                f"with null/empty page_or_section: {preview}{suffix}"
             )
 
     # expect_extraction_n_results_gte: assert extraction.results has >= N entries (lab_pdf)
