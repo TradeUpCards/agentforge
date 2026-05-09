@@ -13,6 +13,7 @@ import { Spinner } from '../components/ui/Spinner'
 import { ErrorRetry } from '../components/ui/ErrorRetry'
 import { ExpandableRow, DetailGrid } from '../components/ui/ExpandableRow'
 import { CoPilotDrawer } from '../components/copilot/CoPilotDrawer'
+import { useScrollDirection } from '../hooks/useScrollDirection'
 
 /**
  * Documents page — full listing of FHIR DocumentReference resources for
@@ -34,6 +35,7 @@ export function DocumentsPage() {
   const { patientId } = useParams<{ patientId: string }>()
   const [headerCollapsed, setHeaderCollapsed] = useState(false)
   const [headerHidden, setHeaderHidden] = useState(false)
+  const hideMainNav = useScrollDirection()
   const { data, isLoading, error, refetch } = useDocuments(patientId ?? '', 50)
   const docs = data ? extractBundleResources<FhirDocumentReference>(data) : []
 
@@ -48,7 +50,16 @@ export function DocumentsPage() {
   return (
     <div className="min-h-screen bg-white">
       <div className="sticky top-0 z-30 bg-white">
-        <MainNav />
+        <div
+          aria-hidden={hideMainNav}
+          className={`grid motion-safe:transition-[grid-template-rows] motion-safe:duration-200 ${
+            hideMainNav ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'
+          }`}
+        >
+          <div className="overflow-hidden">
+            <MainNav />
+          </div>
+        </div>
         <PatientHeader
           patientId={patientId}
           collapsed={headerCollapsed}

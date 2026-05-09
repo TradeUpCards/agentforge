@@ -6,6 +6,7 @@ import { PatientHeader } from '../components/layout/PatientHeader'
 import { MedicalRecordHeading } from '../components/layout/MedicalRecordHeading'
 import { SubNav } from '../components/layout/SubNav'
 import { CoPilotDrawer } from '../components/copilot/CoPilotDrawer'
+import { useScrollDirection } from '../hooks/useScrollDirection'
 import { openemrHome } from '../utils/openemrLinks'
 
 /**
@@ -42,6 +43,7 @@ export function SectionStubPage() {
   const label = (section && LABELS[section]) ?? 'Section'
   const [headerCollapsed, setHeaderCollapsed] = useState(false)
   const [headerHidden, setHeaderHidden] = useState(false)
+  const hideMainNav = useScrollDirection()
 
   if (!patientId) {
     return (
@@ -54,7 +56,16 @@ export function SectionStubPage() {
   return (
     <div className="min-h-screen bg-white">
       <div className="sticky top-0 z-30 bg-white">
-        <MainNav />
+        <div
+          aria-hidden={hideMainNav}
+          className={`grid motion-safe:transition-[grid-template-rows] motion-safe:duration-200 ${
+            hideMainNav ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'
+          }`}
+        >
+          <div className="overflow-hidden">
+            <MainNav />
+          </div>
+        </div>
         <PatientHeader
           patientId={patientId}
           collapsed={headerCollapsed}

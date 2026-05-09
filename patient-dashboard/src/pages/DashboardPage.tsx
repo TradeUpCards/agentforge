@@ -14,6 +14,7 @@ import { CareTeamCard } from '../components/cards/CareTeamCard'
 import { EncountersCard } from '../components/cards/EncountersCard'
 import { DocumentsCard } from '../components/cards/DocumentsCard'
 import { CoPilotDrawer } from '../components/copilot/CoPilotDrawer'
+import { useScrollDirection } from '../hooks/useScrollDirection'
 
 /**
  * Composes the full patient dashboard with the OpenEMR-familiar layout:
@@ -36,6 +37,9 @@ export function DashboardPage() {
   // Drawer-style hide-entirely toggle (all breakpoints), via the
   // chevron handle bottom-center of the patient header.
   const [headerHidden, setHeaderHidden] = useState(false)
+  // Auto-hide MainNav on scroll-down, reveal on any upward scroll.
+  // PatientHeader stays sticky-always (clinical-safety priority).
+  const hideMainNav = useScrollDirection()
 
   if (!patientId) {
     return (
@@ -52,7 +56,21 @@ export function DashboardPage() {
       {/* Sticky chrome — MainNav + PatientHeader move together so the
           menu stays accessible when the user scrolls cards. */}
       <div className="sticky top-0 z-30 bg-white">
-        <MainNav />
+        {/* Collapsing wrapper — when hideMainNav is true, the row
+            collapses to 0 height (Material's "Top App Bar" auto-hide
+            pattern). PatientHeader stays in place because the wrapper
+            participates in normal flow; it expands/contracts the
+            sticky group rather than overlapping. */}
+        <div
+          aria-hidden={hideMainNav}
+          className={`grid motion-safe:transition-[grid-template-rows] motion-safe:duration-200 ${
+            hideMainNav ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'
+          }`}
+        >
+          <div className="overflow-hidden">
+            <MainNav />
+          </div>
+        </div>
         <PatientHeader
           patientId={patientId}
           collapsed={headerCollapsed}
