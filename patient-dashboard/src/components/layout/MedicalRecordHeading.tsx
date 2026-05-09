@@ -29,7 +29,12 @@ export function MedicalRecordHeading({ patientId }: { patientId: string }) {
         <span className="max-md:portrait:hidden inline-flex">
           <ChatIcon />
         </span>
-        <MinimizeIcon />
+        {/* The legacy minimize icon (fa-window-minimize, class
+            "expand_contract") is a global "collapse all cards" button.
+            We render per-row inline accordions on every card instead of
+            a global expand/collapse, so the icon would be a false
+            affordance — removed. The HelpIcon stays for visual
+            familiarity with OpenEMR's standard page heading. */}
         <HelpIcon />
       </div>
     </div>
@@ -40,14 +45,6 @@ function ChatIcon() {
   return (
     <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
       <path d="M2.678 11.894a1 1 0 0 1 .287.801 11 11 0 0 1-.398 2c1.395-.323 2.247-.697 2.634-.893a1 1 0 0 1 .71-.074A8 8 0 0 0 8 14c3.996 0 7-2.807 7-6s-3.004-6-7-6-7 2.808-7 6c0 1.468.617 2.83 1.678 3.894M8 1c4.418 0 8 3.134 8 7s-3.582 7-8 7a9 9 0 0 1-2.347-.306c-.584.296-1.925.864-4.181 1.234-.2.032-.352-.176-.273-.362.354-.836.674-1.95.77-2.966C.744 11.37 0 9.76 0 8c0-3.866 3.582-7 8-7" />
-    </svg>
-  )
-}
-
-function MinimizeIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
-      <path d="M14 8a.5.5 0 0 1-.5.5H2.5a.5.5 0 0 1 0-1h11a.5.5 0 0 1 .5.5" />
     </svg>
   )
 }
