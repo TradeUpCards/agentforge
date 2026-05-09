@@ -93,10 +93,16 @@
      */
     function docIdFromUrl(url) {
         if (!url) return null;
+        // Pattern A: Angular Documents controller iframe src — .../retrieve/id/{N}
         var m = url.match(/\/retrieve\/id\/(\d+)/);
         if (m) return m[1];
+        // Pattern B: legacy ?doc_id={N} query param.
         var q = url.match(/[?&]doc_id=(\d+)/);
         if (q) return q[1];
+        // Pattern C: OpenEMR Documents-controller URL — controller.php?document&retrieve&document_id={N}
+        // (the `_id` and `id` distinguish from the path segment `&retrieve&` so we don't false-match).
+        var d = url.match(/[?&]document_id=(\d+)/);
+        if (d) return d[1];
         return null;
     }
 
