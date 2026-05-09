@@ -103,20 +103,31 @@ export function AddAllergyModal({ patientId, open, onClose }: AddAllergyModalPro
         onClick={onClose}
         className="fixed inset-0 z-50 bg-black/40 motion-safe:transition-opacity motion-safe:duration-150"
       />
-      {/* Modal container — centered on tablet+, full-screen on phone */}
-      <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center p-0 md:p-4 pointer-events-none">
-        <div
+      {/* Modal container — full screen on phone (top-aligned), centered
+          card on tablet+. Flex column inside the dialog so the header
+          and footer stay fixed while the form fields scroll if the
+          content overflows (e.g., on a phone with the soft keyboard
+          taking ~50% of the viewport, where a static layout would push
+          the severity select off the bottom). */}
+      <div className="fixed inset-0 z-50 flex items-stretch md:items-center justify-center p-0 md:p-4 pointer-events-none">
+        <form
           role="dialog"
           aria-modal="true"
           aria-labelledby={titleId}
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (!substance.trim()) return
+            mutation.mutate()
+          }}
           className="
             pointer-events-auto bg-white shadow-2xl
             w-full md:w-[520px]
             md:rounded-lg
-            max-h-full overflow-y-auto
+            md:max-h-[calc(100vh-2rem)]
+            flex flex-col
           "
         >
-          <header className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+          <header className="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
             <h2 id={titleId} className="text-base font-semibold text-gray-800 m-0">
               Add Allergy
             </h2>
@@ -138,14 +149,10 @@ export function AddAllergyModal({ patientId, open, onClose }: AddAllergyModalPro
             </button>
           </header>
 
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              if (!substance.trim()) return
-              mutation.mutate()
-            }}
-            className="px-4 py-4 space-y-4"
-          >
+          {/* Scrollable fields — flex-1 + overflow inside the form's
+              column. Footer (Save/Cancel) stays pinned via shrink-0
+              below this region. */}
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
             <div>
               <label
                 htmlFor={substanceId}
@@ -227,41 +234,43 @@ export function AddAllergyModal({ patientId, open, onClose }: AddAllergyModalPro
                 {errorMessage}
               </p>
             )}
+          </div>
 
-            <footer className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
-              <button
-                type="button"
-                onClick={onClose}
-                disabled={mutation.isPending}
-                className="
-                  inline-flex items-center justify-center
-                  px-4 py-2 min-h-11
-                  text-sm font-medium text-gray-700
-                  border border-gray-300 rounded bg-white hover:bg-gray-50
-                  disabled:opacity-50
-                  focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
-                "
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!substance.trim() || mutation.isPending}
-                className="
-                  inline-flex items-center justify-center
-                  px-4 py-2 min-h-11
-                  text-sm font-medium text-white
-                  bg-blue-700 hover:bg-blue-800 active:bg-blue-900 rounded
-                  disabled:opacity-50 disabled:cursor-not-allowed
-                  focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
-                  motion-safe:transition-colors
-                "
-              >
-                {mutation.isPending ? 'Saving…' : 'Save Allergy'}
-              </button>
-            </footer>
-          </form>
-        </div>
+          {/* Pinned footer — stays visible at the bottom of the modal
+              even when the field area scrolls. */}
+          <footer className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-200 shrink-0">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={mutation.isPending}
+              className="
+                inline-flex items-center justify-center
+                px-4 py-2 min-h-11
+                text-sm font-medium text-gray-700
+                border border-gray-300 rounded bg-white hover:bg-gray-50
+                disabled:opacity-50
+                focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+              "
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!substance.trim() || mutation.isPending}
+              className="
+                inline-flex items-center justify-center
+                px-4 py-2 min-h-11
+                text-sm font-medium text-white
+                bg-blue-700 hover:bg-blue-800 active:bg-blue-900 rounded
+                disabled:opacity-50 disabled:cursor-not-allowed
+                focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+                motion-safe:transition-colors
+              "
+            >
+              {mutation.isPending ? 'Saving…' : 'Save Allergy'}
+            </button>
+          </footer>
+        </form>
       </div>
     </>
   )
