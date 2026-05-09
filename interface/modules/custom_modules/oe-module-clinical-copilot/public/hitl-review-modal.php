@@ -65,10 +65,12 @@ header('Cache-Control: no-store');
 
 <div class="modal fade"
      id="hitl-review-modal"
+     data-hitl-sidecar="1"
+     data-backdrop="false"
      tabindex="-1"
      role="dialog"
      aria-labelledby="hitl-review-modal-label"
-     aria-modal="true">
+     aria-modal="false">
     <div class="modal-dialog modal-xl" role="document">
         <div class="modal-content">
 

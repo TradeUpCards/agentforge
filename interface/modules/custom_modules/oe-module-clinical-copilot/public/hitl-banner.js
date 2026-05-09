@@ -43,6 +43,14 @@
     }
     var hostDoc = hostWin.document;
 
+    // Note: ScriptFilterSubscriber may inject this script tag into multiple
+    // OpenEMR pages (top window + several child iframes — main_info,
+    // demographics, encounters, etc.), so the IIFE may run N times. We do
+    // NOT guard at IIFE entry because each instance's init() walks frames
+    // independently and discovers the document iframe (which lives in only
+    // ONE frame). Instead, we make removeBanner() sweep across ALL same-
+    // origin frames so the last-rendering instance dedupes the rest.
+
     // ---- 1. Module-level state -------------------------------------------
 
     /** Currently displayed doc_id (string). Null when no doc is open. */
@@ -56,6 +64,11 @@
 
     /** Whether a reprocess POST is in flight. */
     var reprocessing = false;
+
+    /** Reference to the currently-rendered banner element (may live in any
+     *  same-origin frame, so we track by reference rather than by id-lookup
+     *  on hostDoc). Null when no banner is rendered. */
+    var bannerEl = null;
 
     // ---- 2. Derive module base URL from our own script src ----------------
 
@@ -93,10 +106,16 @@
      */
     function docIdFromUrl(url) {
         if (!url) return null;
+        // Pattern A: Angular Documents controller iframe src — .../retrieve/id/{N}
         var m = url.match(/\/retrieve\/id\/(\d+)/);
         if (m) return m[1];
+        // Pattern B: legacy ?doc_id={N} query param.
         var q = url.match(/[?&]doc_id=(\d+)/);
         if (q) return q[1];
+        // Pattern C: OpenEMR Documents-controller URL — controller.php?document&retrieve&document_id={N}
+        // (the `_id` and `id` distinguish from the path segment `&retrieve&` so we don't false-match).
+        var d = url.match(/[?&]document_id=(\d+)/);
+        if (d) return d[1];
         return null;
     }
 
@@ -104,11 +123,93 @@
 
     var BANNER_ID = 'oe-copilot-hitl-banner';
 
-    function removeBanner() {
-        var existing = hostDoc.getElementById(BANNER_ID);
-        if (existing && existing.parentNode) {
-            existing.parentNode.removeChild(existing);
+    /**
+     * Locate the document-viewer's container + iframe across same-origin
+     * frames. Tries the Angular Documents module pane first, then falls
+     * back to the legacy controller.php viewer that older OpenEMR builds
+     * (and the patient_file/summary/demographics.php documents tab) use.
+     *
+     * Returns { ownerDoc, container, iframe } or null.
+     *
+     * The ownerDoc is the document the iframe belongs to — banner DOM
+     * elements MUST be created via that doc (not hostDoc) or the browser
+     * will throw cross-document insert errors / styling won't apply.
+     */
+    function findInjectionPoint() {
+        var found = null;
+
+        function checkDoc(doc) {
+            if (found) return;
+            // Style A: Angular Documents module pane.
+            var pane = doc.querySelector('div.doc-doc-ls-8-preview');
+            var ngIframe = doc.getElementById('file_preview');
+            if (pane && ngIframe && pane.contains(ngIframe)) {
+                found = { ownerDoc: doc, container: pane, iframe: ngIframe };
+                return;
+            }
+            // Style B: legacy controller.php viewer — <tr id="DocContents">
+            // wraps a single <td> containing the document iframe.
+            var legacyContents = doc.getElementById('DocContents');
+            if (legacyContents) {
+                var iframes = legacyContents.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    var f = iframes[i];
+                    var src = f.getAttribute('src') || '';
+                    if (src.indexOf('controller.php') !== -1 && src.indexOf('document_id=') !== -1) {
+                        // Inject above the iframe inside its containing <td>.
+                        found = { ownerDoc: doc, container: f.parentElement, iframe: f };
+                        return;
+                    }
+                }
+            }
         }
+
+        function walk(win) {
+            if (found) return;
+            try {
+                checkDoc(win.document);
+                var iframes = win.document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length && !found; i++) {
+                    try {
+                        if (iframes[i].contentWindow) {
+                            walk(iframes[i].contentWindow);
+                        }
+                    } catch (e) { /* cross-origin frame — skip */ }
+                }
+            } catch (e) { /* cross-origin doc — skip */ }
+        }
+
+        walk(hostWin);
+        return found;
+    }
+
+    function removeBanner() {
+        if (bannerEl && bannerEl.parentNode) {
+            bannerEl.parentNode.removeChild(bannerEl);
+        }
+        bannerEl = null;
+
+        // Sweep ALL same-origin frames for orphan banners. Required when
+        // multiple IIFE instances inject independently (each closure has
+        // its own bannerEl ref and doesn't see the others).
+        function sweep(win) {
+            try {
+                var doc = win.document;
+                var orphans = doc.querySelectorAll('#' + BANNER_ID);
+                for (var k = 0; k < orphans.length; k++) {
+                    if (orphans[k].parentNode) {
+                        orphans[k].parentNode.removeChild(orphans[k]);
+                    }
+                }
+                var iframes = doc.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    try {
+                        if (iframes[i].contentWindow) sweep(iframes[i].contentWindow);
+                    } catch (e) { /* cross-origin */ }
+                }
+            } catch (e) { /* cross-origin */ }
+        }
+        sweep(hostWin);
     }
 
     /**
@@ -124,13 +225,17 @@
     function renderBanner(level, msg, docId, showReviewBtn, showReprocessBtn, reviewBtnText) {
         removeBanner();
 
-        var previewContainer = hostDoc.querySelector('div.doc-doc-ls-8-preview');
-        if (!previewContainer) return;
+        // Find the document viewer in any same-origin frame (Angular pane
+        // OR legacy controller.php viewer). The banner element is created
+        // via the iframe's ownerDoc so it lives in the right document.
+        var inj = findInjectionPoint();
+        if (!inj) return;
 
-        var iframe = hostDoc.getElementById('file_preview');
-        if (!iframe) return;
+        var ownerDoc = inj.ownerDoc;
+        var container = inj.container;
+        var iframe = inj.iframe;
 
-        var banner = hostDoc.createElement('div');
+        var banner = ownerDoc.createElement('div');
         banner.id = BANNER_ID;
         banner.setAttribute('role', 'alert');
         banner.setAttribute('data-doc-id', escapeHtml(docId || ''));
@@ -142,13 +247,13 @@
             'flex-wrap:wrap',
         ].join(';');
 
-        var msgSpan = hostDoc.createElement('span');
+        var msgSpan = ownerDoc.createElement('span');
         msgSpan.className = 'hitl-banner-msg mr-auto';
         msgSpan.innerHTML = msg;
         banner.appendChild(msgSpan);
 
         if (showReviewBtn) {
-            var reviewBtn = hostDoc.createElement('button');
+            var reviewBtn = ownerDoc.createElement('button');
             reviewBtn.type = 'button';
             reviewBtn.className = 'btn btn-sm btn-outline-dark py-0';
             reviewBtn.style.cssText = 'font-size:12px;white-space:nowrap;';
@@ -158,7 +263,7 @@
         }
 
         if (showReprocessBtn) {
-            var repBtn = hostDoc.createElement('button');
+            var repBtn = ownerDoc.createElement('button');
             repBtn.type = 'button';
             repBtn.className = 'btn btn-sm btn-outline-dark py-0';
             repBtn.style.cssText = 'font-size:12px;white-space:nowrap;';
@@ -167,16 +272,25 @@
             banner.appendChild(repBtn);
         }
 
-        // Insert above the iframe — insertBefore relative to iframe's
-        // position in previewContainer.
-        previewContainer.insertBefore(banner, iframe);
+        // Insert above the iframe — insertBefore is valid whether the
+        // container is a <div> (Angular pane) or a <td> (legacy viewer);
+        // both can contain a <div> child legally.
+        container.insertBefore(banner, iframe);
+        bannerEl = banner;
 
         // Wire up button clicks.
         banner.addEventListener('click', function (e) {
+            // TEMPORARY: diagnostic logging — remove after demo works.
+            console.log('[hitl-banner] click handler fired. target:', e.target.tagName);
             var btn = e.target.closest('[data-hitl-action]');
-            if (!btn) return;
+            if (!btn) {
+                console.log('[hitl-banner] click target has no data-hitl-action ancestor; ignoring');
+                return;
+            }
             var action = btn.getAttribute('data-hitl-action');
+            console.log('[hitl-banner] action=' + action + ' docId=' + docId + ' modalInjected=' + modalInjected + ' currentExtraction=' + (currentExtraction ? 'set' : 'null'));
             if (action === 'review') {
+                console.log('[hitl-banner] calling openReviewModal');
                 openReviewModal(docId);
             } else if (action === 'reprocess') {
                 triggerReprocessFromBanner(docId);
@@ -292,10 +406,76 @@
         // status === 'ok' and stripped === 0 → no banner needed.
     }
 
+    // ---- 6.5 Dynamic sidecar positioning (peer with Co-Pilot drawer) ----
+    //
+    // Reads the live Co-Pilot drawer's bounding rect and positions the
+    // sidecar adjacent to it (left of drawer when open, right edge of
+    // viewport when closed). Run on modal-show, on window resize, and
+    // on any mutation to the drawer's aria-hidden / style / class.
+    var sidecarPositionWatcher = null;
+
+    function positionSidecar() {
+        var modal = hostDoc.getElementById('hitl-review-modal');
+        if (!modal) return;
+        var dialog = modal.querySelector('.modal-dialog');
+        if (!dialog) return;
+
+        var drawer = hostDoc.getElementById('oe-copilot-drawer');
+        var vw = hostWin.innerWidth || hostDoc.documentElement.clientWidth;
+        var vh = hostWin.innerHeight || hostDoc.documentElement.clientHeight;
+
+        if (drawer) {
+            var rect = drawer.getBoundingClientRect();
+            var hidden = drawer.getAttribute('aria-hidden') === 'true';
+            var open = !hidden && rect.width > 10 && rect.left < vw;
+            if (open) {
+                // Drawer open: dock to LEFT of drawer, match top/bottom.
+                dialog.style.top = rect.top + 'px';
+                dialog.style.right = (vw - rect.left) + 'px';
+                dialog.style.bottom = (vh - rect.bottom) + 'px';
+                dialog.style.height = rect.height + 'px';
+                dialog.style.maxHeight = rect.height + 'px';
+                return;
+            }
+            // Drawer closed: dock to right edge but match drawer's vertical span.
+            // The drawer keeps its top/bottom even when collapsed (just width 0).
+            // Read its parent or fall back to body offsets.
+            dialog.style.top = (rect.top > 0 ? rect.top : 90) + 'px';
+            dialog.style.right = '0';
+            dialog.style.bottom = (rect.bottom > 0 ? (vh - rect.bottom) : 0) + 'px';
+            dialog.style.height = 'auto';
+            dialog.style.maxHeight = (rect.bottom > 0 ? (rect.bottom - rect.top) : (vh - 90)) + 'px';
+            return;
+        }
+        // No drawer at all — dock right with conservative defaults.
+        dialog.style.top = '90px';
+        dialog.style.right = '0';
+        dialog.style.bottom = '0';
+    }
+
+    function watchDrawerForRepositioning() {
+        if (sidecarPositionWatcher) return; // idempotent
+        var drawer = hostDoc.getElementById('oe-copilot-drawer');
+        if (!drawer) return;
+        sidecarPositionWatcher = new MutationObserver(function () {
+            positionSidecar();
+        });
+        sidecarPositionWatcher.observe(drawer, {
+            attributes: true,
+            attributeFilter: ['aria-hidden', 'style', 'class']
+        });
+        hostWin.addEventListener('resize', positionSidecar);
+    }
+
     // ---- 7. Lazy-load the review modal ----------------------------------
 
     function openReviewModal(docId) {
-        if (!docId) return;
+        // TEMPORARY: diagnostic logging.
+        console.log('[hitl-banner] openReviewModal called. docId=' + docId + ' modalInjected=' + modalInjected);
+        if (!docId) {
+            console.log('[hitl-banner] openReviewModal: no docId, returning');
+            return;
+        }
 
         function showModal(extraction) {
             // Hand off to hitl-review.js. The modal is already injected;
@@ -318,12 +498,20 @@
         }
 
         if (modalInjected) {
+            console.log('[hitl-banner] modal already injected; calling showModal directly (no fetch)');
             showModal(currentExtraction);
+            // Reposition each open since drawer state may have changed.
+            hostWin.requestAnimationFrame(function () {
+                positionSidecar();
+                setTimeout(positionSidecar, 100);
+                setTimeout(positionSidecar, 400);
+            });
             return;
         }
 
         // First click: fetch the modal fragment and inject it.
         var url = MODULE_BASE + '/hitl-review-modal.php';
+        console.log('[hitl-banner] fetching modal from:', url);
         var xhr = new XMLHttpRequest();
         xhr.open('GET', url, true);
         xhr.setRequestHeader('Accept', 'text/html');
@@ -346,12 +534,62 @@
             container.id = 'oe-copilot-hitl-modal-root';
             container.innerHTML = xhr.responseText;
             hostDoc.body.appendChild(container);
-            modalInjected = true;
 
-            // Give injected scripts time to execute, then fire the open.
-            // requestAnimationFrame gives the browser one paint cycle.
-            hostWin.requestAnimationFrame(function () {
+            // Browser quirk: setting innerHTML parses <script> tags into
+            // the DOM but does NOT execute them. We must re-create each
+            // script element so the browser runs it. This is what sets
+            // window.OE_COPILOT_HITL_CONFIG (inline) and loads hitl-review.js
+            // (external) which renders the modal body.
+            //
+            // Chain external scripts via onload so they execute in document
+            // order: pdf.min.js → inline config setter → hitl-review.js.
+            var scripts = Array.prototype.slice.call(container.querySelectorAll('script'));
+
+            function loadNext(i, done) {
+                if (i >= scripts.length) { done(); return; }
+                var oldScript = scripts[i];
+                var newScript = hostDoc.createElement('script');
+                for (var a = 0; a < oldScript.attributes.length; a++) {
+                    var attr = oldScript.attributes[a];
+                    newScript.setAttribute(attr.name, attr.value);
+                }
+                newScript.textContent = oldScript.textContent;
+
+                var src = oldScript.getAttribute('src');
+                if (src) {
+                    // External script: wait for load before continuing chain.
+                    newScript.async = false;
+                    newScript.onload = function () { loadNext(i + 1, done); };
+                    newScript.onerror = function () {
+                        console.log('[hitl-banner] script failed to load:', src);
+                        loadNext(i + 1, done); // keep going; modal may still partial-render
+                    };
+                    if (oldScript.parentNode) {
+                        oldScript.parentNode.replaceChild(newScript, oldScript);
+                    }
+                } else {
+                    // Inline script: executes synchronously on insertion.
+                    if (oldScript.parentNode) {
+                        oldScript.parentNode.replaceChild(newScript, oldScript);
+                    }
+                    loadNext(i + 1, done);
+                }
+            }
+
+            loadNext(0, function () {
+                modalInjected = true;
+                console.log('[hitl-banner] modal scripts all loaded; dispatching open event');
                 showModal(currentExtraction);
+                // Position the sidecar relative to the Co-Pilot drawer
+                // and wire up MutationObserver for live repositioning.
+                hostWin.requestAnimationFrame(function () {
+                    positionSidecar();
+                    watchDrawerForRepositioning();
+                    // Bootstrap modal animation can take ~400ms; reposition
+                    // after that to catch the final layout.
+                    setTimeout(positionSidecar, 100);
+                    setTimeout(positionSidecar, 400);
+                });
             });
         };
         xhr.send();
@@ -477,13 +715,18 @@
      */
     function attachToDocumentsModule(win) {
         var doc = win.document;
+
+        // Style A: Angular Documents module pane.
         var pane = doc.querySelector('div.doc-doc-ls-8-preview');
         if (pane) {
             watchPreviewPane(pane);
         }
 
-        // MutationObserver to handle the pane appearing later (Angular
-        // bootstrap can lag behind DOMContentLoaded).
+        // Style B: legacy controller.php viewer — check immediately.
+        checkLegacyViewer(doc);
+
+        // MutationObserver to handle either pane appearing later (Angular
+        // bootstrap or the documents tab being clicked).
         if (!doc.body) return;
         var bodyObserver = new MutationObserver(function () {
             var p = doc.querySelector('div.doc-doc-ls-8-preview');
@@ -491,8 +734,53 @@
                 p.__hitlWatched = true;
                 watchPreviewPane(p);
             }
+            // Legacy viewer: re-check on every mutation since DocContents
+            // may be re-rendered when the user clicks a different doc.
+            checkLegacyViewer(doc);
         });
         bodyObserver.observe(doc.body, { childList: true, subtree: true });
+    }
+
+    /**
+     * Detect the legacy <tr id="DocContents"> viewer in the given doc and,
+     * if present, fire onDocumentOpened with its current doc_id and watch
+     * the inner iframe for src changes.
+     */
+    function checkLegacyViewer(doc) {
+        var contents = doc.getElementById('DocContents');
+        if (!contents) return;
+        var iframes = contents.querySelectorAll('iframe');
+        for (var i = 0; i < iframes.length; i++) {
+            var f = iframes[i];
+            var src = f.getAttribute('src') || '';
+            if (src.indexOf('controller.php') === -1) continue;
+            if (src.indexOf('document_id=') === -1) continue;
+
+            var initialDocId = docIdFromUrl(src);
+            if (initialDocId) onDocumentOpened(initialDocId);
+
+            // Watch for src changes on this iframe (user navigating to
+            // a different doc within the legacy viewer).
+            if (!f.__hitlWatched) {
+                f.__hitlWatched = true;
+                var attrObs = new MutationObserver(
+                    (function (frame) {
+                        return function (mutations) {
+                            for (var j = 0; j < mutations.length; j++) {
+                                if (mutations[j].attributeName !== 'src') continue;
+                                var newSrc = frame.getAttribute('src') || '';
+                                var newId = docIdFromUrl(newSrc);
+                                if (newId && newId !== currentDocId) {
+                                    onDocumentOpened(newId);
+                                }
+                            }
+                        };
+                    })(f)
+                );
+                attrObs.observe(f, { attributes: true, attributeFilter: ['src'] });
+            }
+            return; // first matching iframe wins
+        }
     }
 
     function tryAttachToFrame(iframeEl) {

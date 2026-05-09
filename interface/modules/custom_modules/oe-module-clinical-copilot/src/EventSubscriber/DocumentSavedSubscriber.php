@@ -269,15 +269,35 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
             //    Prior attempts were already deactivated at step 5 (IS_ACTIVE
             //    INVARIANT FIX).  No second markPriorAttemptsInactive() call here.
             //
-            //    P4 R1: for a successful agent extraction (status='ok'), we write
-            //    ExtractionStatus::PENDING_REVIEW instead of the raw agent status.
-            //    The round-trip is now deferred until the clinician explicitly
-            //    approves via POST approve_extraction.php.  For non-ok statuses
-            //    (error, refused) the agent status is stored verbatim — those rows
-            //    never reach the approve gate.
-            $persistedStatus = ($agentStatus === ExtractionStatus::OK)
-                ? ExtractionStatus::PENDING_REVIEW
-                : $agentStatus;
+            //    Status policy depends on the OPENEMR_HITL_GATE_ENABLED env flag:
+            //
+            //    - Flag=false (default, MVP/demo mode): write status='ok' and
+            //      run the FHIR round-trip synchronously below.  Clinical
+            //      tables populate immediately on upload.  HITL infrastructure
+            //      remains in code but dormant — banner doesn't fire on 'ok'
+            //      with stripped=0; modal/sidecar code never opens.
+            //
+            //    - Flag=true (P4 R1+R2 mode): write status='pending_review'
+            //      for successful extractions and DEFER the round-trip.  The
+            //      clinician must explicitly approve via
+            //      POST approve_extraction.php → roundtripFromExtractionId.
+            //      Prevents unreviewed LLM output from entering the chart.
+            //
+            //    For non-ok agent statuses (error, refused) the agent status
+            //    is stored verbatim regardless of the flag — those rows never
+            //    reach the approve gate either way.
+            $hitlGateEnabled = filter_var(
+                getenv('OPENEMR_HITL_GATE_ENABLED') ?: 'false',
+                FILTER_VALIDATE_BOOLEAN,
+            );
+
+            if ($agentStatus === ExtractionStatus::OK) {
+                $persistedStatus = $hitlGateEnabled
+                    ? ExtractionStatus::PENDING_REVIEW
+                    : ExtractionStatus::OK;
+            } else {
+                $persistedStatus = $agentStatus;
+            }
 
             $extractionId = $this->persistExtractionRow(
                 pid:                $sentinelPid,
@@ -301,25 +321,68 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
             );
 
             // 9. Write per-field verdict rows (P3).
+            //    writeAll returns field_path → ef_row_id for verified fields,
+            //    which is exactly the verifiedFieldMap shape RoundtripService
+            //    expects in demo mode (step 10 below).
+            $verifiedFieldMap = [];
             if ($extractionId > 0 && $fieldVerdicts !== []) {
-                $this->fieldsWriter->writeAll(
+                $verifiedFieldMap = $this->fieldsWriter->writeAll(
                     $extractionId,
                     $fieldVerdicts,
                     $doclingBlocks,
                 );
             }
 
-            // 10. FHIR round-trip REMOVED (P4 R1).
-            //     Round-trip now runs on demand when the clinician approves the
-            //     extraction via POST approve_extraction.php, which calls
-            //     CoPilotController::handleApprove → RoundtripService::roundtripFromExtractionId.
-            //     This prevents unreviewed LLM output from entering the clinical
-            //     tables without a human gate.
-            $this->logger->info('ClinicalCopilot: extraction persisted — awaiting clinician review', [
-                'extraction_id' => $extractionId,
-                'doc_ref_id'    => $docRefId,
-                'doc_type'      => $docType,
-                'status'        => $persistedStatus,
+            // 10. FHIR round-trip — gated by OPENEMR_HITL_GATE_ENABLED env flag.
+            //
+            //     Demo mode (flag=false, default): run round-trip synchronously
+            //     so the clinical tables (procedure_result, lists, prescriptions)
+            //     populate immediately on upload.  This is the pre-R1 MVP
+            //     behavior the demo expects.
+            //
+            //     HITL mode (flag=true): defer round-trip to the clinician
+            //     approve gate (see CoPilotController::dispatchApprove →
+            //     RoundtripService::roundtripFromExtractionId).
+            //
+            //     Either way, errors here are caught and logged structurally so
+            //     a partial round-trip failure never breaks the upload.
+            if (
+                !$hitlGateEnabled
+                && $extractionId > 0
+                && $persistedStatus === ExtractionStatus::OK
+            ) {
+                try {
+                    $extractionDecoded = json_decode($extractionJson, true);
+                    if (is_array($extractionDecoded)) {
+                        $this->roundtripService->roundtrip(
+                            extractionId:     $extractionId,
+                            patientId:        $pid,           // REAL OpenEMR pid, not sentinel
+                            docType:          $docType,
+                            extraction:       $extractionDecoded,
+                            docRefId:         $docRefId,
+                            verifiedFieldMap: $verifiedFieldMap,
+                            fieldsWriter:     $this->fieldsWriter,
+                        );
+                    }
+                } catch (Throwable $rtError) {
+                    // Structural-only log per AUDIT.md C-6.
+                    $this->logger->error('ClinicalCopilot: demo-mode round-trip failed', [
+                        'extraction_id'   => $extractionId,
+                        'doc_ref_id'      => $docRefId,
+                        'doc_type'        => $docType,
+                        'exception_class' => get_class($rtError),
+                        'file'            => basename($rtError->getFile()),
+                        'line'            => $rtError->getLine(),
+                    ]);
+                }
+            }
+
+            $this->logger->info('ClinicalCopilot: extraction persisted', [
+                'extraction_id'    => $extractionId,
+                'doc_ref_id'       => $docRefId,
+                'doc_type'         => $docType,
+                'status'           => $persistedStatus,
+                'hitl_gate_active' => $hitlGateEnabled,
             ]);
         } catch (Throwable $e) {
             // Structural-only log: exception class + file:line.  The full

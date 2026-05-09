@@ -121,16 +121,45 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
     No LLM is called here; coordinates are real layout-engine output.
 
     Raises RuntimeError if Docling is not installed.
+
+    Multi-page PDF note (bug fix):
+    Docling's default pipeline (StandardPdfPipeline + DoclingParseDocumentBackend)
+    rasterises each page via pypdfium2 before passing it to the layout model.
+    On memory-constrained hosts (e.g. the dev laptop running Docker + uvicorn)
+    the rasterisation of pages 2+ of a 3-page intake form throws std::bad_alloc
+    inside the pypdfium2 C extension, causing Docling to silently skip those
+    pages.  Page 1 succeeds; pages 2-N produce zero items.
+
+    Fix: for PDFs use PyPdfiumDocumentBackend, which extracts text and table
+    geometry directly from the PDF's embedded text layer (fast, zero
+    rasterisation, zero ML inference for the text path).  This is identical to
+    what the old PdfBackend.PYPDFIUM2 enum selected in earlier Docling versions.
+    Images (PNG/JPG) are unaffected — they still flow through the default
+    image pipeline.  Typed PDFs (all current fixtures) have a reliable text
+    layer, so the quality is equivalent to the layout-model path while
+    eliminating the memory spike.
     """
     try:
-        from docling.document_converter import DocumentConverter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
     except ImportError as exc:
         raise RuntimeError(
             "Docling is not installed. Add 'docling>=2.0.0' to requirements.txt "
             "and rebuild the Docker image. See W2_ARCHITECTURE.md §2.3 for the "
             "Mistral OCR API fallback if install is blocked."
         ) from exc
+
+    # For PDFs: use PyPdfiumDocumentBackend (direct text extraction, no
+    # layout-model rasterisation) to avoid std::bad_alloc on pages 2+ of
+    # multi-page typed intakes.  do_ocr=False because typed PDFs have an
+    # embedded text layer; do_table_structure=True preserves table markdown.
+    # Images (PNG/JPG) continue to use the default image pipeline.
+    pdf_pipeline_options = PdfPipelineOptions(
+        do_ocr=False,
+        do_table_structure=True,
+    )
 
     # Stage-4a: explicitly enable IMAGE input alongside PDF so PNG/JPG intake
     # forms and lab scans produced by phone-camera uploads also flow through
@@ -140,6 +169,12 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
     # MIME type is incidental.
     converter = DocumentConverter(
         allowed_formats=[InputFormat.PDF, InputFormat.IMAGE],
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=pdf_pipeline_options,
+                backend=PyPdfiumDocumentBackend,
+            ),
+        },
     )
     result = converter.convert(str(pdf_path))
     doc = result.document
