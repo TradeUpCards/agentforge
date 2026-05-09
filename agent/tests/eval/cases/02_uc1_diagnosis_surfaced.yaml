@@ -20,6 +20,9 @@ messages:
 
 expected:
   status: ok
+  # PRD §5 — every citation has populated quote_or_value distinct from
+  # source_id / field_or_chunk_id. Added 2026-05-09 with Aria's pivot.
+  citation_has_quote: true
   must_mention:
     - "diabetes"
   expect_tools_called:

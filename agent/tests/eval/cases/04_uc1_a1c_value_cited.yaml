@@ -25,5 +25,11 @@ expected:
   must_mention:
     - "7.8"
   min_citations: 5
+  # PRD §5 — populated quote_or_value distinct from source_id / field_or_chunk_id.
+  # Particularly meaningful here: the A1c lab citation should carry the
+  # actual "HbA1c 7.8 %" value (post-Aria-pivot agent.py:1244 / Bram's
+  # evidence_retriever fix), not echo "procedure_result:5421".
+  # Added 2026-05-09.
+  citation_has_quote: true
   expect_tools_called:
     - get_recent_labs
