@@ -103,13 +103,12 @@ export function AddAllergyModal({ patientId, open, onClose }: AddAllergyModalPro
         onClick={onClose}
         className="fixed inset-0 z-50 bg-black/40 motion-safe:transition-opacity motion-safe:duration-150"
       />
-      {/* Modal container — full screen on phone (top-aligned), centered
-          card on tablet+. Flex column inside the dialog so the header
-          and footer stay fixed while the form fields scroll if the
-          content overflows (e.g., on a phone with the soft keyboard
-          taking ~50% of the viewport, where a static layout would push
-          the severity select off the bottom). */}
-      <div className="fixed inset-0 z-50 flex items-stretch md:items-center justify-center p-0 md:p-4 pointer-events-none">
+      {/* Modal container — bottom-sheet on phone (slides up from
+          bottom, capped at 90 vh), centered card on tablet+. Flex
+          column inside the dialog so the header and footer stay fixed
+          while the form fields scroll if the content overflows
+          (especially with the soft keyboard up). */}
+      <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center p-0 md:p-4 pointer-events-none">
         <form
           role="dialog"
           aria-modal="true"
@@ -122,8 +121,8 @@ export function AddAllergyModal({ patientId, open, onClose }: AddAllergyModalPro
           className="
             pointer-events-auto bg-white shadow-2xl
             w-full md:w-[520px]
-            md:rounded-lg
-            md:max-h-[calc(100vh-2rem)]
+            max-h-[90vh] md:max-h-[calc(100vh-2rem)]
+            rounded-t-2xl md:rounded-lg
             flex flex-col
           "
         >
