@@ -904,3 +904,101 @@
     padding-top: 3px;
     padding-bottom: 3px;
 }
+
+/* ---------------------------------------------------------------------- */
+/*  R2 demo pivot: sidecar mode                                           */
+/* ---------------------------------------------------------------------- */
+/*                                                                        */
+/*  Activated by `data-hitl-sidecar="1"` on the modal element. Converts   */
+/*  the Bootstrap modal into a right-edge fixed-position sidebar so the   */
+/*  clinician can review extractions alongside the document (the document */
+/*  is already visible in the page; no need for the modal's own PDF       */
+/*  preview pane).                                                        */
+/*                                                                        */
+/*  All existing modal JS (Bootstrap show/hide + hitl-review.js field-row */
+/*  logic) works unchanged — only the visual frame transforms.            */
+/*                                                                        */
+/*  R3 will pull this out of the modal wrapper entirely and add bbox      */
+/*  overlay on the document iframe behind the sidecar.                    */
+/* ---------------------------------------------------------------------- */
+
+#hitl-review-modal[data-hitl-sidecar="1"] {
+    background: transparent !important;
+    pointer-events: none !important;  /* let clicks fall through outside dialog */
+    overflow: visible !important;
+}
+
+/* Position to peer with the Co-Pilot panel:
+ *   - top offset (~90px) sits the sidecar below the OpenEMR top nav so it
+ *     starts at the same Y as Co-Pilot
+ *   - right offset (~320px) docks the sidecar to the LEFT of Co-Pilot
+ *     (Co-Pilot is ~300-320px wide on the right edge)
+ *   - bottom: 0 lets it match Co-Pilot's lower bound
+ *   These values are conservative defaults for a stock OpenEMR install;
+ *   tweak if the nav-bar height or Co-Pilot width differ on your build. */
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-dialog {
+    position: fixed !important;
+    top: 90px !important;
+    right: 320px !important;
+    bottom: 0 !important;
+    left: auto !important;
+    margin: 0 !important;
+    width: 460px !important;
+    max-width: 460px !important;
+    height: auto !important;
+    max-height: calc(100vh - 90px) !important;
+    transform: none !important;
+    pointer-events: auto !important;  /* dialog itself is clickable */
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-content {
+    height: 100% !important;
+    max-height: calc(100vh - 90px) !important;
+    border-radius: 0 !important;
+    border-left: 1px solid #ccc !important;
+    border-top: none !important;
+    border-bottom: none !important;
+    border-right: none !important;
+    box-shadow: -2px 0 12px rgba(0, 0, 0, 0.15) !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-header {
+    flex: 0 0 auto !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-body {
+    flex: 1 1 auto !important;
+    overflow-y: auto !important;
+    padding: 8px !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-footer {
+    flex: 0 0 auto !important;
+    flex-wrap: wrap !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .hitl-body {
+    display: block !important;
+    height: auto !important;
+}
+
+/* Hide the broken PDF preview pane — the actual doc is already on screen
+ * behind the sidecar. R3 will wire bbox overlays onto that iframe. */
+#hitl-review-modal[data-hitl-sidecar="1"] .hitl-pane-left {
+    display: none !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .hitl-pane-right {
+    width: 100% !important;
+    flex: none !important;
+    padding: 0 !important;
+    border-left: none !important;
+}
+
+/* Defensive: suppress any backdrop that may slip through. */
+#hitl-review-modal[data-hitl-sidecar="1"] ~ .modal-backdrop,
+.modal-backdrop[data-for="hitl-review-modal"] {
+    display: none !important;
+}
