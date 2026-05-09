@@ -1155,14 +1155,24 @@ EOF
     echo "Removed worktree $worktree"
 
     # Step 11: Branch delete.
+    # Treat "branch already absent" as a soft success: the goal of this step
+    # is to ensure the branch is gone, and an MR-merge with auto-delete (or
+    # an earlier cleanup) may have already deleted it. Aborting here would
+    # short-circuit the rotation step (Step 15) and leave the YAML stuck on
+    # the just-finished phase — exactly the failure mode we hit when the
+    # source branch was deleted on MR merge.
     if [ "$keep_branch" -ne 1 ]; then
-        local branch_flag="-d"
-        [ "$force" -eq 1 ] && branch_flag="-D"
-        if ! git -C "$AGENTFORGE_ROOT" branch "$branch_flag" "$branch" 2>&1; then
-            echo "finish_lead: 'git branch $branch_flag $branch' failed" >&2
-            return 1
+        if ! git -C "$AGENTFORGE_ROOT" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+            echo "Branch $branch already absent (likely auto-deleted on MR merge); skipping delete"
+        else
+            local branch_flag="-d"
+            [ "$force" -eq 1 ] && branch_flag="-D"
+            if ! git -C "$AGENTFORGE_ROOT" branch "$branch_flag" "$branch" 2>&1; then
+                echo "finish_lead: 'git branch $branch_flag $branch' failed" >&2
+                return 1
+            fi
+            echo "Deleted branch $branch"
         fi
-        echo "Deleted branch $branch"
     fi
 
     # Step 12: Atomic workspace JSON edit.
