@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useAllergies } from '../../hooks/useAllergies'
 import { extractBundleResources } from '../../utils/fhirParsers'
 import { formatDate } from '../../utils/formatters'
@@ -7,6 +8,7 @@ import { CardShell } from './CardShell'
 import { Badge } from '../ui/Badge'
 import { EmptyState } from '../ui/EmptyState'
 import { ExpandableRow, DetailGrid } from '../ui/ExpandableRow'
+import { AddAllergyModal } from './AddAllergyModal'
 
 /**
  * PDF requirement #3a — Allergies card.
@@ -27,6 +29,7 @@ import { ExpandableRow, DetailGrid } from '../ui/ExpandableRow'
 export function AllergiesCard({ patientId }: { patientId: string }) {
   const { data, isLoading, error, refetch } = useAllergies(patientId)
   const allergies = data ? extractBundleResources<FhirAllergyIntolerance>(data) : []
+  const [addModalOpen, setAddModalOpen] = useState(false)
 
   return (
     <CardShell
@@ -35,6 +38,25 @@ export function AllergiesCard({ patientId }: { patientId: string }) {
       error={error}
       onRetry={() => void refetch()}
       editHref={openemrEditLink('allergy')}
+      headerExtra={
+        <button
+          type="button"
+          onClick={() => setAddModalOpen(true)}
+          aria-label="Add allergy"
+          title="Add allergy"
+          className="
+            inline-flex items-center justify-center
+            p-1 min-h-7 min-w-7 md:min-h-6 md:min-w-6
+            text-blue-700 hover:text-blue-900 hover:bg-blue-50
+            rounded
+            focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+          "
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+            <path d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2" />
+          </svg>
+        </button>
+      }
     >
       {!isLoading && allergies.length === 0 ? (
         <EmptyState message={data ? 'No Known Allergies' : 'Nothing Recorded'} />
@@ -49,6 +71,11 @@ export function AllergiesCard({ patientId }: { patientId: string }) {
           ))}
         </ul>
       )}
+      <AddAllergyModal
+        patientId={patientId}
+        open={addModalOpen}
+        onClose={() => setAddModalOpen(false)}
+      />
     </CardShell>
   )
 }

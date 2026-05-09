@@ -66,3 +66,32 @@ export function standardApiGet<T>(path: string, token: string): Promise<T> {
   const url = path.startsWith('http') ? path : `${STANDARD_API_BASE}${path}`
   return request<T>(url, token, 'application/json')
 }
+
+/**
+ * POST a FHIR resource. Used for the Add-Allergy demo (the only WRITE
+ * surface in the dashboard). Same auth + error-handling contract as
+ * `fhirGet`; throws FhirError on non-2xx.
+ */
+export async function fhirPost<T>(
+  path: string,
+  body: unknown,
+  token: string,
+): Promise<T> {
+  const url = path.startsWith('http') ? path : `${FHIR_BASE}${path}`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/fhir+json',
+      Accept: 'application/fhir+json',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    void res.text().catch(() => {
+      /* ignore */
+    })
+    throw new FhirError(res.status, res.statusText, url)
+  }
+  return res.json() as Promise<T>
+}

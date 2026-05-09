@@ -17,6 +17,14 @@ interface CardShellProps {
    * "Edit {title} in OpenEMR" when editHref is set.
    */
   editLabel?: string
+  /**
+   * Optional extra content rendered in the title bar's right cluster,
+   * before the spinner/edit-pencil. Used by AllergiesCard to slot its
+   * Add (+) button. Card-specific actions (vs. the shared edit pencil)
+   * go here so each card can express its own primary action without
+   * each shell variant growing a unique slot.
+   */
+  headerExtra?: React.ReactNode
   children: React.ReactNode
 }
 
@@ -48,6 +56,7 @@ export function CardShell({
   onRetry,
   editHref,
   editLabel,
+  headerExtra,
   children,
 }: CardShellProps) {
   const slug = slugify(title)
@@ -68,6 +77,7 @@ export function CardShell({
           <DragHandleIcon />
         </h2>
         <div className="flex items-center gap-2">
+          {headerExtra}
           {isLoading && <Spinner label={`Loading ${title}`} />}
           {editHref ? (
             <a

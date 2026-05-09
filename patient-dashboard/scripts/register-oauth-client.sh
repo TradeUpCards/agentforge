@@ -13,6 +13,6 @@ OPENEMR_BASE="${OPENEMR_BASE:-https://localhost:9300}"
 
 curl -k -X POST "${OPENEMR_BASE}/oauth2/default/registration" \
   -H 'Content-Type: application/json' \
-  -d '{"client_name":"OpenEMR Patient Dashboard (Modern)","application_type":"private","redirect_uris":["http://localhost:5173/callback"],"post_logout_redirect_uris":["http://localhost:5173/"],"token_endpoint_auth_method":"client_secret_post","scope":"openid fhirUser offline_access user/Patient.rs user/AllergyIntolerance.rs user/Condition.rs user/MedicationRequest.rs user/MedicationDispense.rs user/CareTeam.rs user/Encounter.rs"}'
+  -d '{"client_name":"OpenEMR Patient Dashboard (Modern)","application_type":"private","redirect_uris":["http://localhost:5173/callback"],"post_logout_redirect_uris":["http://localhost:5173/"],"token_endpoint_auth_method":"client_secret_post","scope":"openid fhirUser offline_access user/Patient.rs user/AllergyIntolerance.cu user/AllergyIntolerance.rs user/Condition.rs user/MedicationRequest.rs user/MedicationDispense.rs user/CareTeam.rs user/Encounter.rs user/DocumentReference.rs"}'
 
 echo

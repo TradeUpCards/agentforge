@@ -31,12 +31,18 @@ const SCOPES = [
   'fhirUser',
   'offline_access',
   'user/Patient.rs',
+  // Allergies are the one resource we demonstrate WRITE on (Add Allergy
+  // modal in AllergiesCard). `.cu` = create + update. The other clinical
+  // resources stay read-only — adding more write scopes would expand
+  // the token's authority beyond what the dashboard exercises today.
+  'user/AllergyIntolerance.cu',
   'user/AllergyIntolerance.rs',
   'user/Condition.rs',
   'user/MedicationRequest.rs',
   'user/MedicationDispense.rs',
   'user/CareTeam.rs',
   'user/Encounter.rs',
+  'user/DocumentReference.rs',
 ].join(' ')
 
 export const oidcConfig: AuthProviderProps = {
