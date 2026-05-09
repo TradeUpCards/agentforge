@@ -462,11 +462,15 @@
     }
 
     /**
-     * Open the cited document in a new browser tab, scrolled to the
-     * cited page (Chrome's native PDF viewer honours `#page=N` fragments).
-     * The bbox is included in the URL fragment as `&bbox=x0,y0,x1,y1`
-     * for a future PDF.js overlay; current Chrome viewer ignores it
-     * gracefully.
+     * Open the cited document with bbox overlay in the citation sidecar.
+     *
+     * Dispatches a postMessage to the parent (top) window where
+     * citation-sidecar.js handles the actual rendering: PDF.js draws
+     * the cited page, an SVG overlay highlights the bbox.  This is the
+     * PRD §5 visual-bbox-overlay path.
+     *
+     * Falls back to opening the document in a new tab (no bbox) if
+     * the parent window is unreachable — same posture as before.
      */
     function openSourceDocument(data) {
         var pid = config.patientId;
@@ -479,6 +483,25 @@
         }
         if (!pid || !data || !data.document_id) return;
 
+        // Preferred path: dispatch to the citation sidecar in the top
+        // window for PDF.js + bbox overlay rendering.
+        try {
+            (window.parent || window).postMessage({
+                type: 'oe-copilot/show-citation-source',
+                citation: {
+                    documentId: data.document_id,
+                    page: data.page,
+                    blockId: data.block_id || null,
+                    bbox: data.bbox || null,
+                    snippet: data.snippet || '',
+                    patientId: String(pid),
+                },
+            }, '*');
+            return;
+        } catch (_) { /* fall through to new-tab */ }
+
+        // Fallback: open in a new tab (no bbox; Chrome PDF viewer can't
+        // render overlays).  Reached only when postMessage fails (rare).
         var url = '/controller.php?document&retrieve' +
             '&patient_id=' + encodeURIComponent(String(pid)) +
             '&document_id=' + encodeURIComponent(String(data.document_id)) +
@@ -486,8 +509,6 @@
             '#page=' + encodeURIComponent(String(data.page));
 
         try {
-            // Open in top window so the document iframe in the chart can
-            // pick it up if the user is already on the Documents tab.
             (window.parent || window).open(url, '_blank', 'noopener,noreferrer');
         } catch (_) {
             window.open(url, '_blank', 'noopener,noreferrer');
