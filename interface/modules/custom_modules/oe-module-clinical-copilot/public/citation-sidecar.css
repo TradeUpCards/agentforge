@@ -134,33 +134,61 @@
     transition: fill 200ms, stroke 200ms;
 }
 
-/* ---- Collapse handle ------------------------------------------------- */
-
+/* ---- Collapse handle -------------------------------------------------
+ *
+ * Positioned on the RIGHT edge of the sidecar so it lives in the SAME
+ * vertical column as the Co-Pilot drawer's chevron (which sits on the
+ * LEFT edge of the Co-Pilot drawer).  Stacked BELOW Co-Pilot's chevron
+ * at top: calc(50% + 38px) so the two affordances are visually paired
+ * (Co-Pilot drawer toggle + citation sidecar toggle).
+ *
+ * Blue-filled to differentiate from Co-Pilot's neutral chevron.
+ *
+ * Only renders while the sidecar is visible — when the parent is in
+ * `--hidden` state, the handle is hidden too (parent transform pushes
+ * it off-screen; the CSS rule below also explicitly hides it for
+ * robustness).
+ */
 #oe-copilot-citation-sidecar .oe-citation-sidecar__handle {
     position: absolute;
-    top: 50%;
-    left: -1px;
-    transform: translate(-100%, -50%);
-    background: #f9fafb;
-    border: 1px solid #d1d5db;
-    border-right: none;
-    border-radius: 6px 0 0 6px;
+    top: calc(50% + 38px);
+    right: 0;
+    transform: translate(100%, -50%);
+    background: #0d6efd;        /* Bootstrap primary blue, filled */
+    border: 1px solid #0a58ca;
+    border-left: none;
+    border-radius: 0 8px 8px 0; /* round on outer (right) side */
     width: 22px;
-    height: 60px;
+    height: 56px;
     cursor: pointer;
-    color: #6b7280;
-    font-size: 18px;
-    line-height: 60px;
+    color: #ffffff;
+    font-size: 16px;
+    line-height: 56px;
     text-align: center;
     padding: 0;
-    box-shadow: -2px 0 4px rgba(0, 0, 0, 0.06);
+    box-shadow: 2px 0 6px rgba(0, 0, 0, 0.15);
     transition: background 120ms, color 120ms;
+    z-index: 1;                  /* above sidecar content but below modals */
 }
 #oe-copilot-citation-sidecar .oe-citation-sidecar__handle:hover {
-    background: #e5e7eb;
-    color: #111827;
+    background: #0b5ed7;
+    color: #ffffff;
 }
+
+/* Belt-and-suspenders: explicitly hide the handle when the sidecar is
+ * hidden.  The parent's translateX(120%) already pushes it off-screen,
+ * but display:none guarantees it's never reachable by tab order or
+ * pointer events even on browsers that hiccup on the transform. */
+#oe-copilot-citation-sidecar.oe-citation-sidecar--hidden .oe-citation-sidecar__handle {
+    display: none;
+}
+
 #oe-copilot-citation-sidecar .oe-citation-sidecar__handle-chevron {
     display: inline-block;
     transition: transform 220ms;
+}
+/* When collapsed, the icon points the other way to suggest "click to
+ * pull me back out". */
+#oe-copilot-citation-sidecar.oe-citation-sidecar--collapsed .oe-citation-sidecar__handle-chevron {
+    transform: rotate(180deg);
 }

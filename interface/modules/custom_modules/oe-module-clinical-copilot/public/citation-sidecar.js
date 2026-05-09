@@ -398,9 +398,22 @@
         sidecarBodyEl.appendChild(wrap);
 
         // Render the page to canvas.
+        //
+        // annotationMode: DISABLE — suppresses PDF.js's default form-field
+        // highlight rendering (pink/magenta tint over form fields).  Lab
+        // PDFs are often authored as fillable forms; without this flag,
+        // every form field area gets a colored overlay that visually
+        // competes with our own bbox highlight.  We only need the page
+        // content for visual provenance — interactivity is irrelevant.
+        var annotationMode = (
+            hostWin.pdfjsLib && hostWin.pdfjsLib.AnnotationMode
+                ? hostWin.pdfjsLib.AnnotationMode.DISABLE
+                : 0
+        );
         page.render({
             canvasContext: canvas.getContext('2d'),
             viewport: viewport,
+            annotationMode: annotationMode,
         }).promise.then(function () {
             drawBboxOverlay(svg, naturalViewport, scale, citation);
             // Scroll to the bbox after render so the highlight is in view.
