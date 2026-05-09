@@ -199,30 +199,58 @@ export function AddAllergyModal({ patientId, open, onClose }: AddAllergyModalPro
             </div>
 
             <div>
-              <label
-                htmlFor={severityId}
+              <span
+                id={severityId}
                 className="block text-sm font-medium text-gray-700 mb-1"
               >
                 Severity <span className="text-gray-500 font-normal">(optional)</span>
-              </label>
-              <select
-                id={severityId}
-                value={severity}
-                onChange={(e) =>
-                  setSeverity(e.target.value as '' | 'mild' | 'moderate' | 'severe')
-                }
-                className="
-                  w-full px-3 py-2 min-h-11
-                  border border-gray-300 rounded
-                  text-sm bg-white
-                  focus:outline-2 focus:outline-blue-600 focus:outline-offset-1
-                "
+              </span>
+              {/*
+                Button-group radio pattern instead of a native <select>.
+                Native dropdowns overflow the viewport when the field
+                is near the bottom of a modal (verified on phone
+                portrait — `Severe` option clipped off-screen). Button
+                group keeps every option visible at once, no overlay
+                positioning to fight, and the larger tap targets are
+                better for touch anyway.
+              */}
+              <div
+                role="radiogroup"
+                aria-labelledby={severityId}
+                className="grid grid-cols-2 gap-2 sm:grid-cols-4"
               >
-                <option value="">— Not specified —</option>
-                <option value="mild">Mild</option>
-                <option value="moderate">Moderate</option>
-                <option value="severe">Severe</option>
-              </select>
+                {(
+                  [
+                    { value: '', label: 'Not specified' },
+                    { value: 'mild', label: 'Mild' },
+                    { value: 'moderate', label: 'Moderate' },
+                    { value: 'severe', label: 'Severe' },
+                  ] as const
+                ).map((o) => {
+                  const selected = severity === o.value
+                  return (
+                    <button
+                      key={o.value || 'unspecified'}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => setSeverity(o.value)}
+                      className={`
+                        min-h-11 px-3 py-2 text-sm rounded border
+                        focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600
+                        motion-safe:transition-colors
+                        ${
+                          selected
+                            ? 'border-blue-700 bg-blue-50 text-blue-700 font-semibold'
+                            : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+                        }
+                      `}
+                    >
+                      {o.label}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
 
             {errorMessage && (
