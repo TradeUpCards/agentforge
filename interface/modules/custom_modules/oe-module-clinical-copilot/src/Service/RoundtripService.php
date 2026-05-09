@@ -843,6 +843,42 @@ class RoundtripService
                 continue;
             }
 
+            // PRD §FHIR-and-OpenEMR-integrity — patient-scoped dedup.
+            // If this allergy substance already exists in `lists` for this
+            // patient (from any prior extraction or any document), UPDATE
+            // that row in place rather than INSERTing a new duplicate.
+            // Match on case-insensitive trimmed substance name; ignores
+            // dosage / severity / reaction differences (those get refreshed
+            // on UPDATE).  Patient-scoped lookup runs FIRST; the doc-scoped
+            // P3 path below catches re-extractions of the same document
+            // that haven't yet propagated through the natural-key index.
+            $existingPatientListId = $this->findActiveAllergyForPatient(
+                $patientId,
+                $substance,
+            );
+            if ($existingPatientListId !== null) {
+                QueryUtils::sqlStatementThrowException(
+                    "UPDATE lists
+                        SET title = ?, severity_al = ?, reaction = ?
+                      WHERE id = ?",
+                    [
+                        $substance,
+                        $this->mapSeverity((string) ($row['severity'] ?? '')),
+                        (string) ($row['reaction'] ?? ''),
+                        $existingPatientListId,
+                    ],
+                );
+                $this->updateFieldPointer(
+                    $fieldsWriter,
+                    $verifiedFieldMap,
+                    (string) $idx,
+                    'lists',
+                    $existingPatientListId,
+                );
+                $upserted++;
+                continue;
+            }
+
             // P3 cross-attempt deduplication.
             $naturalKey = '';
             if ($docRefId !== '') {
@@ -967,6 +1003,41 @@ class RoundtripService
                 : null;
             $name = (string) ($row['name'] ?? '');
             if ($name === '') {
+                continue;
+            }
+
+            // PRD §FHIR-and-OpenEMR-integrity — patient-scoped dedup.
+            // If this drug name already exists active for this patient,
+            // UPDATE the row's dosage and skip the INSERT.  Match on
+            // case-insensitive trimmed drug name; the dosage string
+            // (composed of dose + frequency) is refreshed in place so
+            // the latest extraction's read of the medication wins.
+            $dosageStr = trim(
+                (string) ($row['dose'] ?? '') . ' ' . (string) ($row['frequency'] ?? '')
+            );
+            $existingPatientPrescriptionId = $this->findActivePrescriptionForPatient(
+                $patientId,
+                $name,
+            );
+            if ($existingPatientPrescriptionId !== null) {
+                QueryUtils::sqlStatementThrowException(
+                    "UPDATE prescriptions
+                        SET drug = ?, dosage = ?
+                      WHERE id = ?",
+                    [
+                        $name,
+                        $dosageStr,
+                        $existingPatientPrescriptionId,
+                    ],
+                );
+                $this->updateFieldPointer(
+                    $fieldsWriter,
+                    $verifiedFieldMap,
+                    (string) $idx,
+                    'prescriptions',
+                    $existingPatientPrescriptionId,
+                );
+                $upserted++;
                 continue;
             }
 
@@ -1136,6 +1207,65 @@ class RoundtripService
      * a schema migration for the P3 MR while keeping the cross-attempt lookup
      * contained within the fhir_links table.
      */
+
+    /**
+     * Patient-scoped dedup lookup for an allergy.
+     *
+     * Returns the `lists.id` of an active allergy entry whose substance
+     * (case- and whitespace-insensitive) matches the given substance for
+     * this patient, or null if no such row exists.
+     *
+     * Used by roundtripAllergies() to avoid creating duplicate `lists` rows
+     * when the same intake form is uploaded twice (different doc_ids), or
+     * when two different intakes for the same patient list the same allergy.
+     * PRD §FHIR-and-OpenEMR-integrity requires no-duplicates per patient.
+     *
+     * @return int|null
+     */
+    private function findActiveAllergyForPatient(int $patientId, string $substance): ?int
+    {
+        $rows = QueryUtils::fetchRecords(
+            "SELECT id
+               FROM lists
+              WHERE pid = ?
+                AND type = 'allergy'
+                AND activity = 1
+                AND LOWER(TRIM(title)) = LOWER(TRIM(?))
+              ORDER BY id ASC
+              LIMIT 1",
+            [$patientId, $substance],
+        );
+        return $rows === [] ? null : (int) $rows[0]['id'];
+    }
+
+    /**
+     * Patient-scoped dedup lookup for a prescription.
+     *
+     * Returns the `prescriptions.id` of an active prescription whose drug
+     * name (case- and whitespace-insensitive) matches for this patient,
+     * or null if no such row exists.
+     *
+     * Same dedup rationale as findActiveAllergyForPatient().  Match is on
+     * drug name only — if the dosage string differs between extractions,
+     * the caller refreshes it on UPDATE so the latest extraction wins.
+     *
+     * @return int|null
+     */
+    private function findActivePrescriptionForPatient(int $patientId, string $drug): ?int
+    {
+        $rows = QueryUtils::fetchRecords(
+            "SELECT id
+               FROM prescriptions
+              WHERE patient_id = ?
+                AND active = 1
+                AND LOWER(TRIM(drug)) = LOWER(TRIM(?))
+              ORDER BY id ASC
+              LIMIT 1",
+            [$patientId, $drug],
+        );
+        return $rows === [] ? null : (int) $rows[0]['id'];
+    }
+
     private function findClinicalRowByNaturalKey(
         string $docRefId,
         string $targetTable,

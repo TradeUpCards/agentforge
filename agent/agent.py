@@ -1241,10 +1241,16 @@ async def run_chat(
     audit.final_response = prose
     # Derive Citation objects from verified claim source_record_ids.
     # W2_ARCHITECTURE.md §7.3 — source_type discriminates patient_record vs guideline.
-    # quote_or_value left empty here; full threading is a week-3 enhancement.
+    # quote_or_value carries the verified claim's text — the LLM's rendering of the
+    # cited fact (e.g. "HDL cholesterol is 48 mg/dL").  Capped at 80 chars to keep
+    # the response payload compact.  PRD §5 minimum citation shape compliance:
+    # quote_or_value is now populated rather than empty (was a documented W3 gap).
     _derived_citations: list[Citation] = []
     _seen_source_ids: set[str] = set()
     for _claim in verdict.claims_passed:
+        _quote = (_claim.text or "").strip()
+        if len(_quote) > 80:
+            _quote = _quote[:77] + "..."
         for _raw_id in (_claim.source_record_ids or []):
             if _raw_id in _seen_source_ids:
                 continue
@@ -1255,14 +1261,14 @@ async def run_chat(
                     source_type="guideline",
                     source_id=_chunk_id,
                     field_or_chunk_id=_chunk_id,
-                    quote_or_value="",
+                    quote_or_value=_quote,
                 ))
             else:
                 _derived_citations.append(Citation(
                     source_type="patient_record",
                     source_id=_raw_id,
                     field_or_chunk_id=_raw_id,
-                    quote_or_value="",
+                    quote_or_value=_quote,
                 ))
     return _close_audit(audit, started_at, AgentResponse(
         message=Message(role=Role.ASSISTANT, content=prose),

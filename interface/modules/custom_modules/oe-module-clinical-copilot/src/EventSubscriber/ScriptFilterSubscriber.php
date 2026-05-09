@@ -70,6 +70,22 @@ final class ScriptFilterSubscriber implements EventSubscriberInterface
             . self::MODULE_PUBLIC_PATH . '/hitl-banner.js'
             . $this->mtimeQuery('/hitl-banner.js');
 
+        // PDF.js bundle (vendored under public/vendor/pdfjs/) — required by
+        // citation-sidecar.js to render the cited PDF page with bbox overlay.
+        // Stays silent on pages where the sidecar never opens.
+        $scripts[] = OEGlobalsBag::getInstance()->getWebRoot()
+            . self::MODULE_PUBLIC_PATH . '/vendor/pdfjs/pdf.min.js'
+            . $this->mtimeQuery('/vendor/pdfjs/pdf.min.js');
+
+        // Citation-source sidecar (PRD §5 visual PDF bounding-box overlay).
+        // Lives in the top frame.  Listens for the
+        // 'oe-copilot/show-citation-source' postMessage from chat-panel.js;
+        // renders the cited page in PDF.js with a green SVG bbox overlay.
+        // Self-suppresses on pages without an active citation click.
+        $scripts[] = OEGlobalsBag::getInstance()->getWebRoot()
+            . self::MODULE_PUBLIC_PATH . '/citation-sidecar.js'
+            . $this->mtimeQuery('/citation-sidecar.js');
+
         $event->setScripts($scripts);
     }
 
@@ -82,6 +98,9 @@ final class ScriptFilterSubscriber implements EventSubscriberInterface
         $styles[] = OEGlobalsBag::getInstance()->getWebRoot()
             . self::MODULE_PUBLIC_PATH . '/chart-bootstrap.css'
             . $this->mtimeQuery('/chart-bootstrap.css');
+        $styles[] = OEGlobalsBag::getInstance()->getWebRoot()
+            . self::MODULE_PUBLIC_PATH . '/citation-sidecar.css'
+            . $this->mtimeQuery('/citation-sidecar.css');
         $event->setStyles($styles);
     }
 

@@ -20,6 +20,20 @@
     var config = window.OE_COPILOT_CONFIG || {};
     var labels = config.labels || {};
 
+    // Resolve the OpenEMR module base path so we can call sibling endpoints
+    // without hardcoding webroot. Mirrors hitl-banner.js's resolveModuleBase.
+    // Used by the citation→bbox resolver feature (PRD §5).
+    var MODULE_BASE = (function () {
+        var scripts = document.getElementsByTagName('script');
+        for (var i = scripts.length - 1; i >= 0; i--) {
+            var src = scripts[i].src || '';
+            if (src.indexOf('chat-panel.js') !== -1) {
+                return src.replace(/\/chat-panel\.js.*$/, '');
+            }
+        }
+        return '/interface/modules/custom_modules/oe-module-clinical-copilot/public';
+    })();
+
     // Announce our pid to the parent shell so chart-bootstrap.js can
     // update its `chatRenderedForPid` tracker. Fires on every load —
     // initial open, manual refresh after the patient-changed banner,
@@ -344,6 +358,171 @@
 
         openPopover = { badge: badge, popover: popover, recordId: id };
         requestChartHighlight(id);
+
+        // PRD §5 visual provenance: kick off async resolver call to find
+        // the document/page/bbox for this citation. If it traces back to
+        // an uploaded document, append a "View in document" section to
+        // the popover. Silent no-op for citations that don't trace
+        // (manually-entered chart rows, guidelines).
+        resolveCitationAndAppend(id, popover);
+    }
+
+    /**
+     * Call /resolve_citation.php for this citation's record_id and, if
+     * the citation traces back to a document, append a click-to-source
+     * section to the popover.
+     *
+     * The popover is already in the DOM; we append the new section
+     * asynchronously so the user sees the chart-side popover immediately
+     * and the document trace appears once the lookup completes.
+     */
+    function resolveCitationAndAppend(recordId, popover) {
+        // Patient-record citations have source_id format "table:row_id".
+        // The resolver also handles extracted_document and guideline,
+        // but the chat panel mainly emits patient_record references.
+        if (!recordId || !popover) return;
+
+        var url = MODULE_BASE + '/resolve_citation.php' +
+            '?source_type=patient_record' +
+            '&source_id=' + encodeURIComponent(recordId);
+
+        fetch(url, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/json' },
+        })
+            .then(function (r) {
+                if (r.status === 404) return null;        // citation doesn't trace; silent
+                if (!r.ok) throw new Error('resolver_' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                if (!data || !popover.parentNode) return; // popover may have closed
+                appendSourceSection(popover, recordId, data);
+            })
+            .catch(function (_err) {
+                // Network/auth error — no banner. Citation popover still
+                // shows the structured record fields; this is just an
+                // optional enrichment.
+            });
+    }
+
+    /**
+     * Append a "View in document" section to the citation popover.
+     * Shows: document id, page number, optional snippet, and a button
+     * that opens the underlying file.
+     *
+     * @param {HTMLElement} popover
+     * @param {string}      recordId
+     * @param {{document_id: number|string, page: number, block_id: string|null,
+     *          bbox: {x0:number, y0:number, x1:number, y1:number},
+     *          snippet: string}} data
+     */
+    function appendSourceSection(popover, recordId, data) {
+        var section = document.createElement('div');
+        section.className = 'copilot-citation__source-section';
+        section.style.cssText =
+            'margin-top:8px; padding-top:8px; border-top:1px solid #e5e7eb; ' +
+            'display:flex; flex-direction:column; gap:4px;';
+
+        var heading = document.createElement('div');
+        heading.style.cssText = 'font-weight:600; font-size:12px; color:#111827;';
+        heading.textContent = labels.viewInSourceHeading || 'Source document';
+        section.appendChild(heading);
+
+        var meta = document.createElement('div');
+        meta.style.cssText = 'font-size:12px; color:#374151;';
+        meta.textContent =
+            'Document ' + escapeHtmlText(String(data.document_id)) +
+            ' · page ' + escapeHtmlText(String(data.page));
+        section.appendChild(meta);
+
+        if (data.snippet) {
+            var snip = document.createElement('div');
+            snip.style.cssText =
+                'font-size:11px; color:#6b7280; font-style:italic; ' +
+                'border-left:2px solid #d1d5db; padding-left:6px; margin-top:2px;';
+            snip.textContent = '"' + truncate(String(data.snippet), 180) + '"';
+            section.appendChild(snip);
+        }
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-outline-primary';
+        btn.style.cssText = 'font-size:12px; padding:2px 8px; margin-top:4px; align-self:flex-start;';
+        btn.textContent = labels.openSourceDoc || 'Open document';
+        btn.setAttribute('data-doc-id', String(data.document_id));
+        btn.setAttribute('data-page', String(data.page));
+        btn.addEventListener('click', function () {
+            openSourceDocument(data);
+        });
+        section.appendChild(btn);
+
+        popover.appendChild(section);
+    }
+
+    /**
+     * Open the cited document with bbox overlay in the citation sidecar.
+     *
+     * Dispatches a postMessage to the parent (top) window where
+     * citation-sidecar.js handles the actual rendering: PDF.js draws
+     * the cited page, an SVG overlay highlights the bbox.  This is the
+     * PRD §5 visual-bbox-overlay path.
+     *
+     * Falls back to opening the document in a new tab (no bbox) if
+     * the parent window is unreachable — same posture as before.
+     */
+    function openSourceDocument(data) {
+        var pid = config.patientId;
+        if (!pid) {
+            // Fallback — try to pull from the parent frame's URL.
+            try {
+                var match = String(window.parent.location.search).match(/[?&]set_pid=(\d+)/);
+                if (match) pid = match[1];
+            } catch (_) { /* cross-origin; skip */ }
+        }
+        if (!pid || !data || !data.document_id) return;
+
+        // Preferred path: dispatch to the citation sidecar in the top
+        // window for PDF.js + bbox overlay rendering.
+        try {
+            (window.parent || window).postMessage({
+                type: 'oe-copilot/show-citation-source',
+                citation: {
+                    documentId: data.document_id,
+                    page: data.page,
+                    blockId: data.block_id || null,
+                    bbox: data.bbox || null,
+                    snippet: data.snippet || '',
+                    patientId: String(pid),
+                },
+            }, '*');
+            return;
+        } catch (_) { /* fall through to new-tab */ }
+
+        // Fallback: open in a new tab (no bbox; Chrome PDF viewer can't
+        // render overlays).  Reached only when postMessage fails (rare).
+        var url = '/controller.php?document&retrieve' +
+            '&patient_id=' + encodeURIComponent(String(pid)) +
+            '&document_id=' + encodeURIComponent(String(data.document_id)) +
+            '&as_file=false' +
+            '#page=' + encodeURIComponent(String(data.page));
+
+        try {
+            (window.parent || window).open(url, '_blank', 'noopener,noreferrer');
+        } catch (_) {
+            window.open(url, '_blank', 'noopener,noreferrer');
+        }
+    }
+
+    /** Inline-scoped helper: avoid clashing with the module-level
+     * escapeHtml() in case it isn't present. Plain text only — never
+     * concatenate into HTML. */
+    function escapeHtmlText(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
     }
 
     /**
