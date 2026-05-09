@@ -94,7 +94,11 @@ export function PatientHeader({
   const idShort = patient.id?.slice(0, 8) ?? '—'
 
   return (
-    <div className="sticky top-0 z-20 bg-white @container">
+    // Outer container is no longer sticky — the parent page wraps MainNav
+    // + PatientHeader in a single sticky container so they move together
+    // and the menu doesn't scroll off when the user scrolls cards. We
+    // keep @container here for the variant logic (container queries).
+    <div className="bg-white @container">
       <div className="relative">
       {!hidden && (
         <>

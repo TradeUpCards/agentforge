@@ -47,13 +47,15 @@ export function DocumentsPage() {
 
   return (
     <div className="min-h-screen bg-white">
-      <MainNav />
-      <PatientHeader
-        patientId={patientId}
-        collapsed={headerCollapsed}
-        hidden={headerHidden}
-        onToggleHidden={() => setHeaderHidden((s) => !s)}
-      />
+      <div className="sticky top-0 z-30 bg-white">
+        <MainNav />
+        <PatientHeader
+          patientId={patientId}
+          collapsed={headerCollapsed}
+          hidden={headerHidden}
+          onToggleHidden={() => setHeaderHidden((s) => !s)}
+        />
+      </div>
       <OpenTabBar
         active="Dashboard"
         headerCollapsed={headerCollapsed}
