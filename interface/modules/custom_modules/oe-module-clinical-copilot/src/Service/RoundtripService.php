@@ -228,12 +228,27 @@ class RoundtripService
      *   - The extraction row exists and is in ExtractionStatus::PENDING_REVIEW.
      *   - The row has is_active = 1.
      *
+     * P4 R2 splice logic (added here):
+     *   Before running the round-trip, any co_pilot_extracted_fields rows whose
+     *   status is 'manually_edited' or 'manually_added' (ExtractionStatus::
+     *   clinicianOverrideStatuses()) have their clinician_value spliced into the
+     *   in-memory $extractionPayload at their field_path.  The original LLM
+     *   value in extraction_json is NOT modified on disk — the audit trail is
+     *   preserved.  The round-trip then writes the clinician's value to the
+     *   clinical tables, and the resulting clinical pointer (clinical_table +
+     *   clinical_row_id) reflects where the SPLICED value landed.
+     *
+     *   PHI rule: clinician_value is read into the splice path only.  It MUST
+     *   NOT be logged.  Structural metadata only (field_path, extraction_id,
+     *   splice count, clinician_value_length) may appear in log context.
+     *
      * This method:
      *  1. Loads the co_pilot_extractions row.
      *  2. Loads co_pilot_extracted_fields rows for this extraction.
-     *  3. Reconstructs verifiedFieldMap from those rows (field_path → ef_row_id).
-     *  4. Dispatches into the existing per-doc_type round-trip logic.
-     *  5. Transitions the row status to ExtractionStatus::APPROVED.
+     *  3. Splices clinician_value overrides into the in-memory extraction payload.
+     *  4. Reconstructs verifiedFieldMap (includes manually_edited / manually_added).
+     *  5. Dispatches into the existing per-doc_type round-trip logic.
+     *  6. Transitions the row status to ExtractionStatus::APPROVED.
      *
      * @param int $extractionId  co_pilot_extractions.id
      * @param int $realPatientId Real OpenEMR pid (from session — NOT the sentinel).
@@ -283,25 +298,105 @@ class RoundtripService
             throw new \RuntimeException('Extraction row extraction_json could not be decoded.');
         }
 
-        // 2. Load co_pilot_extracted_fields to reconstruct verifiedFieldMap.
+        // 2. Load co_pilot_extracted_fields to build the field-row map.
+        //    Fetch clinician_value too (used in the splice path — step 3).
         $fieldRows = QueryUtils::fetchRecords(
-            'SELECT `id`, `field_path`, `status`
+            'SELECT `id`, `field_path`, `status`, `source_block_id`, `clinician_value`
                FROM `co_pilot_extracted_fields`
               WHERE `extraction_id` = ?
               ORDER BY `id` ASC',
             [$extractionId],
         );
 
-        // 3. Reconstruct verifiedFieldMap (field_path → ef_row_id) for verified rows only.
+        // 3. Splice clinician overrides into the in-memory extraction payload.
+        //
+        //    For 'manually_edited': the field already exists in the payload;
+        //    replace its value with clinician_value.  The LLM value on disk is
+        //    untouched (audit trail lives in extraction_json).
+        //
+        //    For 'manually_added': the field was absent from the LLM extraction;
+        //    insert it at the field_path.  We inject into the payload structure
+        //    at the array-index level (e.g. "results[2].value" → parse index 2).
+        //
+        //    PHI rule: clinician_value is read here and passed into the payload
+        //    array.  It MUST NOT appear in any log context — only structural
+        //    metadata (field_path, length) is logged.
+        //
+        //    Splice semantics are best-effort: if the path cannot be resolved
+        //    (e.g. malformed field_path), we log a warning and skip that field
+        //    rather than aborting the round-trip.  Quality-lead should add a
+        //    direct test for the skip-on-error path.
+        $overrideStatuses = ExtractionStatus::clinicianOverrideStatuses();
+        $spliceCount = 0;
+
+        foreach ($fieldRows as $fieldRow) {
+            $rowStatus = (string) ($fieldRow['status'] ?? '');
+            if (!in_array($rowStatus, $overrideStatuses, true)) {
+                continue;
+            }
+
+            // clinician_value may be null if the row was created before R2
+            // or via a bug.  Treat null as "no override" and skip.
+            $clinicianValueRaw = $fieldRow['clinician_value'] ?? null;
+            if ($clinicianValueRaw === null) {
+                continue;
+            }
+
+            $clinicianValue = (string) $clinicianValueRaw;
+            $fieldPath      = (string) ($fieldRow['field_path'] ?? '');
+            $sourceBlockId  = isset($fieldRow['source_block_id'])
+                ? (string) $fieldRow['source_block_id']
+                : null;
+
+            // Apply the splice.  On failure, log structural info only.
+            $spliced = $this->spliceClinicianValue(
+                $extractionPayload,
+                $fieldPath,
+                $clinicianValue,
+                $rowStatus === ExtractionStatus::FIELD_MANUALLY_ADDED ? $sourceBlockId : null,
+            );
+
+            if ($spliced) {
+                $spliceCount++;
+                $this->logger->info('ClinicalCopilot/RoundtripService: clinician override spliced', [
+                    'extraction_id'         => $extractionId,
+                    'field_path'            => $fieldPath,
+                    'override_status'       => $rowStatus,
+                    'clinician_value_length' => strlen($clinicianValue),
+                ]);
+            } else {
+                $this->logger->warning('ClinicalCopilot/RoundtripService: could not splice clinician override — path unresolvable', [
+                    'extraction_id' => $extractionId,
+                    'field_path'    => $fieldPath,
+                    'override_status' => $rowStatus,
+                ]);
+            }
+        }
+
+        // 4. Reconstruct verifiedFieldMap (field_path → ef_row_id).
+        //    Include verified + manually_edited + manually_added rows so that
+        //    the round-trip's back-fill logic records the clinical pointer for
+        //    all rows whose value ends up in a clinical table.
+        //    The clinical pointer recorded will reflect the SPLICED value's
+        //    destination, not the original LLM value.
         /** @var array<string, int> $verifiedFieldMap */
         $verifiedFieldMap = [];
+        $includedStatuses = array_merge([ExtractionStatus::FIELD_VERIFIED], $overrideStatuses);
         foreach ($fieldRows as $fieldRow) {
-            if ((string) ($fieldRow['status'] ?? '') === 'verified') {
+            $rowStatus = (string) ($fieldRow['status'] ?? '');
+            if (in_array($rowStatus, $includedStatuses, true)) {
                 $verifiedFieldMap[(string) $fieldRow['field_path']] = (int) $fieldRow['id'];
             }
         }
 
-        // 4. Dispatch into existing round-trip logic.
+        if ($spliceCount > 0) {
+            $this->logger->info('ClinicalCopilot/RoundtripService: splice summary', [
+                'extraction_id' => $extractionId,
+                'splice_count'  => $spliceCount,
+            ]);
+        }
+
+        // 5. Dispatch into existing round-trip logic.
         $counts = $this->roundtrip(
             extractionId:     $extractionId,
             patientId:        $realPatientId,
@@ -312,7 +407,7 @@ class RoundtripService
             fieldsWriter:     $fieldsWriter,
         );
 
-        // 5. Transition status to approved.
+        // 6. Transition status to approved.
         $this->updateExtractionStatus($extractionId, ExtractionStatus::APPROVED);
 
         $this->logger->info('ClinicalCopilot/RoundtripService: roundtripFromExtractionId complete', [
@@ -326,6 +421,96 @@ class RoundtripService
         ]);
 
         return $counts;
+    }
+
+    // -----------------------------------------------------------------------
+    // P4 R2 — clinician-override splice helper
+    // -----------------------------------------------------------------------
+
+    /**
+     * Splice a clinician-asserted value into the in-memory extraction payload.
+     *
+     * Supports two path shapes used in the co_pilot extraction schemas:
+     *
+     *   "results[N].test_name"      → lab_pdf
+     *   "allergies[N].substance"    → intake_form
+     *   "current_medications[N].name" → intake_form
+     *   "top_level_key"             → scalar override on the root object
+     *
+     * For 'manually_edited' rows: the field already exists; its value is
+     * replaced.  For 'manually_added' rows: the field may not exist; it is
+     * created.  The $addedSourceBlockId parameter is only set for manually_added
+     * rows; when non-null, the row dict's source_block_id is also set so the
+     * round-trip can record provenance.
+     *
+     * Returns true when the splice was applied, false when the path was
+     * unresolvable (malformed path, out-of-bounds index, non-array parent).
+     * Callers should log a warning on false and skip — do NOT abort the
+     * round-trip for an unresolvable splice.
+     *
+     * PHI rule: $clinicianValue MUST NOT be logged by this method or its
+     * callers.  Only $fieldPath and structural counts may appear in logs.
+     *
+     * @param array<string, mixed> $payload         The in-memory extraction payload (mutated in place).
+     * @param string               $fieldPath       e.g. "results[0].test_name"
+     * @param string               $clinicianValue  The clinician's asserted value.
+     * @param string|null          $addedSourceBlockId  For manually_added rows only; sets
+     *                                               source_block_id on the target array element.
+     */
+    private function spliceClinicianValue(
+        array &$payload,
+        string $fieldPath,
+        string $clinicianValue,
+        ?string $addedSourceBlockId,
+    ): bool {
+        // Pattern: "collection[N].leaf_key"  e.g. "results[0].test_name"
+        if (preg_match('/^([a-z_]+)\[(\d+)\]\.([a-z_]+)$/i', $fieldPath, $m) === 1) {
+            $collection = $m[1];
+            $index      = (int) $m[2];
+            $leafKey    = $m[3];
+
+            if (!isset($payload[$collection]) || !is_array($payload[$collection])) {
+                // For manually_added: create the array if it doesn't exist yet.
+                if ($addedSourceBlockId !== null) {
+                    $payload[$collection] = [];
+                } else {
+                    return false;
+                }
+            }
+
+            // For manually_added: pad the array if the index is beyond the end.
+            if ($index >= count($payload[$collection])) {
+                if ($addedSourceBlockId !== null) {
+                    // Append a new empty row at the target index.
+                    $payload[$collection][$index] = [];
+                } else {
+                    return false;
+                }
+            }
+
+            if (!is_array($payload[$collection][$index])) {
+                $payload[$collection][$index] = [];
+            }
+
+            $payload[$collection][$index][$leafKey] = $clinicianValue;
+
+            // For manually_added: also record the block provenance so the
+            // round-trip can match source_block_id-based fingerprints.
+            if ($addedSourceBlockId !== null) {
+                $payload[$collection][$index]['source_block_id'] = $addedSourceBlockId;
+            }
+
+            return true;
+        }
+
+        // Pattern: "top_level_key" — scalar override.
+        if (preg_match('/^[a-z_]+$/i', $fieldPath) === 1) {
+            $payload[$fieldPath] = $clinicianValue;
+            return true;
+        }
+
+        // Unrecognised path shape — caller will log warning.
+        return false;
     }
 
     /**
