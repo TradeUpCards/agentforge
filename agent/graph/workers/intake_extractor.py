@@ -99,12 +99,31 @@ def intake_extractor_node(state: SupervisorState) -> dict[str, Any]:
         latency_ms = int((time.monotonic() - t0) * 1000)
         if _langfuse_available and lf is not None:
             try:
+                # Pull extraction_confidence_avg out of the payload (when
+                # extraction succeeded) so the trace UI surfaces PRD §7's
+                # "extraction confidence" observability item without the
+                # reviewer having to dig into the audit log or the
+                # persisted co_pilot_extractions row.  None when the
+                # extraction errored out — extraction_payload stays None
+                # in that case.
+                conf = (
+                    extraction_payload.get("extraction_confidence_avg")
+                    if isinstance(extraction_payload, dict) else None
+                )
+                n_blocks_meta = (
+                    extraction_payload.get("n_blocks")
+                    if isinstance(extraction_payload, dict) else None
+                )
                 lf.update_current_span(
                     metadata={
                         "worker_name": _WORKER_NAME,
                         "n_citations_added": n_citations_added,
                         "latency_ms": latency_ms,
                         "extraction_error": extraction_error,
+                        "extraction_confidence_avg": (
+                            round(conf, 4) if isinstance(conf, (int, float)) else None
+                        ),
+                        "n_blocks": n_blocks_meta,
                     }
                 )
             except Exception:
