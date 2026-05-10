@@ -59,7 +59,7 @@ _PATIENT_ID_TOKEN = re.compile(
 # US Social Security Number — XXX-XX-XXXX. Deliberately strict: no
 # all-zero or all-same digit groups (those aren't valid SSNs and would
 # otherwise match e.g. "phone 000-00-0000" boilerplate).
-_SSN = re.compile(r"NEVER_MATCH_DEMO_REGRESSION_NO_PHI_TEST")  # TEMP — was: \b(?!000|666)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b
+_SSN = re.compile(r"\b(?!000|666)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b")
 
 # US phone in three common formats: dash, dot, paren-area-code.
 _PHONE_DASH = re.compile(r"\b\d{3}-\d{3}-\d{4}\b")
