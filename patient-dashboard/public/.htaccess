@@ -1,0 +1,27 @@
+# SPA-routing fallback for the React patient dashboard.
+#
+# Without this, hitting `https://<host>/patient-dashboard/dashboard/abc-123`
+# directly returns 404 because Apache looks for a file at that path. With
+# this rule, every non-file/non-directory request falls back to the SPA's
+# `index.html`, which lets React Router pick up the route on the client.
+#
+# Requires `AllowOverride All` (or at least `AllowOverride FileInfo`) on
+# the directory in OpenEMR's Apache config — the default OpenEMR Docker
+# image grants this on the docroot, but verify on a custom-configured
+# droplet.
+#
+# This file is in `patient-dashboard/public/` so Vite copies it into
+# `dist/` on every build, alongside index.html, with no extra deploy step.
+
+Options -MultiViews
+RewriteEngine On
+RewriteBase /patient-dashboard/
+
+# Don't rewrite real files or directories — let Apache serve them
+# directly (assets, favicon, fonts, .well-known, etc.).
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Everything else falls back to index.html (SPA routing).
+RewriteRule ^ index.html [L]
