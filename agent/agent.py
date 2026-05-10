@@ -478,6 +478,9 @@ _BASELINE_TOOLS = (
     "get_recent_labs",
     "get_allergies",
     "get_recent_encounters",
+    # PRD §2 intake fields not round-tripped to native OpenEMR tables
+    # (chief_concern, family_history) — surfaced from co_pilot_extractions.
+    "get_intake_extras",
 )
 
 
