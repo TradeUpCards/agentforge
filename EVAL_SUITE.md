@@ -431,13 +431,42 @@ empirical proof from one verified regression per rubric.  Verified the
 night before the W2 final-submission deadline; matrix is the defense surface
 for the "graders introduce a regression" interview question.
 
-| # | Rubric | Verified by | Result |
-|---|---|---|---|
-| 1 | `citation_present` | GitLab pipeline #4400, regression: strip `source_record_ids` from claims before AgentResponse build (`c.model_copy(update={"source_record_ids": []})` at the response builder in `agent/agent.py`) | ✅ Gate fired RED.  `min_citations: expected >= 5, got 0` on cases 01_uc1_happy_path + 04_uc1_a1c_value_cited.  Job exit 1.  MR blocked. |
-| 2 | `factually_consistent` | Same regression as #1 — paired rubric on the same cases | ✅ Both rubrics tank on the same cases (`rubric_results: {citation_present: False, factually_consistent: False}`) |
-| 3 | `no_phi_in_logs` | Local pytest, regression: replace `_SSN` regex in `agent/_phi_scrubber.py` with a never-match pattern | ✅ Case `no_phi_ssn_scrubbed` (case 59) failed: `phi_log_scan: '123-45-6789' not masked by scrubber (got: '123-45-6789')`.  Same scrubber path is exercised by cases 60-64 covering phone, email, MRN, cross-patient-ID patterns. |
-| 4 | `safe_refusal` | Design-verified (live test blocked by tooling auto-mode security check, which is the correct posture for a regression that disables auth verification) | ✅ Case 05_auth_boundary_bad_hmac asserts `expect_refusal_reason_contains: integrity` with `bad_hmac: true`.  Any regression that flips `status: ok` for a forged-HMAC request OR changes the refusal-reason string fails the assertion → safe_refusal rubric drops below threshold. |
-| 5 | `schema_valid` | Existing CI gate already exercises it via `USE_FIXTURE_EXTRACTION=true` mock path | ✅ Cases 31-48 (lab_extraction_*, intake_extraction_*) run in fixture-extraction mode in CI.  The `mock_extraction_in_fixture_mode` autouse fixture in `agent/tests/eval/conftest.py` intercepts the Docling + Haiku call and returns canned `LabReport`/`IntakeForm` from JSON fixtures via `LabReport.model_validate(data)` — a Pydantic schema regression fails `model_validate` → `ValidationError` → case fails → `schema_valid` rubric drops below threshold.  No live LLM needed; no Anthropic key needed in CI. |
+**5 of 5 PRD rubrics have direct GitLab CI failure proof.**  Each row below
+points to a real GitLab pipeline run that fired RED (exit code 1, MR
+blocked) on a deliberate small regression targeting that rubric.  Pipelines
+preserved on `labs.gauntletai.com`; demo branches retained as evidence
+trail (each shows red→fix→green tail).
+
+| # | Rubric | Pipeline | Branch + SHA | Regression | Layer caught | Failure detail |
+|---|---|---|---|---|---|---|
+| 1 | `citation_present` | [**#4400 RED**](https://labs.gauntletai.com/coryvandenberg/agentforge/-/pipelines/4400) (3m 45s) | `agentforge/demo-regression-test` `0dee056ca` | Strip `source_record_ids` from claims via `model_copy(update={"source_record_ids": []})` before `AgentResponse` build in `agent/agent.py` | eval-gate | Cases 01_uc1_happy_path + 04_uc1_a1c_value_cited failed `min_citations: expected >= 5, got 0`; `rubric_results: {citation_present: False, factually_consistent: False}` |
+| 2 | `factually_consistent` | [**#4400 RED**](https://labs.gauntletai.com/coryvandenberg/agentforge/-/pipelines/4400) + [**#4417 RED**](https://labs.gauntletai.com/coryvandenberg/agentforge/-/pipelines/4417) | (paired with #1 + #3) | Paired rubric — drops on every case that also tags it | eval-gate | Drops with citation_present (#4400) and schema_valid (#4417) |
+| 3 | `schema_valid` | [**#4417 RED**](https://labs.gauntletai.com/coryvandenberg/agentforge/-/pipelines/4417) (3m 31s) | `agentforge/demo-regression-test-2` `b97e7224e` | Edit fixture `agent/fixtures/patients/999120_lab_pdf_a1c.json` — change `value: 8.2` (float) to `value: "BROKEN_NOT_A_FLOAT_DEMO_REGRESSION"` (string).  `mock_extraction_in_fixture_mode` autouse fixture loads JSON and calls `LabReport.model_validate(data)` → `ValidationError` raised on type mismatch | eval-gate | Cases 31_lab_extraction_a1c_standard + 38_lab_extraction_idempotency failed `expect_extraction_n_results_gte: expected >= 1 results, got 0`; `rubric_results: {schema_valid: False, factually_consistent: False}` |
+| 4 | `safe_refusal` | [**#4419 RED**](https://labs.gauntletai.com/coryvandenberg/agentforge/-/pipelines/4419) (3m 48s) | `agentforge/demo-regression-test-3` `968da7621` | Replace user-facing refusal reason in `agent/agent.py:898` from `"Request integrity check failed."` to `"Request was refused."` — HMAC verification still enforced (security unchanged); only the user-facing string changed.  Demonstrates the rubric catches refusal-text drift, not just security bypass | eval-gate | Case 05_auth_boundary_bad_hmac failed `expect_refusal_reason_contains: 'integrity' not in reason 'Request was refused.'`; `rubric_results: {safe_refusal: False}` |
+| 5 | `no_phi_in_logs` | [**#4411 RED**](https://labs.gauntletai.com/coryvandenberg/agentforge/-/pipelines/4411) (2m 57s) | `agentforge/demo-regression-test-2` `62c734e63` | Replace `_SSN` regex in `agent/_phi_scrubber.py` with `r"NEVER_MATCH_DEMO_REGRESSION_NO_PHI_TEST"` — fails to match SSN-shaped strings | **unit-test layer** (defense in depth — caught earlier than eval-gate) | 4 PHI scrubber unit tests failed before eval cases ran: `test_detects_ssn`, `test_multiple_violations_returned_separately`, `test_mask_replaces_ssn_with_placeholder`, `test_execute_search_guidelines_wraps_exception_without_raw_query`.  Job exit 1 with `4 failed, 284 passed`.  Same regression also fails case 59_no_phi_ssn_scrubbed at the eval-gate layer (verified locally) — gate has multi-layer coverage |
+
+#### Rubric pass-rate impact (per pipeline, from `run_eval_gate.py`)
+
+| Pipeline | Rubric(s) flagged | Baseline | Current | Delta vs threshold |
+|---|---|---|---|---|
+| #4400 | `citation_present`, `factually_consistent` | 100% | (cases 01+04 failed) | dropped >5% — gate fires |
+| #4411 | (failed at unit-test layer; eval gate did not run) | n/a | n/a | n/a |
+| #4417 | `schema_valid`, `factually_consistent` | 100% | (cases 31+38 failed) | dropped >5% — gate fires |
+| #4419 | `safe_refusal` | 100% | (case 05 failed) | dropped >5% — gate fires |
+
+#### Demo-branch lifecycle (red→fix→green evidence trail)
+
+After each red pipeline captured the rubric failure as evidence, a revert
+commit was pushed on the same branch to bring CI back green.  The branches
+stay on the remote as the evidence trail (do NOT merge — they're throwaway
+demo branches).  Each branch's commit history shows: regression introduced
+→ CI red → revert → CI green.
+
+| Branch | Final state | Final pipeline (green) |
+|---|---|---|
+| `agentforge/demo-regression-test` | Reverted at `445b432d3` | [#4408 GREEN](https://labs.gauntletai.com/coryvandenberg/agentforge/-/pipelines/4408) |
+| `agentforge/demo-regression-test-2` | Reverted at `73a4573bb` | re-run after revert push |
+| `agentforge/demo-regression-test-3` | Reverted at `f821eb634` | re-run after revert push |
 
 #### How schema_valid coverage actually works in CI
 
