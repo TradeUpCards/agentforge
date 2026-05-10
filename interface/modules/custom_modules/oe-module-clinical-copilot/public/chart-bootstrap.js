@@ -297,6 +297,35 @@
      * Returns the pid as a string, or null if none found.
      */
     function detectActivePid() {
+        // Strategy 0 (most authoritative): OpenEMR's Knockout view model.
+        //
+        // When the user picks a patient via Patient → Search, OpenEMR's
+        // shell calls `left_nav.setPatient(pname, pid, ...)` which updates
+        // `app_view_model.application_data.patient()` (a Knockout observable)
+        // BUT does NOT navigate any iframe to a URL containing `?pid=N`.
+        // It only calls `navigateTab("encounters.php", "enc", ...)` — no
+        // query string.  Strategies 1-4 below all miss this path because
+        // they scan URLs and globals that aren't updated.
+        //
+        // Reading the KO model first guarantees we see the new patient
+        // regardless of how the user navigated (Finder URL vs. Search KO
+        // call).  This closes a real PHI-isolation gap: without this, the
+        // chat panel stays scoped to the previous patient and the user
+        // can ask questions that resolve against stale context.
+        try {
+            if (hostWin.app_view_model
+                && hostWin.app_view_model.application_data
+                && typeof hostWin.app_view_model.application_data.patient === 'function') {
+                var p = hostWin.app_view_model.application_data.patient();
+                if (p && typeof p.pid === 'function') {
+                    var koPid = p.pid();
+                    if (koPid !== null && koPid !== undefined && String(koPid).length > 0) {
+                        return String(koPid);
+                    }
+                }
+            }
+        } catch (e) { /* KO model not available — fall through */ }
+
         // Strategy 1: any iframe URL containing pid=N or set_pid=N
         var iframes = hostDoc.querySelectorAll('iframe');
         for (var i = iframes.length - 1; i >= 0; i--) {
