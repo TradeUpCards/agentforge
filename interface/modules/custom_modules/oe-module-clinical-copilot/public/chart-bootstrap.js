@@ -559,7 +559,12 @@
 
         function findMatchByText(doc, needle) {
             var n = needle.toLowerCase().trim();
-            if (n.length < 4) return null;
+            // Threshold matches the outer filter at the caller — 3 chars
+            // covers common clinical abbreviations (HTN, DM, MI, COPD,
+            // HLD, GERD, OA, RA, CKD, AFib).  Both filters must agree;
+            // a 4-char floor here was previously short-circuiting any
+            // "HTN"-style needle that the caller had passed in.
+            if (n.length < 3) return null;
             try {
                 var walker = doc.createTreeWalker(
                     doc.body || doc.documentElement,
@@ -721,12 +726,21 @@
 
             // Strategy 2: text-based search across all candidate docs,
             // climbing to a sensible row/card container.
+            //
+            // Length threshold lowered from 4 → 3 chars to cover common
+            // clinical abbreviations stored as the row's title in lists/
+            // medical_problem rows: HTN, DM, MI, COPD, HLD, GERD, OA, etc.
+            // Without this, the chart-highlight click-through silently
+            // failed for any short-abbreviation problem (HTN was the
+            // canonical example — 3 chars filtered out, no DOM match,
+            // yellow-flash never fired).  3-char floor still excludes
+            // most accidental 2-char hits (units, encounter mods).
             if (!match) {
                 var needles = [
                     fields.title, fields.drug, fields.medication,
                     fields.name, fields.diagnosis, fields.allergy,
                     fields.description,
-                ].filter(function (v) { return v && String(v).trim().length >= 4; });
+                ].filter(function (v) { return v && String(v).trim().length >= 3; });
                 for (var n = 0; n < needles.length && !match; n++) {
                     for (var d2 = 0; d2 < docs.length && !match; d2++) {
                         match = findMatchByText(docs[d2], String(needles[n]));

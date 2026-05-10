@@ -729,9 +729,35 @@ def _real_get_problem_list(patient_id: int) -> list[RetrievedRecord]:
 
 
 def _real_get_active_medications(patient_id: int) -> list[RetrievedRecord]:
-    """Active prescriptions. RxNorm-coded drugs are code-backed citation
-    strength; free-text drug names without a code are structured."""
-    sql = """
+    """Active medications across BOTH OpenEMR storage paths.
+
+    OpenEMR keeps medications in two places for historical reasons:
+      1. `prescriptions` — modern e-prescribing surface; what
+         RoundtripService writes to from extracted intake forms.  Has
+         dosage, frequency, route, RxNorm code columns.  RxNorm-coded
+         drugs are code-backed citation strength; free-text drug names
+         drop to structured.
+      2. `lists` WHERE `type='medication'` — legacy medication-list
+         feature; populated by manual chart entry, HL7 medication-list
+         imports, and earlier OpenEMR workflows.  Has title (drug name)
+         + begdate + diagnosis only — no dosage column, no RxNorm
+         linkage.  Always structured citation strength.
+
+    The OpenEMR Patient Dashboard's Medications card aggregates both
+    tables (UNION), so a clinician sees the full medication picture
+    there.  This tool was previously only querying `prescriptions`,
+    which silently dropped any medication that lived in the lists
+    table — making the agent's answer to "what meds is he on?"
+    inconsistent with what the chart shows.
+
+    Both sources surface here with their distinct `table` field on the
+    RetrievedRecord so citations remain unambiguous (`prescriptions:N`
+    vs `lists:N`); the resolver allowlist already covers `lists`.
+    """
+    out: list[RetrievedRecord] = []
+
+    # 1. prescriptions — modern surface.
+    presc_sql = """
         SELECT id, drug, dosage, `interval`, route, quantity,
                start_date, date_added, active, rxnorm_drugcode
         FROM prescriptions
@@ -740,9 +766,8 @@ def _real_get_active_medications(patient_id: int) -> list[RetrievedRecord]:
         ORDER BY date_added DESC
         LIMIT 30
     """
-    out: list[RetrievedRecord] = []
     with _db_cursor() as cur:
-        cur.execute(sql, (patient_id,))
+        cur.execute(presc_sql, (patient_id,))
         for row in cur.fetchall():
             rxnorm = row.get("rxnorm_drugcode")
             strength = (
@@ -766,6 +791,40 @@ def _real_get_active_medications(patient_id: int) -> list[RetrievedRecord]:
                     "active": bool(row.get("active")),
                 },
             ))
+
+    # 2. lists WHERE type='medication' — legacy surface.  Always
+    #    structured citation strength (no RxNorm column to check).
+    #    Active = 1 means the patient is currently taking it.
+    lists_sql = """
+        SELECT id, title, diagnosis, begdate, enddate, date
+        FROM lists
+        WHERE pid = %s
+          AND type = 'medication'
+          AND activity = 1
+        ORDER BY (begdate IS NULL), begdate DESC, id DESC
+        LIMIT 30
+    """
+    with _db_cursor() as cur:
+        cur.execute(lists_sql, (patient_id,))
+        for row in cur.fetchall():
+            out.append(RetrievedRecord(
+                table="lists",
+                record_id=str(row["id"]),
+                citation_strength=CitationStrength.STRUCTURED,
+                fields={
+                    "drug": row.get("title"),
+                    # lists/medication doesn't carry dosage/route/etc.
+                    # Surface what we have; omit empty keys to keep the
+                    # citation popover compact.
+                    "diagnosis": row.get("diagnosis") or None,
+                    "start_date": str(row["begdate"]) if row.get("begdate") else None,
+                    "end_date": str(row["enddate"]) if row.get("enddate") else None,
+                    "date_added": str(row["date"]) if row.get("date") else None,
+                    "active": True,
+                    "source": "legacy_medication_list",
+                },
+            ))
+
     return out
 
 
