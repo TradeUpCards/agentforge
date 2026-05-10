@@ -895,13 +895,7 @@ async def run_chat(
         # secret configured). The audit row + Langfuse trace have the
         # specific reason for operators.
         return _close_audit(audit, started_at, RefusalResponse(
-            # ===== TEMP DEMO REGRESSION — DO NOT MERGE =====
-            # Original: "Request integrity check failed."  (case 05's
-            # safe_refusal rubric asserts this string contains "integrity")
-            # Removed the "integrity" word to trip the rubric without
-            # disabling the actual HMAC check (security still enforced;
-            # only the user-facing reason text changed).
-            reason="Request was refused.",
+            reason="Request integrity check failed.",
             searched=[],
             request_id=request_id,
             trace_id=trace_id,

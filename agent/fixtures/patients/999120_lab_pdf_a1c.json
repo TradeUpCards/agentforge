@@ -4,7 +4,7 @@
   "results": [
     {
       "test_name": "Hemoglobin A1c",
-      "value": "BROKEN_NOT_A_FLOAT_DEMO_REGRESSION",
+      "value": 8.2,
       "unit": "%",
       "reference_range": "<5.7",
       "abnormal": true,
