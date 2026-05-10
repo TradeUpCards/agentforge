@@ -1,0 +1,194 @@
+/**
+ * Citation-source sidecar styles — PRD §5 visual PDF bbox overlay.
+ *
+ * Drawer that docks to the LEFT of the Co-Pilot drawer
+ * (#oe-copilot-drawer).  Slides in from the right when the chat panel
+ * dispatches `oe-copilot/show-citation-source`.  Collapsible to a peek
+ * tab via the handle on the LEFT edge.
+ */
+
+#oe-copilot-citation-sidecar.oe-citation-sidecar {
+    position: fixed;
+    width: 720px;
+    max-width: 60vw;
+    background: #ffffff;
+    border-left: 1px solid #d1d5db;
+    box-shadow: -4px 0 12px rgba(0, 0, 0, 0.12);
+    z-index: 1040;          /* below Bootstrap modal-backdrop (1050) */
+    display: flex;
+    flex-direction: column;
+    transition: transform 220ms ease-in-out;
+    transform: translateX(0);
+    pointer-events: auto;
+}
+
+/* Hidden state — slides off the right edge. */
+#oe-copilot-citation-sidecar.oe-citation-sidecar--hidden {
+    transform: translateX(120%);
+    pointer-events: none;
+}
+
+/* Collapsed state — keeps the drawer mounted but tucks it away,
+ * leaving only a 28px peek strip with the chevron. */
+#oe-copilot-citation-sidecar.oe-citation-sidecar--collapsed {
+    transform: translateX(calc(100% - 28px));
+}
+#oe-copilot-citation-sidecar.oe-citation-sidecar--collapsed .oe-citation-sidecar__handle-chevron {
+    transform: rotate(180deg);
+}
+
+/* ---- Header ---------------------------------------------------------- */
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #e5e7eb;
+    background: #f9fafb;
+    flex: 0 0 auto;
+}
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__title {
+    font-weight: 600;
+    color: #111827;
+    font-size: 13px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__meta {
+    flex: 1;
+    color: #6b7280;
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__open-tab,
+#oe-copilot-citation-sidecar .oe-citation-sidecar__close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    line-height: 1;
+    padding: 2px 8px;
+    color: #6b7280;
+    border-radius: 4px;
+    transition: background 120ms;
+}
+#oe-copilot-citation-sidecar .oe-citation-sidecar__open-tab {
+    font-size: 14px;
+}
+#oe-copilot-citation-sidecar .oe-citation-sidecar__close {
+    font-size: 22px;
+}
+#oe-copilot-citation-sidecar .oe-citation-sidecar__open-tab:hover,
+#oe-copilot-citation-sidecar .oe-citation-sidecar__close:hover {
+    background: #e5e7eb;
+    color: #111827;
+}
+
+/* ---- Body ------------------------------------------------------------ */
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__body {
+    flex: 1;
+    overflow: auto;
+    padding: 12px;
+    background: #f3f4f6;
+    position: relative;
+}
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__loading {
+    color: #6b7280;
+    font-style: italic;
+    text-align: center;
+    padding: 40px 20px;
+    font-size: 13px;
+}
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__loading--error {
+    color: #b91c1c;
+    background: #fee2e2;
+    border-radius: 4px;
+    padding: 16px 20px;
+    margin: 12px;
+    font-style: normal;
+}
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__page-wrap {
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    border-radius: 2px;
+}
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__canvas {
+    display: block;
+}
+
+/* ---- Bbox overlay ---------------------------------------------------- */
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__bbox {
+    /* Defaults set inline via SVG attributes; CSS variables here let
+     * future themes override without touching the JS. */
+    transition: fill 200ms, stroke 200ms;
+}
+
+/* ---- Collapse handle -------------------------------------------------
+ *
+ * Positioned on the RIGHT edge of the sidecar so it lives in the SAME
+ * vertical column as the Co-Pilot drawer's chevron (which sits on the
+ * LEFT edge of the Co-Pilot drawer).  Stacked BELOW Co-Pilot's chevron
+ * at top: calc(50% + 38px) so the two affordances are visually paired
+ * (Co-Pilot drawer toggle + citation sidecar toggle).
+ *
+ * Blue-filled to differentiate from Co-Pilot's neutral chevron.
+ *
+ * Only renders while the sidecar is visible — when the parent is in
+ * `--hidden` state, the handle is hidden too (parent transform pushes
+ * it off-screen; the CSS rule below also explicitly hides it for
+ * robustness).
+ */
+#oe-copilot-citation-sidecar .oe-citation-sidecar__handle {
+    position: absolute;
+    top: calc(50% + 38px);
+    right: 0;
+    transform: translate(100%, -50%);
+    background: #0d6efd;        /* Bootstrap primary blue, filled */
+    border: 1px solid #0a58ca;
+    border-left: none;
+    border-radius: 0 8px 8px 0; /* round on outer (right) side */
+    width: 22px;
+    height: 56px;
+    cursor: pointer;
+    color: #ffffff;
+    font-size: 16px;
+    line-height: 56px;
+    text-align: center;
+    padding: 0;
+    box-shadow: 2px 0 6px rgba(0, 0, 0, 0.15);
+    transition: background 120ms, color 120ms;
+    z-index: 1;                  /* above sidecar content but below modals */
+}
+#oe-copilot-citation-sidecar .oe-citation-sidecar__handle:hover {
+    background: #0b5ed7;
+    color: #ffffff;
+}
+
+/* Belt-and-suspenders: explicitly hide the handle when the sidecar is
+ * hidden.  The parent's translateX(120%) already pushes it off-screen,
+ * but display:none guarantees it's never reachable by tab order or
+ * pointer events even on browsers that hiccup on the transform. */
+#oe-copilot-citation-sidecar.oe-citation-sidecar--hidden .oe-citation-sidecar__handle {
+    display: none;
+}
+
+#oe-copilot-citation-sidecar .oe-citation-sidecar__handle-chevron {
+    display: inline-block;
+    transition: transform 220ms;
+}
+/* When collapsed, the icon points the other way to suggest "click to
+ * pull me back out". */
+#oe-copilot-citation-sidecar.oe-citation-sidecar--collapsed .oe-citation-sidecar__handle-chevron {
+    transform: rotate(180deg);
+}

@@ -33,3 +33,7 @@ expected:
   status: ok
   min_claims: 1
   min_citations: 1
+  # PRD §5 — populated quote_or_value on /graph_chat patient_record citations
+  # (form_encounter + procedure_result rendered per evidence_retriever helper).
+  # Added 2026-05-09 with Aria's pivot + Bram's evidence_retriever fix.
+  citation_has_quote: true

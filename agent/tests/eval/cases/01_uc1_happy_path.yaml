@@ -24,6 +24,12 @@ expected:
   status: ok
   min_claims: 5
   min_citations: 5
+  # PRD §5 minimum citation shape — quote_or_value must carry the actual cited
+  # text, not echo source_id / field_or_chunk_id. Asserts every citation in
+  # the response has populated quote_or_value distinct from those tautology
+  # forms. Added 2026-05-09 alongside Aria's HITL → citation-bbox-overlay
+  # pivot (agent.py:1244 fix at e8e29cf7c) — locks the population in.
+  citation_has_quote: true
   must_mention:
     - metformin
     - "A1c"

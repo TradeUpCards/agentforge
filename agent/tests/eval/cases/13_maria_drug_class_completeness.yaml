@@ -34,6 +34,10 @@ messages:
 
 expected:
   status: ok
+  # PRD §5 — populated quote_or_value distinct from source_id / field_or_chunk_id.
+  # Both prescriptions and lists citations must carry actual content
+  # (drug + dose, diagnosis title) per Aria's pivot. Added 2026-05-09.
+  citation_has_quote: true
   must_mention:
     - "lisinopril"
     - "hypertension"

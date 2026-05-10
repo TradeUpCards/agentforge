@@ -36,3 +36,9 @@ expected:
   status: ok
   min_claims: 1
   min_citations: 1
+  # PRD §5 — populated quote_or_value on /graph_chat patient_record citations.
+  # Exercises Bram's evidence_retriever residual-gap fix at 544fbd10f
+  # (per-table dispatch render replaces the f"{table}:{record_id}" tautology).
+  # Nightly tier so this fires post-merge in the nightly CI run, not PR-blocking.
+  # Added 2026-05-09.
+  citation_has_quote: true

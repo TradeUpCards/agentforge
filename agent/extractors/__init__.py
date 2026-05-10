@@ -55,8 +55,8 @@ logger = logging.getLogger(__name__)
 
 DocType = Literal["lab_pdf", "intake_form"]
 
-_SENTINEL_MIN = 999_100
-_SENTINEL_MAX = 999_199
+_SENTINEL_MIN = 999_001
+_SENTINEL_MAX = 999_999
 
 # Model names (W2_ARCHITECTURE.md model split)
 _HAIKU_MODEL = "claude-haiku-4-5"
@@ -121,16 +121,45 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
     No LLM is called here; coordinates are real layout-engine output.
 
     Raises RuntimeError if Docling is not installed.
+
+    Multi-page PDF note (bug fix):
+    Docling's default pipeline (StandardPdfPipeline + DoclingParseDocumentBackend)
+    rasterises each page via pypdfium2 before passing it to the layout model.
+    On memory-constrained hosts (e.g. the dev laptop running Docker + uvicorn)
+    the rasterisation of pages 2+ of a 3-page intake form throws std::bad_alloc
+    inside the pypdfium2 C extension, causing Docling to silently skip those
+    pages.  Page 1 succeeds; pages 2-N produce zero items.
+
+    Fix: for PDFs use PyPdfiumDocumentBackend, which extracts text and table
+    geometry directly from the PDF's embedded text layer (fast, zero
+    rasterisation, zero ML inference for the text path).  This is identical to
+    what the old PdfBackend.PYPDFIUM2 enum selected in earlier Docling versions.
+    Images (PNG/JPG) are unaffected — they still flow through the default
+    image pipeline.  Typed PDFs (all current fixtures) have a reliable text
+    layer, so the quality is equivalent to the layout-model path while
+    eliminating the memory spike.
     """
     try:
-        from docling.document_converter import DocumentConverter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
     except ImportError as exc:
         raise RuntimeError(
             "Docling is not installed. Add 'docling>=2.0.0' to requirements.txt "
             "and rebuild the Docker image. See W2_ARCHITECTURE.md §2.3 for the "
             "Mistral OCR API fallback if install is blocked."
         ) from exc
+
+    # For PDFs: use PyPdfiumDocumentBackend (direct text extraction, no
+    # layout-model rasterisation) to avoid std::bad_alloc on pages 2+ of
+    # multi-page typed intakes.  do_ocr=False because typed PDFs have an
+    # embedded text layer; do_table_structure=True preserves table markdown.
+    # Images (PNG/JPG) continue to use the default image pipeline.
+    pdf_pipeline_options = PdfPipelineOptions(
+        do_ocr=False,
+        do_table_structure=True,
+    )
 
     # Stage-4a: explicitly enable IMAGE input alongside PDF so PNG/JPG intake
     # forms and lab scans produced by phone-camera uploads also flow through
@@ -140,6 +169,12 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
     # MIME type is incidental.
     converter = DocumentConverter(
         allowed_formats=[InputFormat.PDF, InputFormat.IMAGE],
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=pdf_pipeline_options,
+                backend=PyPdfiumDocumentBackend,
+            ),
+        },
     )
     result = converter.convert(str(pdf_path))
     doc = result.document
@@ -189,6 +224,18 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
 
         if bbox_obj is None:
             continue
+
+        # NOTE: per-row table-bbox split (PRD §5 polish item) is deferred to
+        # W3.  An earlier attempt at this site walked Docling's
+        # TableData.table_cells to emit one block per row so the citation
+        # bbox would highlight only the cited row (e.g. just the
+        # Atorvastatin row in a medications table) rather than the whole
+        # table rectangle.  That change broke the `_run_extraction_with_retry`
+        # path on real intake PDFs (post-Docling pipeline 500'd consistently
+        # with no clear traceback in stdout) so it was reverted.  The
+        # whole-table bbox is acceptable provenance for the W2 submission;
+        # per-row split needs more time to debug + a regression test before
+        # it's safe to ship.  W3 backlog.
 
         # Docling bbox coords: l (left), t (top), r (right), b (bottom)
         # in the page's coordinate system. Normalize to our BBox shape
@@ -270,25 +317,28 @@ def _raw_blocks_to_docling_doc(
     )
 
 
-_BLOCK_TEXT_SNIPPET_MAX_CHARS = 80
-"""Maximum text snippet length per block in the P3 response payload.
+_BLOCK_TEXT_SNIPPET_MAX_CHARS = 240
+"""Maximum text snippet length per block in the P3/P4-R2 response payload.
 
-80 characters is PHI-acceptable per W2_ARCHITECTURE.md P3 brief §5 because
-the original document content is already visible to the clinician in the
-review modal. Truncation is bytewise on the rstripped text (no further
-normalisation — preserves original punctuation and case).
+Bumped from 80 → 240 chars for P4 R2 (user-decided PHI posture).  The
+response payload already carries fully-verified field values (same PHI
+surface); longer snippets enable the "Assert from block" UI affordance,
+which needs enough context for the clinician to identify the correct block
+in the picker without opening a second tab.  Truncation is bytewise on
+the rstripped text (no further normalisation — preserves original
+punctuation and case).
 """
 
 
 def _serialize_blocks_for_response(doc: DoclingDoc) -> list[dict[str, Any]]:
-    """Serialize the full Docling block inventory for the P3 response payload.
+    """Serialize the full Docling block inventory for the P3/P4-R2 response payload.
 
-    Produces the ``docling_blocks`` array described in the P3 API contract.
+    Produces the ``docling_blocks`` array described in the P3/P4 API contract.
     Every block in the DoclingDoc is included — both cited (referenced by
     field_verdicts) and uncited — so the UI can render all blocks and the
     backend can build a complete overlay even before the verdicts are applied.
 
-    BBox format in the output matches the P3 API contract:
+    BBox format in the output matches the API contract:
         {"x": left, "y": bottom, "w": width, "h": height}
     in PDF user-space points, origin bottom-left.  The DoclingDoc stores
     blocks as (x0, y0, x1, y1) where x0/y0 are left/bottom.
@@ -296,15 +346,20 @@ def _serialize_blocks_for_response(doc: DoclingDoc) -> list[dict[str, Any]]:
     Text snippet truncation: rstrip whitespace first, then take the first
     _BLOCK_TEXT_SNIPPET_MAX_CHARS characters.  No further normalisation
     (preserves original case, punctuation, etc.).  PHI discipline: the
-    original document text is already visible to the clinician, so 80-char
-    snippets are acceptable (P3 brief §5).
+    original document text is already visible to the clinician, so
+    _BLOCK_TEXT_SNIPPET_MAX_CHARS-char snippets are acceptable.
+
+    block_type: copied directly from DoclingBlock.block_type (set by
+    _run_docling_layout from the Docling item label).  The "Assert from
+    block" picker UI filters by this value — "table", "text", "header",
+    "footer", "figure", "list_item", or "unknown".
 
     Args:
         doc: The DoclingDoc produced by Stage 1.
 
     Returns:
         List of dicts, one per block, each with keys:
-            block_id, page, bbox (x/y/w/h), text_snippet.
+            block_id, page, bbox (x/y/w/h), text_snippet, block_type.
     """
     result: list[dict[str, Any]] = []
     for block in doc.blocks:
@@ -320,8 +375,122 @@ def _serialize_blocks_for_response(doc: DoclingDoc) -> list[dict[str, Any]]:
                 "h": bbox.y1 - bbox.y0,
             },
             "text_snippet": text_snippet,
+            "block_type": block.block_type,
         })
     return result
+
+
+def build_original_values_map(
+    result: "Union[LabReport, IntakeForm]",
+    field_verdicts: "list[dict[str, Any]]",
+) -> "dict[str, Any]":
+    """Build a flat {field_path: original_value} map for verified fields only.
+
+    The HITL review UI needs to render an editable field form without
+    walking the nested Pydantic model_dump.  This helper produces a flat
+    projection keyed on the same field_path strings emitted by the
+    extraction verifier, containing only the fields that passed grounding.
+
+    Stripped fields are intentionally omitted — they carry no trusted value
+    (the verifier already discarded them) and surface separately through
+    field_verdicts.stripped_fields[*].  The UI shows those as "Missed" rows.
+
+    PHI discipline: this map is returned on the same response that already
+    contains the full extraction model_dump — no new PHI surface.  The
+    map must NOT be written to logs or Langfuse spans.
+
+    Algorithm:
+      1. Build a set of verified field_paths from field_verdicts (status == "verified").
+      2. Walk the result model_dump (mode="python" for native Python types).
+      3. For each verified field_path, resolve the value via a simple dotted
+         path + bracket-index walk.  Unresolvable paths are silently skipped.
+
+    Args:
+        result: LabReport or IntakeForm from the successful extraction.
+        field_verdicts: The list of field_verdict dicts from
+            attach_and_extract_with_metadata_async (keys: field_path,
+            source_block_id, status, verifier_reason).
+
+    Returns:
+        dict mapping field_path → value for every verified field.
+        Example: {"results[0].test_name": "HDL", "results[0].value": 42.0, ...}
+    """
+    # Build a set of verified field_paths for O(1) membership test.
+    verified_paths: set[str] = {
+        fv["field_path"]
+        for fv in field_verdicts
+        if fv.get("status") == "verified"
+    }
+
+    if not verified_paths:
+        return {}
+
+    # model_dump with mode="python" gives us native Python types (float, date, etc.)
+    # which are JSON-serialisable when mode="json" but more useful for resolution.
+    # We use mode="json" here so that dates serialise to ISO strings and the output
+    # is directly embeddable in the JSONResponse without a second conversion pass.
+    dumped = result.model_dump(mode="json")
+
+    original_values: dict[str, Any] = {}
+    for field_path in verified_paths:
+        value = _resolve_field_path(dumped, field_path)
+        if value is not _UNRESOLVED:
+            original_values[field_path] = value
+
+    return original_values
+
+
+# Sentinel for unresolved path (avoids confusing None with "field exists, value is null")
+class _UnresolvedSentinel:
+    """Internal sentinel for paths that cannot be resolved in the model_dump."""
+    __slots__ = ()
+
+
+_UNRESOLVED = _UnresolvedSentinel()
+
+
+def _resolve_field_path(
+    data: Any,
+    field_path: str,
+) -> Any:
+    """Walk a dotted-bracket field path into a nested dict/list structure.
+
+    Supports paths like:
+      "results[0].test_name"
+      "demographics.name"
+      "current_medications[1].dose"
+      "chief_concern"
+
+    Returns _UNRESOLVED if any segment of the path cannot be resolved
+    (missing key, out-of-range index, or unexpected type).
+
+    PHI discipline: this function never logs path names or resolved values.
+    """
+    import re
+    current: Any = data
+    # Tokenise: split on "." and then split each token on "[" / "]".
+    # E.g. "results[0].test_name" → ["results", "0", "test_name"]
+    # E.g. "demographics.name"    → ["demographics", "name"]
+    segments = re.split(r"[.\[\]]+", field_path)
+    for seg in segments:
+        if not seg:
+            continue
+        if isinstance(current, dict):
+            if seg not in current:
+                return _UNRESOLVED
+            current = current[seg]
+        elif isinstance(current, list):
+            try:
+                idx = int(seg)
+            except ValueError:
+                return _UNRESOLVED
+            if idx < 0 or idx >= len(current):
+                return _UNRESOLVED
+            current = current[idx]
+        else:
+            # Primitive — cannot descend further.
+            return _UNRESOLVED
+    return current
 
 
 def _get_page_count(pdf_path: Path) -> int:
@@ -990,12 +1159,25 @@ async def attach_and_extract_with_metadata_async(
                            pre-P3 return value.  Callers serialize it the same
                            way they always did.
         "docling_blocks":  list of {block_id, page (1-based), bbox: {x,y,w,h},
-                           text_snippet (≤80 chars)} dicts.  Includes EVERY
-                           Docling block (cited and uncited) so the UI can
-                           render the "Possibly Missed" pane.
+                           text_snippet (≤240 chars), block_type} dicts.
+                           Includes EVERY Docling block (cited and uncited) so
+                           the UI can render the "Possibly Missed" pane and
+                           the "Assert from block" picker.
         "field_verdicts":  list of {field_path, source_block_id, status,
-                           verifier_reason} dicts — one per field the parser
-                           processed.  Empty list when no Stage-2 ran.
+                           verifier_reason, bbox?} dicts — one per field the
+                           parser processed.  "verified" entries have no bbox
+                           key; "stripped" entries carry a bbox dict
+                           {x,y,w,h} (or null when source_block_id is null
+                           or no matching block exists) so the UI can
+                           highlight the offending block without a client-
+                           side join against docling_blocks.
+                           Empty list when no Stage-2 ran.
+        "original_values": flat {field_path: value} map for verified fields
+                           only (P4 R2 addition). Keyed on the same
+                           field_path strings as field_verdicts; value is
+                           the JSON-serialisable original LLM-verified value.
+                           Stripped fields are NOT present in this map —
+                           they surface through field_verdicts.stripped only.
 
     The pre-P3 attach_and_extract_async() is preserved unchanged for callers
     (LangGraph workers, P2 retry-ladder tests) that don't need the metadata.
@@ -1011,6 +1193,7 @@ async def attach_and_extract_with_metadata_async(
             "result": docling_doc,
             "docling_blocks": docling_blocks,
             "field_verdicts": [],
+            "original_values": {},
         }
 
     logger.info(
@@ -1035,15 +1218,42 @@ async def attach_and_extract_with_metadata_async(
     # shape the HTTP response promises.  PHI-safe: field_path values are
     # static literals (parser-side guarantee, pinned by
     # test_field_verdicts_field_paths_are_static_literals_no_phi).
-    field_verdicts: list[dict[str, Any]] = [
-        {
-            "field_path":      fv[0],
-            "source_block_id": fv[1],
-            "status":          "verified" if fv[2] is None else "stripped",
-            "verifier_reason": fv[2],
+    #
+    # P4 R2 — per-stripped-field bbox:
+    #   Build a block_id → bbox dict ONCE for O(N) total cost across all
+    #   stripped fields, rather than scanning docling_blocks per verdict.
+    #   Only stripped fields get a bbox key (verified fields don't need it —
+    #   the UI can locate them via the extraction itself).
+    block_bbox_index: dict[str, dict[str, float]] = {
+        b.block_id: {
+            "x": b.bbox.x0,
+            "y": b.bbox.y0,
+            "w": b.bbox.x1 - b.bbox.x0,
+            "h": b.bbox.y1 - b.bbox.y0,
         }
-        for fv in stats.field_verdicts
-    ]
+        for b in docling_doc.blocks
+    }
+
+    field_verdicts: list[dict[str, Any]] = []
+    for fv in stats.field_verdicts:
+        fp, sid, reason = fv[0], fv[1], fv[2]
+        is_stripped = reason is not None
+        entry: dict[str, Any] = {
+            "field_path":      fp,
+            "source_block_id": sid,
+            "status":          "stripped" if is_stripped else "verified",
+            "verifier_reason": reason,
+        }
+        if is_stripped:
+            # Attach bbox directly so the UI does not need a client-side join.
+            # null when source_block_id is absent or no matching block exists.
+            entry["bbox"] = block_bbox_index.get(sid) if sid else None
+        field_verdicts.append(entry)
+
+    # P4 R2 — flat original_values map: verified field_path → value.
+    # Assembly-only: reads from the already-validated result model_dump.
+    # PHI discipline: must not be written to logs or spans.
+    original_values: dict[str, Any] = build_original_values_map(result, field_verdicts)
 
     n_fields = (
         len(result.results)
@@ -1068,4 +1278,5 @@ async def attach_and_extract_with_metadata_async(
         "result": result,
         "docling_blocks": docling_blocks,
         "field_verdicts": field_verdicts,
+        "original_values": original_values,
     }

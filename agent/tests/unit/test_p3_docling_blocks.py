@@ -103,7 +103,10 @@ class TestSerializeBlocksForResponse:
         assert len(blocks) == len(doc.blocks)
 
     def test_each_block_dict_has_required_keys(self) -> None:
-        """Each block dict must have block_id, page, bbox, text_snippet."""
+        """Each block dict must have block_id, page, bbox, text_snippet, block_type.
+
+        P4 R2: block_type added to enable "Assert from block" picker filtering.
+        """
         doc = _make_doc()
         blocks = _serialize_blocks_for_response(doc)
 
@@ -112,6 +115,7 @@ class TestSerializeBlocksForResponse:
             assert "page" in b, f"Missing page in {b!r}"
             assert "bbox" in b, f"Missing bbox in {b!r}"
             assert "text_snippet" in b, f"Missing text_snippet in {b!r}"
+            assert "block_type" in b, f"Missing block_type in {b!r} (P4 R2 addition)"
 
     def test_bbox_dict_has_x_y_w_h_keys(self) -> None:
         """BBox in the serialized output uses {x, y, w, h} format per P3 contract."""
@@ -199,14 +203,26 @@ class TestSerializeBlocksForResponse:
 
 
 # ---------------------------------------------------------------------------
-# §2 — Text snippet truncation (80 chars bytewise after rstrip)
+# §2 — Text snippet truncation (240 chars bytewise after rstrip, P4 R2)
+#
+# QUALITY-LEAD NOTE: These tests were updated in P4 R2 when the snippet
+# limit was bumped from 80 → 240 chars (user-decided PHI posture: same
+# payload already carries verified values; longer previews enable the
+# "Assert from block" UX in the HITL review modal).  Old 80-char assertions
+# replaced/updated.  New 240-char boundary tests added in
+# test_p4_r2_response_shape.py.
 # ---------------------------------------------------------------------------
 
 
 class TestTextSnippetTruncation:
-    def test_block_text_snippets_truncated_to_80_chars(self) -> None:
-        """text_snippet must be at most 80 characters long."""
-        long_text = "A" * 120  # 120 chars — exceeds 80
+    def test_block_text_snippets_truncated_to_240_chars(self) -> None:
+        """text_snippet must be at most 240 characters long (P4 R2: bumped from 80).
+
+        P4 R2 rationale: longer snippets enable the "Assert from block"
+        picker UI without fetch-on-demand.  PHI posture: same response
+        payload already carries fully-verified field values.
+        """
+        long_text = "A" * 300  # 300 chars — exceeds 240
         doc = DoclingDoc(
             document_reference_id=_DOC_REF_ID,
             page_count=1,
@@ -214,12 +230,12 @@ class TestTextSnippetTruncation:
             docling_version="2.92.0",
         )
         blocks = _serialize_blocks_for_response(doc)
-        assert len(blocks[0]["text_snippet"]) <= 80, (
-            f"text_snippet length {len(blocks[0]['text_snippet'])} exceeds 80 chars"
+        assert len(blocks[0]["text_snippet"]) <= 240, (
+            f"text_snippet length {len(blocks[0]['text_snippet'])} exceeds 240 chars"
         )
 
     def test_short_text_not_padded(self) -> None:
-        """text_snippet shorter than 80 chars is not padded or altered."""
+        """text_snippet shorter than 240 chars is not padded or altered."""
         short_text = "Hemoglobin A1c 7.8 %"
         doc = DoclingDoc(
             document_reference_id=_DOC_REF_ID,
@@ -230,18 +246,18 @@ class TestTextSnippetTruncation:
         blocks = _serialize_blocks_for_response(doc)
         assert blocks[0]["text_snippet"] == short_text
 
-    def test_exactly_80_char_text_unchanged(self) -> None:
-        """text_snippet exactly 80 chars passes through unchanged."""
-        text_80 = "B" * 80
+    def test_exactly_240_char_text_unchanged(self) -> None:
+        """text_snippet exactly 240 chars passes through unchanged (P4 R2 boundary)."""
+        text_240 = "B" * 240
         doc = DoclingDoc(
             document_reference_id=_DOC_REF_ID,
             page_count=1,
-            blocks=[_make_block("blk_0", text_80)],
+            blocks=[_make_block("blk_0", text_240)],
             docling_version="2.92.0",
         )
         blocks = _serialize_blocks_for_response(doc)
-        assert blocks[0]["text_snippet"] == text_80
-        assert len(blocks[0]["text_snippet"]) == 80
+        assert blocks[0]["text_snippet"] == text_240
+        assert len(blocks[0]["text_snippet"]) == 240
 
     def test_trailing_whitespace_rstripped_before_truncation(self) -> None:
         """Text is rstripped before truncation (trailing spaces removed)."""
@@ -261,7 +277,7 @@ class TestTextSnippetTruncation:
 
     def test_truncation_preserves_original_case_and_punctuation(self) -> None:
         """No normalization beyond rstrip+truncate: case and punctuation preserved."""
-        text = "Cholesterol, Total          210 mg/dL"  # < 80 chars
+        text = "Cholesterol, Total          210 mg/dL"  # < 240 chars
         doc = DoclingDoc(
             document_reference_id=_DOC_REF_ID,
             page_count=1,
@@ -271,10 +287,10 @@ class TestTextSnippetTruncation:
         blocks = _serialize_blocks_for_response(doc)
         assert blocks[0]["text_snippet"] == text
 
-    def test_truncation_at_exactly_80_chars_of_rstripped_text(self) -> None:
-        """Truncation is applied AFTER rstrip: 80+ char rstripped text truncates."""
-        # 85 non-whitespace chars then trailing spaces
-        base = "C" * 85
+    def test_truncation_at_exactly_240_chars_of_rstripped_text(self) -> None:
+        """Truncation is applied AFTER rstrip: 240+ char rstripped text truncates."""
+        # 245 non-whitespace chars then trailing spaces
+        base = "C" * 245
         text = base + "   "
         doc = DoclingDoc(
             document_reference_id=_DOC_REF_ID,
@@ -283,9 +299,9 @@ class TestTextSnippetTruncation:
             docling_version="2.92.0",
         )
         blocks = _serialize_blocks_for_response(doc)
-        # Should be first 80 chars of the rstripped text (85 C's → first 80)
-        assert blocks[0]["text_snippet"] == "C" * 80
-        assert len(blocks[0]["text_snippet"]) == 80
+        # Should be first 240 chars of the rstripped text (245 C's → first 240)
+        assert blocks[0]["text_snippet"] == "C" * 240
+        assert len(blocks[0]["text_snippet"]) == 240
 
 
 # ---------------------------------------------------------------------------

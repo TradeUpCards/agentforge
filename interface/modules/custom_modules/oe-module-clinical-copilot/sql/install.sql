@@ -195,7 +195,7 @@ CREATE TABLE `co_pilot_extracted_fields` (
     `field_path`       VARCHAR(255)    NOT NULL
         COMMENT 'Dot-path from the agent schema, e.g. "results[0].test_name"',
     `status`           VARCHAR(16)     NOT NULL
-        COMMENT '"verified" | "stripped"',
+        COMMENT '"verified" | "stripped" | "manually_edited" | "manually_added"',
     `source_block_id`  VARCHAR(64)     NULL
         COMMENT 'Docling block_id that backs this field; NULL when verifier could not find one',
     `bbox_json`        TEXT            NULL
@@ -206,6 +206,8 @@ CREATE TABLE `co_pilot_extracted_fields` (
         COMMENT 'OpenEMR table the derived row was written to (procedure_result, lists, prescriptions); populated only for verified fields after roundtrip',
     `clinical_row_id`  INT             NULL
         COMMENT 'PK of the clinical-table row (signed INT to match OpenEMR core PKs); populated only for verified fields after roundtrip',
+    `clinician_value`  TEXT            NULL
+        COMMENT 'P4 R2: clinician-asserted override value. PHI-custody is CLINICIAN (not LLM). Never sent to the agent. Written by pencil-edit or assert-from-block UI. NULL when no override has been made.',
     `created_at`       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     INDEX `idx_ef_extraction` (`extraction_id`),
@@ -216,4 +218,19 @@ CREATE TABLE `co_pilot_extracted_fields` (
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COMMENT = 'Per-field verdicts from the agent verifier, with bbox provenance for the HITL overlay';
+#EndIf
+
+-- -------------------------------------------------------
+-- P4 R2: clinician_value column on co_pilot_extracted_fields
+--
+-- Idempotent via #IfMissingColumn (mirrors P3 pattern for
+-- co_pilot_extractions attempt-chain columns).
+-- PHI custody: clinician-asserted override; NEVER sent to the
+-- agent; NEVER logged; PHP/DB-side only.
+-- -------------------------------------------------------
+
+#IfMissingColumn co_pilot_extracted_fields clinician_value
+ALTER TABLE `co_pilot_extracted_fields`
+  ADD COLUMN `clinician_value` TEXT NULL
+    COMMENT 'P4 R2: clinician-asserted override value. PHI-custody is CLINICIAN (not LLM). Never sent to the agent. Written by pencil-edit or assert-from-block UI. NULL when no override has been made.';
 #EndIf

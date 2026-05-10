@@ -43,7 +43,10 @@ _ALL_PATIENT_TOOLS = (
     "get_active_medications",
     "get_recent_labs",
     "get_allergies",
-    "get_recent_encounters",
+    "get_recent_encounters",   # surfaces chief_concern via form_encounter.reason
+    "get_family_history",      # surfaces family_history via history_data
+    # Fallback when intake fields didn't round-trip cleanly.
+    "get_intake_extras",
 )
 
 # Keywords indicating the query needs guideline evidence.
@@ -272,6 +275,77 @@ def _fetch_guidelines(query: str) -> tuple[list[Citation], list[Any], str]:
     return citations, retrieved_records, "search_guidelines"
 
 
+def _format_patient_record_quote(rec: Any) -> str:
+    """Render a short, human-readable quote_or_value for a patient_record citation.
+
+    PRD §5 minimum citation shape requires `quote_or_value` to carry the
+    actual cited value, not a tautology that echoes source_id. Aria's
+    2026-05-09 pivot fix at agent.py:1244-1266 closed this for the legacy
+    /chat path by truncating `_claim.text` to 80 chars. The /graph_chat path
+    builds citations BEFORE synthesis (here, in the worker), so claim text
+    isn't available — instead we render a short representative string from
+    the underlying RetrievedRecord.fields dict.
+
+    Per-table dispatch picks the most-identifying field(s):
+      - lists (problems, allergies):    title
+      - prescriptions:                  "{drug} {dosage} {frequency}"
+      - procedure_result (labs):        "{name} {value} {units}"
+      - form_encounter:                 "{date}: {reason}"
+      - guideline_corpus:               n/a — guideline citations are built by
+                                         _fetch_guidelines, not this function.
+      - default:                        first non-empty field value, str-coerced.
+
+    Truncated to 80 chars (matches Aria's pattern). Empty/missing content →
+    falls back to f"{table}:{record_id}", which Bram's `citation_has_quote`
+    DSL (agent/tests/eval/runner.py) flags as a tautology — that's the
+    correct signal that the record had no displayable content.
+
+    Coordinated with Aria on `feat/citation-bbox-overlay`: she fixed the
+    LabReport / IntakeForm extracted_document path + the agent.py /chat path
+    in commit e8e29cf7c; this completes the PRD §5 backfill for the
+    /graph_chat path's patient_record citations from evidence_retriever.
+    See `.gauntlet/week2/coordination/bram-aria-citation-bbox.md`.
+    """
+    fields = rec.fields or {}
+    table = rec.table
+    quote = ""
+
+    if table == "lists":
+        # Both medical-problem rows and allergy rows use table='lists' with
+        # the displayable label in `title`. Diagnosis ICD code is a fallback
+        # when title is unset (rare but handled).
+        quote = fields.get("title") or fields.get("diagnosis") or ""
+    elif table == "prescriptions":
+        parts = [fields.get(k) or "" for k in ("drug", "dosage", "frequency")]
+        quote = " ".join(p for p in parts if p)
+    elif table == "procedure_result":
+        parts = [fields.get(k) or "" for k in ("name", "value", "units")]
+        quote = " ".join(p for p in parts if p)
+    elif table == "form_encounter":
+        date = fields.get("date") or ""
+        reason = fields.get("reason") or ""
+        if date and reason:
+            quote = f"{date}: {reason}"
+        else:
+            quote = reason or date
+    else:
+        # Generic fallback — first non-empty field value, str-coerced.
+        for v in fields.values():
+            if v:
+                quote = str(v)
+                break
+
+    quote = quote.strip()
+    if not quote:
+        # Degraded fallback. Bram's `citation_has_quote` DSL will flag this
+        # as a tautology (quote == source_id), which correctly signals that
+        # the underlying record had no displayable content — useful for the
+        # eval report rather than silently masking the gap.
+        return f"{rec.table}:{rec.record_id}"
+
+    return quote[:80]
+
+
 def _fetch_all_patient_records(
     patient_id: int,
 ) -> tuple[list[Citation], list[Any], list[str]]:
@@ -289,6 +363,10 @@ def _fetch_all_patient_records(
     citation IDs. Without these, the LLM correctly reports
     "no clinical content available" because the citations alone carry only
     `table:id` references.
+
+    Citation `quote_or_value` is now populated by `_format_patient_record_quote`
+    per PRD §5 (2026-05-09 pivot). Pre-fix this field tautologically echoed
+    `source_id`, which Bram's `citation_has_quote` DSL guard would flag.
     """
     tool_input = {"patient_id": patient_id}
     citations: list[Citation] = []
@@ -306,7 +384,7 @@ def _fetch_all_patient_records(
                         source_id=f"{rec.table}:{rec.record_id}",
                         page_or_section=None,
                         field_or_chunk_id=rec.record_id,
-                        quote_or_value=f"{rec.table}:{rec.record_id}",
+                        quote_or_value=_format_patient_record_quote(rec),
                         bbox=None,
                     )
                 )

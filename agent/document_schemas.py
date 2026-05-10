@@ -25,22 +25,30 @@ from pydantic import BaseModel, Field, field_validator
 # Sentinel patient_id guard
 # ---------------------------------------------------------------------------
 
-_SENTINEL_MIN = 999_100
-_SENTINEL_MAX = 999_199
+_SENTINEL_MIN = 999_001
+_SENTINEL_MAX = 999_999
 
 
 def _assert_sentinel(patient_id: int) -> int:
     """Reject patient_ids outside the W2 synthetic sentinel range.
 
-    W2_ARCHITECTURE.md §8.2: all W2 document fixtures must use patient_id
-    in [999100, 999199]. IDs below 999100 may collide with Synthea demo
-    data; IDs above 999199 are outside the reserved W2 block.
+    Sentinel range expanded 2026-05-09 from [999_100, 999_199] (100 slots)
+    to [999_001, 999_999] (999 slots) so the agent can be invoked for any
+    pid in the demo install (currently 200 patients, real pid 1-200, mapped
+    to sentinels 999_001-999_200 by PersonaMap::sentinelId()).  Older
+    extraction rows that stored sentinels in 999_101-999_104 (the original
+    four-persona range) remain readable — they fall inside the wider range.
+
+    The lower bound is held at 999_001 (not 999_000 itself) so the offset
+    arithmetic in PersonaMap stays clean: real pid p maps to sentinel
+    999_000 + p, and reverse lookup is real_pid = sentinel - 999_000.
     """
     if not (_SENTINEL_MIN <= patient_id <= _SENTINEL_MAX):
         raise ValueError(
             f"patient_id is outside the W2 sentinel range "
             f"[{_SENTINEL_MIN}, {_SENTINEL_MAX}]. "
-            "Use a value in 999100–999199 for synthetic fixtures."
+            "Use a value in 999001–999999 for synthetic fixtures "
+            "(real pid p is mapped to sentinel 999000+p by PersonaMap)."
         )
     return patient_id
 

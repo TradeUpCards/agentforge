@@ -11,7 +11,7 @@ user_id: 1
 doc_type: lab_pdf
 synthetic: true
 fixture_data_required: false
-tier: full
+tier: smoke
 difficulty: basic
 failure_mode: extraction_abnormal_flag_wrong
 rubric: [schema_valid, factually_consistent]

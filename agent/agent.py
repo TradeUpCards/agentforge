@@ -25,6 +25,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 import re
 import uuid
@@ -476,7 +477,12 @@ _BASELINE_TOOLS = (
     "get_active_medications",
     "get_recent_labs",
     "get_allergies",
-    "get_recent_encounters",
+    "get_recent_encounters",   # surfaces chief_concern via form_encounter.reason
+    "get_family_history",      # surfaces family_history via history_data
+    # Fallback for any intake fields that didn't make the round-trip
+    # (typically returns []; see RoundtripService::roundtripChiefConcern
+    # and roundtripFamilyHistory for the canonical write paths).
+    "get_intake_extras",
 )
 
 
@@ -822,6 +828,36 @@ async def run_chat(
             "data_mode": "fixture" if settings.use_fixture_data else "live",
         }
     )
+
+    # If this request was dispatched by the eval runner, propagate the
+    # eval-case trace tags + metadata set by runner._set_eval_trace_env()
+    # into the Langfuse trace so the case is filterable by name/category/tier
+    # in Langfuse Cloud.
+    #
+    # Cross-workstream note (Bram): this is the minimal agent.py touch in the
+    # chore/eval-gate-hardening MR — reads two env vars set by the eval runner
+    # and forwards them to the OTel span / update_current_span() surfaces.
+    # Tags use the OTel attribute path (TRACE_TAGS); metadata uses the
+    # existing update_current_span() surface.  Wrapped in try/except so a
+    # JSON decode or SDK failure never crashes a request.
+    _eval_tags_raw = os.environ.get("LANGFUSE_TRACE_TAGS")
+    _eval_metadata_raw = os.environ.get("LANGFUSE_TRACE_METADATA")
+    if _eval_tags_raw:
+        try:
+            _eval_tags = json.loads(_eval_tags_raw)
+            if isinstance(_eval_tags, list):
+                current_otel_span.set_attribute(
+                    LangfuseOtelSpanAttributes.TRACE_TAGS, _eval_tags,
+                )
+        except (json.JSONDecodeError, ValueError, Exception):
+            pass
+    if _eval_metadata_raw:
+        try:
+            _eval_metadata = json.loads(_eval_metadata_raw)
+            if isinstance(_eval_metadata, dict):
+                get_client().update_current_span(metadata=_eval_metadata)
+        except (json.JSONDecodeError, ValueError, Exception):
+            pass
 
     # 1. HMAC check (fail closed). Returns None on success, or a
     # short failure-reason string for the audit log + trace metadata.
@@ -1210,10 +1246,16 @@ async def run_chat(
     audit.final_response = prose
     # Derive Citation objects from verified claim source_record_ids.
     # W2_ARCHITECTURE.md §7.3 — source_type discriminates patient_record vs guideline.
-    # quote_or_value left empty here; full threading is a week-3 enhancement.
+    # quote_or_value carries the verified claim's text — the LLM's rendering of the
+    # cited fact (e.g. "HDL cholesterol is 48 mg/dL").  Capped at 80 chars to keep
+    # the response payload compact.  PRD §5 minimum citation shape compliance:
+    # quote_or_value is now populated rather than empty (was a documented W3 gap).
     _derived_citations: list[Citation] = []
     _seen_source_ids: set[str] = set()
     for _claim in verdict.claims_passed:
+        _quote = (_claim.text or "").strip()
+        if len(_quote) > 80:
+            _quote = _quote[:77] + "..."
         for _raw_id in (_claim.source_record_ids or []):
             if _raw_id in _seen_source_ids:
                 continue
@@ -1224,14 +1266,14 @@ async def run_chat(
                     source_type="guideline",
                     source_id=_chunk_id,
                     field_or_chunk_id=_chunk_id,
-                    quote_or_value="",
+                    quote_or_value=_quote,
                 ))
             else:
                 _derived_citations.append(Citation(
                     source_type="patient_record",
                     source_id=_raw_id,
                     field_or_chunk_id=_raw_id,
-                    quote_or_value="",
+                    quote_or_value=_quote,
                 ))
     return _close_audit(audit, started_at, AgentResponse(
         message=Message(role=Role.ASSISTANT, content=prose),

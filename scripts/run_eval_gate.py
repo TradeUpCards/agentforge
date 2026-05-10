@@ -96,6 +96,7 @@ def main() -> None:
     for rubric in sorted(current_rates):
         print(f"  {rubric}: {current_rates[rubric]:.1%}")
 
+    # Check 1: relative regression — current rate dropped > max_regression vs baseline
     regressions: list[str] = []
     for rubric, baseline_rate in sorted(baseline_rates.items()):
         current_rate = current_rates.get(rubric, 0.0)
@@ -109,15 +110,40 @@ def main() -> None:
                 f"(drop {drop:.1%} > threshold {args.max_regression:.1%})"
             )
 
-    if regressions:
-        print(f"\n[eval-gate] FAIL: {len(regressions)} rubric regression(s) detected:")
-        for r in regressions:
-            print(r)
+    # Check 2: absolute floor — current rate below min_pass_rate[rubric]
+    # Encodes PRD line 136: "drops below the pass threshold".
+    min_pass_rates: dict[str, float] = baseline_data.get("min_pass_rate", {})
+    floor_failures: list[str] = []
+    if min_pass_rates:
+        print("[eval-gate] Min-pass-rate floor per rubric:")
+        for rubric in sorted(min_pass_rates):
+            print(f"  {rubric}: {min_pass_rates[rubric]:.1%}")
+        for rubric, floor in sorted(min_pass_rates.items()):
+            current_rate = current_rates.get(rubric, 0.0)
+            if current_rate < floor:
+                floor_failures.append(
+                    f"  FLOOR BREACH: {rubric}: {current_rate:.1%} < floor {floor:.1%}"
+                )
+    else:
+        print("[eval-gate] No min_pass_rate floor defined in baseline.json (skipping floor check).")
+
+    all_failures = regressions + floor_failures
+    if all_failures:
+        if regressions:
+            print(f"\n[eval-gate] FAIL: {len(regressions)} rubric regression(s) detected:")
+            for r in regressions:
+                print(r)
+        if floor_failures:
+            print(f"\n[eval-gate] FAIL: {len(floor_failures)} rubric floor breach(es) detected:")
+            for f in floor_failures:
+                print(f)
         print("\n[eval-gate] Run: python -m agent.tests.eval.runner --update-baseline")
         print("[eval-gate] to update the baseline after intentional improvements.")
         sys.exit(1)
 
     print(f"\n[eval-gate] PASS: All rubrics within {args.max_regression:.1%} regression threshold.")
+    if min_pass_rates:
+        print("[eval-gate] PASS: All rubrics at or above min_pass_rate floor.")
     sys.exit(0)
 
 

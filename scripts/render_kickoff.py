@@ -569,7 +569,59 @@ def _cmd_transition(args: argparse.Namespace) -> int:
     md = _md_path(repo_root, args.lead)
     md.write_text(md_text, encoding="utf-8")
     sys.stderr.write(f"render_kickoff: re-rendered {md.name}\n")
+
+    # Refresh phase tags inside handoff section headers so a future session
+    # reading the handoff doesn't see "(P3 kickoff)" when the next session
+    # is on P4. The structured **Next phase:** / **Next branch:** lines are
+    # already authoritative for the rotation itself; this just keeps the
+    # surrounding prose headers from drifting. Leaves untagged headers
+    # (e.g., bare "## Recommended next PM prompt") alone.
+    refreshed = _refresh_handoff_phase_headers(handoff, new_phase_name)
+    if refreshed:
+        sys.stderr.write(
+            f"render_kickoff: refreshed phase tags in {handoff.name} "
+            f"({refreshed} header(s) updated)\n"
+        )
+
     return 0
+
+
+# Header lines like:
+#   ## Recommended next PM prompt (for next Aria session — P3 kickoff)
+#   ## Recommended next agent-team formation (P3 kickoff)
+# Both em-dash (U+2014) and ASCII hyphen separators are tolerated in the
+# PM-prompt variant. Phase names may contain letters, digits, dots, and
+# hyphens (P3, P4, P4-R2, P4.5).
+_HANDOFF_PM_HEADER = re.compile(
+    r"^(##\s+Recommended next PM prompt\s*\(for next [\w\-]+ session\s+[—\-]\s+)"
+    r"[\w.\-]+(\s+kickoff\))",
+    re.MULTILINE,
+)
+_HANDOFF_TEAM_HEADER = re.compile(
+    r"^(##\s+Recommended next agent-team formation\s*\()"
+    r"[\w.\-]+(\s+kickoff\))",
+    re.MULTILINE,
+)
+
+
+def _refresh_handoff_phase_headers(handoff_path: Path, new_phase_name: str) -> int:
+    """Rewrite stale phase tags in handoff section headers.
+
+    Returns the number of headers updated. Writes the file back only when
+    at least one header changed, so this is idempotent on already-current
+    handoffs and a no-op on handoffs that use untagged headers.
+    """
+    if not handoff_path.exists():
+        return 0
+    original = handoff_path.read_text(encoding="utf-8")
+    updated = original
+    count = 0
+    for pattern in (_HANDOFF_PM_HEADER, _HANDOFF_TEAM_HEADER):
+        updated, n = pattern.subn(rf"\g<1>{new_phase_name}\g<2>", updated)
+        count += n
+    if updated != original:
+        handoff_path.write_text(updated, encoding="utf-8")
+    return count
 
 
 # ----------------------------------------------------------------------------

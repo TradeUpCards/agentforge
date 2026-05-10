@@ -12,7 +12,7 @@ description: |
 patient_id: 1
 user_id: 1
 fixture_data_required: true
-tier: full
+tier: smoke
 difficulty: basic
 failure_mode: phi_email_not_scrubbed
 rubric: [no_phi_in_logs]

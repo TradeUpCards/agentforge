@@ -318,6 +318,51 @@
     cursor: default;
 }
 
+/* manually_added block badge — bold purple to match SVG overlay */
+.hitl-blk-badge--manually_added {
+    background: #f3e8ff;
+    color: #6f42c1;
+    border: 1px solid #c4b5fd;
+}
+
+/* ---- P4 R2: Bbox color legend ------------------------------------------- */
+
+.hitl-bbox-legend {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 8px;
+    background: rgba(31,41,55,0.85);
+    font-size: 11px;
+    border-top: 1px solid #374151;
+    position: sticky;
+    bottom: 0;
+}
+
+.hitl-bbox-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #d1d5db;
+    white-space: nowrap;
+}
+
+.hitl-bbox-swatch {
+    display: inline-block;
+    width: 18px;
+    height: 10px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.hitl-bbox-swatch--verified    { border: 2px solid #16a34a; }
+.hitl-bbox-swatch--stripped    { border: 2px solid #ea580c; }
+.hitl-bbox-swatch--uncited     { border: 1px solid #9ca3af; }
+.hitl-bbox-swatch--manually_added {
+    border: 2px dashed #6f42c1;
+}
+
 /* Possibly-missed block rows */
 .hitl-block-snippet {
     font-size: 12px;
@@ -376,4 +421,584 @@
     border: none;
     border-top: 1px solid #e5e7eb;
     margin: 10px 0;
+}
+
+/* ---- P4 R2: Bbox color — manually_added (clinician-asserted) ------------ */
+
+/*
+ * Color legend for PDF overlay bboxes (all four states):
+ *   verified       → green  #16a34a  — LLM extracted + verifier passed
+ *   stripped       → orange #ea580c  — LLM cited but verifier failed
+ *   uncited        → gray   #9ca3af  — Docling block, never cited by LLM
+ *   manually_added → purple #6f42c1  — clinician-asserted via "Assert from block"
+ */
+.hitl-pdf-overlay rect[data-bbox-status="manually_added"] {
+    stroke: #6f42c1;
+    stroke-width: 2;
+    stroke-dasharray: 4 2;
+}
+
+/* ---- P4 R2: Pencil-edit affordance -------------------------------------- */
+
+/* Pencil edit button on Captured rows */
+.hitl-edit-btn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 4px;
+    color: #9ca3af;
+    font-size: 12px;
+    border-radius: 3px;
+    transition: color 0.1s ease, background 0.1s ease;
+    line-height: 1;
+}
+
+.hitl-edit-btn:hover {
+    color: #374151;
+    background: #e5e7eb;
+}
+
+/* Inline edit form within a field row */
+.hitl-inline-edit {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    width: 100%;
+    margin-top: 4px;
+}
+
+.hitl-inline-input {
+    flex: 1 1 120px;
+    min-width: 80px;
+    font-size: 12px;
+    padding: 2px 6px;
+    border: 1px solid #93c5fd;
+    border-radius: 3px;
+    background: #fff;
+    color: #1f2937;
+    outline: none;
+}
+
+.hitl-inline-input:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
+}
+
+.hitl-inline-save-btn {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    border: 1px solid #16a34a;
+    background: #16a34a;
+    color: #fff;
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.hitl-inline-save-btn:hover:not(:disabled) {
+    background: #15803d;
+}
+
+.hitl-inline-save-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.hitl-inline-cancel-btn {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    border: 1px solid #d1d5db;
+    background: #f3f4f6;
+    color: #374151;
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.hitl-inline-cancel-btn:hover {
+    background: #e5e7eb;
+}
+
+/* "was: X | now: Y" transparency badge shown after a successful edit */
+.hitl-edit-history {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #6b7280;
+    flex-wrap: wrap;
+    margin-top: 2px;
+}
+
+.hitl-edit-history .hitl-was-value {
+    text-decoration: line-through;
+    color: #9ca3af;
+}
+
+.hitl-edit-history .hitl-now-value {
+    color: #374151;
+    font-weight: 500;
+}
+
+/* "clinician edited" badge */
+.hitl-badge--edited {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: #ede9fe;
+    color: #5b21b6;
+    white-space: nowrap;
+}
+
+/* "clinician added" badge */
+.hitl-badge--added {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: #f3e8ff;
+    color: #6f42c1;
+    white-space: nowrap;
+}
+
+/* "carried over" badge for reprocess survivors */
+.hitl-badge--carried-over {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: #fef9c3;
+    color: #854d0e;
+    white-space: nowrap;
+}
+
+/* ---- P4 R2: Assert from block affordance -------------------------------- */
+
+/* "+ Assert from block" button on Missed / Possibly-Missed rows */
+.hitl-assert-btn {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 3px;
+    border: 1px solid #6f42c1;
+    background: transparent;
+    color: #6f42c1;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.1s ease, color 0.1s ease;
+}
+
+.hitl-assert-btn:hover {
+    background: #f3e8ff;
+}
+
+/* Block picker dropdown */
+.hitl-block-picker {
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    margin-top: 4px;
+    padding: 4px 0;
+    max-height: 220px;
+    overflow-y: auto;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    width: 100%;
+}
+
+.hitl-block-picker-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 5px 8px;
+    cursor: pointer;
+    font-size: 12px;
+    border-bottom: 1px solid #f3f4f6;
+    transition: background 0.1s ease;
+}
+
+.hitl-block-picker-item:last-child {
+    border-bottom: none;
+}
+
+.hitl-block-picker-item:hover,
+.hitl-block-picker-item.is-selected {
+    background: #f3e8ff;
+}
+
+.hitl-block-picker-item .hitl-picker-page {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: #9ca3af;
+    background: #f3f4f6;
+    padding: 1px 4px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+
+.hitl-block-picker-item .hitl-picker-type {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: #6b7280;
+    background: #e5e7eb;
+    padding: 1px 4px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+
+.hitl-block-picker-item .hitl-picker-snippet {
+    flex: 1 1 auto;
+    color: #374151;
+    font-family: monospace;
+    word-break: break-all;
+    white-space: pre-wrap;
+}
+
+/* Assert form: block picker + value input + save/cancel */
+.hitl-assert-form {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+    width: 100%;
+}
+
+.hitl-assert-value-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.hitl-assert-label {
+    font-size: 11px;
+    color: #6b7280;
+    white-space: nowrap;
+}
+
+.hitl-assert-input {
+    flex: 1 1 120px;
+    min-width: 80px;
+    font-size: 12px;
+    padding: 2px 6px;
+    border: 1px solid #c4b5fd;
+    border-radius: 3px;
+    background: #faf5ff;
+    color: #1f2937;
+    outline: none;
+}
+
+.hitl-assert-input:focus {
+    border-color: #7c3aed;
+    box-shadow: 0 0 0 2px rgba(109,66,193,0.15);
+}
+
+.hitl-assert-save-btn {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    border: 1px solid #6f42c1;
+    background: #6f42c1;
+    color: #fff;
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.hitl-assert-save-btn:hover:not(:disabled) {
+    background: #5a32a3;
+}
+
+.hitl-assert-save-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.hitl-assert-cancel-btn {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    border: 1px solid #d1d5db;
+    background: #f3f4f6;
+    color: #374151;
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.hitl-assert-cancel-btn:hover {
+    background: #e5e7eb;
+}
+
+.hitl-assert-no-block {
+    font-size: 11px;
+    color: #dc2626;
+    padding: 2px 0;
+}
+
+/* ---- P4 R2: Reprocess "just re-extracted" pill -------------------------- */
+
+.hitl-chip--reextracted {
+    background: #dbeafe;
+    color: #1e40af;
+    border: 1px solid #93c5fd;
+    font-size: 10px;
+    animation: hitl-fade-in 0.3s ease;
+}
+
+@keyframes hitl-fade-in {
+    from { opacity: 0; transform: scale(0.9); }
+    to   { opacity: 1; transform: scale(1);   }
+}
+
+/* Discard manual edits checkbox row above Reprocess button */
+.hitl-discard-edits-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #6b7280;
+    margin-right: 4px;
+}
+
+.hitl-discard-edits-row input[type="checkbox"] {
+    cursor: pointer;
+}
+
+/* ---- P4 R2: Confirmation modal (N fields will not be saved) ------------- */
+
+#hitl-confirm-approve-modal .modal-dialog {
+    max-width: 520px;
+}
+
+/* Ensure the confirm modal's backdrop sits above the review modal.
+   Bootstrap 4 increments z-index for stacked modals automatically
+   when using jQuery .modal('show'), but we add an explicit rule as a
+   safety net for the fallback (non-jQuery) path. */
+#hitl-confirm-approve-modal {
+    z-index: 1060;
+}
+
+.hitl-confirm-backdrop {
+    z-index: 1055;
+}
+
+.hitl-confirm-field-list {
+    margin: 8px 0 0 0;
+    padding-left: 1.2em;
+    font-size: 12px;
+    color: #374151;
+}
+
+.hitl-confirm-field-list li {
+    font-family: monospace;
+    margin-bottom: 2px;
+}
+
+.hitl-confirm-see-all {
+    font-size: 11px;
+    color: #6b7280;
+    cursor: pointer;
+    text-decoration: underline;
+    margin-top: 4px;
+    display: inline-block;
+}
+
+.hitl-confirm-checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 12px;
+    padding: 8px;
+    background: #fef9c3;
+    border: 1px solid #fde68a;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #374151;
+}
+
+.hitl-confirm-checkbox-row input[type="checkbox"] {
+    margin-top: 2px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.hitl-confirm-approve-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+/* ---- P4 R1: Approve / Reject footer buttons ----------------------------- */
+
+/* Approve button — Bootstrap btn-success base + slight size nudge to match
+   the existing Reprocess (btn-warning btn-sm) button. */
+.hitl-approve-btn.btn-success {
+    background-color: #16a34a;
+    border-color: #15803d;
+    color: #ffffff;
+    font-weight: 500;
+}
+
+.hitl-approve-btn.btn-success:hover:not(:disabled) {
+    background-color: #15803d;
+    border-color: #166534;
+}
+
+.hitl-approve-btn.btn-success:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+}
+
+/* Reject button — Bootstrap btn-outline-danger base. */
+.hitl-reject-btn.btn-outline-danger {
+    color: #dc2626;
+    border-color: #dc2626;
+    background-color: transparent;
+    font-weight: 500;
+}
+
+.hitl-reject-btn.btn-outline-danger:hover:not(:disabled) {
+    background-color: #fee2e2;
+    border-color: #b91c1c;
+    color: #b91c1c;
+}
+
+.hitl-reject-btn.btn-outline-danger:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+}
+
+/* ---- P4 R1: Banner status-pill color tokens ----------------------------- */
+
+/* pending_review → Bootstrap alert-info (blue).  The banner uses Bootstrap's
+   built-in alert-info class; these tokens document the semantic colour for
+   any non-Bootstrap usage (e.g. a status pill in a future table view). */
+.hitl-status-pill--pending-review {
+    background: #dbeafe;
+    color: #1e40af;
+    border-color: #93c5fd;
+}
+
+/* approved → quiet green.  Mirrors Bootstrap alert-success but with subdued
+   padding so it does not dominate the document viewer. */
+.hitl-status-pill--approved {
+    background: #d1fae5;
+    color: #065f46;
+    border-color: #6ee7b7;
+}
+
+/* Approved banner override: keep the Bootstrap alert-success base but reduce
+   visual weight so it does not cover the document viewer area. */
+#oe-copilot-hitl-banner.alert-success.hitl-banner--approved {
+    background-color: #f0fdf4;
+    border-color: #bbf7d0;
+    color: #166534;
+    font-size: 12px;
+    padding-top: 3px;
+    padding-bottom: 3px;
+}
+
+/* ---------------------------------------------------------------------- */
+/*  R2 demo pivot: sidecar mode                                           */
+/* ---------------------------------------------------------------------- */
+/*                                                                        */
+/*  Activated by `data-hitl-sidecar="1"` on the modal element. Converts   */
+/*  the Bootstrap modal into a right-edge fixed-position sidebar so the   */
+/*  clinician can review extractions alongside the document (the document */
+/*  is already visible in the page; no need for the modal's own PDF       */
+/*  preview pane).                                                        */
+/*                                                                        */
+/*  All existing modal JS (Bootstrap show/hide + hitl-review.js field-row */
+/*  logic) works unchanged — only the visual frame transforms.            */
+/*                                                                        */
+/*  R3 will pull this out of the modal wrapper entirely and add bbox      */
+/*  overlay on the document iframe behind the sidecar.                    */
+/* ---------------------------------------------------------------------- */
+
+#hitl-review-modal[data-hitl-sidecar="1"] {
+    background: transparent !important;
+    pointer-events: none !important;  /* let clicks fall through outside dialog */
+    overflow: visible !important;
+}
+
+/* Position to peer with the Co-Pilot panel:
+ *   - top offset (~90px) sits the sidecar below the OpenEMR top nav so it
+ *     starts at the same Y as Co-Pilot
+ *   - right offset (~320px) docks the sidecar to the LEFT of Co-Pilot
+ *     (Co-Pilot is ~300-320px wide on the right edge)
+ *   - bottom: 0 lets it match Co-Pilot's lower bound
+ *   These values are conservative defaults for a stock OpenEMR install;
+ *   tweak if the nav-bar height or Co-Pilot width differ on your build. */
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-dialog {
+    position: fixed !important;
+    top: 90px !important;
+    right: 320px !important;
+    bottom: 0 !important;
+    left: auto !important;
+    margin: 0 !important;
+    width: 460px !important;
+    max-width: 460px !important;
+    height: auto !important;
+    max-height: calc(100vh - 90px) !important;
+    transform: none !important;
+    pointer-events: auto !important;  /* dialog itself is clickable */
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-content {
+    height: 100% !important;
+    max-height: calc(100vh - 90px) !important;
+    border-radius: 0 !important;
+    border-left: 1px solid #ccc !important;
+    border-top: none !important;
+    border-bottom: none !important;
+    border-right: none !important;
+    box-shadow: -2px 0 12px rgba(0, 0, 0, 0.15) !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-header {
+    flex: 0 0 auto !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-body {
+    flex: 1 1 auto !important;
+    overflow-y: auto !important;
+    padding: 8px !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .modal-footer {
+    flex: 0 0 auto !important;
+    flex-wrap: wrap !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .hitl-body {
+    display: block !important;
+    height: auto !important;
+}
+
+/* Hide the broken PDF preview pane — the actual doc is already on screen
+ * behind the sidecar. R3 will wire bbox overlays onto that iframe. */
+#hitl-review-modal[data-hitl-sidecar="1"] .hitl-pane-left {
+    display: none !important;
+}
+
+#hitl-review-modal[data-hitl-sidecar="1"] .hitl-pane-right {
+    width: 100% !important;
+    flex: none !important;
+    padding: 0 !important;
+    border-left: none !important;
+}
+
+/* Defensive: suppress any backdrop that may slip through. */
+#hitl-review-modal[data-hitl-sidecar="1"] ~ .modal-backdrop,
+.modal-backdrop[data-for="hitl-review-modal"] {
+    display: none !important;
 }

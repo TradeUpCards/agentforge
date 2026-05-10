@@ -119,6 +119,8 @@ agent-eval:
     - python -m agent.tests.eval.runner --output-json /tmp/eval_results.json
     - echo "--- PR-blocking rubric regression gate ---"
     - python scripts/run_eval_gate.py --baseline agent/tests/eval/baseline.json --current /tmp/eval_results.json --max-regression 0.05
+    - echo "--- PR-blocking strip-rate regression gate ---"
+    - python scripts/run_strip_rate_gate.py --baseline agent/tests/eval/strip_rate_baseline.json --current-json /tmp/eval_results.json --max-regression 0.05
   artifacts:
     # Always upload the eval run report (success or failure) for post-mortem.
     when: always

@@ -74,12 +74,12 @@ foreach ($rows as $row) {
         continue;
     }
 
-    // Sentinel → real pid: invert PersonaMap.  PersonaMap maps real→sentinel;
-    // for backfill we need sentinel→real.  The four demo personas are
-    // pid 1-4 → 999101-999104, so subtracting the offset works.
-    $realPid = $sentinelPid >= 999_100 && $sentinelPid <= 999_199
-        ? $sentinelPid - 999_100
-        : $sentinelPid;
+    // Sentinel → real pid: invert PersonaMap.  Real pid p maps to
+    // sentinel 999_000 + p (PersonaMap::sentinelId), so the reverse is
+    // real_pid = sentinel - 999_000 for sentinels in [999_001, 999_999].
+    // Older extraction rows in the legacy [999_101, 999_199] range still
+    // resolve correctly under the same arithmetic.
+    $realPid = PersonaMap::realPid($sentinelPid) ?? $sentinelPid;
 
     echo sprintf(
         "  ext_id=%d doc_ref=%s doc_type=%s sentinel_pid=%d real_pid=%d → ",

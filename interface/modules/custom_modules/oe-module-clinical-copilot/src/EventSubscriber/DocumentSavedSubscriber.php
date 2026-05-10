@@ -50,6 +50,7 @@ namespace OpenEMR\Modules\ClinicalCopilot\EventSubscriber;
 use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\SystemLogger;
 use OpenEMR\Modules\ClinicalCopilot\Events\DocumentCreatedEvent;
+use OpenEMR\Modules\ClinicalCopilot\ExtractionStatus;
 use OpenEMR\Modules\ClinicalCopilot\Service\AgentClient;
 use OpenEMR\Modules\ClinicalCopilot\Service\DocumentPathResolver;
 use OpenEMR\Modules\ClinicalCopilot\Service\ExtractedFieldsWriter;
@@ -108,14 +109,18 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
      *  2. Checks if it is one of our auto-extract categories.
      *  3. Runs the pid through PersonaMap; skips if not a demo persona.
      *  4. Checks idempotency — skips if this (doc_ref_id, doc_type) already
-     *     has an active OK extraction row.
+     *     has an active extraction row in a non-retryable state (pending_review,
+     *     approved, ok).  Error / refused rows still allow a fresh attempt.
      *  5. Marks prior attempts inactive (IS_ACTIVE INVARIANT — before any
      *     file I/O or agent call so even the error path is covered).
      *  6. Resolves the filesystem path via DocumentPathResolver.
      *  7. Calls AgentClient::attachAndExtract.
      *  8. Persists the result row in co_pilot_extractions (incl. docling_blocks_json).
+     *     Status is set to ExtractionStatus::PENDING_REVIEW for successful
+     *     extractions (P4 R1: round-trip is deferred until clinician approves).
      *  9. Writes co_pilot_extracted_fields rows via ExtractedFieldsWriter.
-     * 10. FHIR round-trip for successful extractions.
+     * 10. FHIR round-trip REMOVED (P4 R1).  Round-trip now runs on demand via
+     *     CoPilotController::handleApprove → RoundtripService::roundtripFromExtractionId.
      */
     public function onDocumentCreated(DocumentCreatedEvent $event): void
     {
@@ -158,10 +163,11 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
 
             $docRefId = (string) $docId;
 
-            // 4. Idempotency: skip only if an active, successful extraction
-            //    already exists.  Refused or error rows do NOT block retry.
+            // 4. Idempotency: skip only if an active, non-retryable extraction
+            //    already exists (ok | pending_review | approved).
+            //    Refused, error, and rejected rows do NOT block a fresh attempt.
             if ($this->activeOkExtractionExists($docRefId, $docType)) {
-                $this->logger->info('ClinicalCopilot: active ok extraction already exists — idempotent skip', [
+                $this->logger->info('ClinicalCopilot: active non-retryable extraction already exists — idempotent skip', [
                     'doc_ref_id' => $docRefId,
                     'doc_type'   => $docType,
                 ]);
@@ -262,11 +268,42 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
             // 8. Persist result.
             //    Prior attempts were already deactivated at step 5 (IS_ACTIVE
             //    INVARIANT FIX).  No second markPriorAttemptsInactive() call here.
+            //
+            //    Status policy depends on the OPENEMR_HITL_GATE_ENABLED env flag:
+            //
+            //    - Flag=false (default, MVP/demo mode): write status='ok' and
+            //      run the FHIR round-trip synchronously below.  Clinical
+            //      tables populate immediately on upload.  HITL infrastructure
+            //      remains in code but dormant — banner doesn't fire on 'ok'
+            //      with stripped=0; modal/sidecar code never opens.
+            //
+            //    - Flag=true (P4 R1+R2 mode): write status='pending_review'
+            //      for successful extractions and DEFER the round-trip.  The
+            //      clinician must explicitly approve via
+            //      POST approve_extraction.php → roundtripFromExtractionId.
+            //      Prevents unreviewed LLM output from entering the chart.
+            //
+            //    For non-ok agent statuses (error, refused) the agent status
+            //    is stored verbatim regardless of the flag — those rows never
+            //    reach the approve gate either way.
+            $hitlGateEnabled = filter_var(
+                getenv('OPENEMR_HITL_GATE_ENABLED') ?: 'false',
+                FILTER_VALIDATE_BOOLEAN,
+            );
+
+            if ($agentStatus === ExtractionStatus::OK) {
+                $persistedStatus = $hitlGateEnabled
+                    ? ExtractionStatus::PENDING_REVIEW
+                    : ExtractionStatus::OK;
+            } else {
+                $persistedStatus = $agentStatus;
+            }
+
             $extractionId = $this->persistExtractionRow(
                 pid:                $sentinelPid,
                 docRefId:           $docRefId,
                 docType:            $docType,
-                status:             $agentStatus,
+                status:             $persistedStatus,
                 extractionJson:     $extractionJson,
                 nBlocks:            $nBlocks,
                 confidenceAvg:      $confidenceAvg,
@@ -284,44 +321,69 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
             );
 
             // 9. Write per-field verdict rows (P3).
+            //    writeAll returns field_path → ef_row_id for verified fields,
+            //    which is exactly the verifiedFieldMap shape RoundtripService
+            //    expects in demo mode (step 10 below).
+            $verifiedFieldMap = [];
             if ($extractionId > 0 && $fieldVerdicts !== []) {
                 $verifiedFieldMap = $this->fieldsWriter->writeAll(
                     $extractionId,
                     $fieldVerdicts,
                     $doclingBlocks,
                 );
-            } else {
-                $verifiedFieldMap = [];
             }
 
-            // 10. FHIR round-trip — only on successful extraction.  Persists
-            // derived facts into OpenEMR's clinical tables (procedure_*,
-            // lists, prescriptions) so they appear in the chart UI and
-            // are queryable via the FHIR API.  Per W2 PRD §1 + §43.
+            // 10. FHIR round-trip — gated by OPENEMR_HITL_GATE_ENABLED env flag.
             //
-            // NOTE on pid: the round-trip uses the REAL OpenEMR pid (the
-            // chart owner), not the sentinel pid the agent service uses.
-            // Clinical-table foreign keys must reference the actual
-            // patient row.  The sentinel pid namespace exists only for
-            // the agent's own audit trail.
+            //     Demo mode (flag=false, default): run round-trip synchronously
+            //     so the clinical tables (procedure_result, lists, prescriptions)
+            //     populate immediately on upload.  This is the pre-R1 MVP
+            //     behavior the demo expects.
+            //
+            //     HITL mode (flag=true): defer round-trip to the clinician
+            //     approve gate (see CoPilotController::dispatchApprove →
+            //     RoundtripService::roundtripFromExtractionId).
+            //
+            //     Either way, errors here are caught and logged structurally so
+            //     a partial round-trip failure never breaks the upload.
             if (
-                $agentStatus === 'ok'
-                && $extractionJson !== null
+                !$hitlGateEnabled
                 && $extractionId > 0
+                && $persistedStatus === ExtractionStatus::OK
             ) {
-                $extractionPayload = json_decode($extractionJson, true);
-                if (is_array($extractionPayload)) {
-                    $this->roundtripService->roundtrip(
-                        extractionId:    $extractionId,
-                        patientId:       $pid,
-                        docType:         $docType,
-                        extraction:      $extractionPayload,
-                        docRefId:        $docRefId,
-                        verifiedFieldMap: $verifiedFieldMap,
-                        fieldsWriter:    $this->fieldsWriter,
-                    );
+                try {
+                    $extractionDecoded = json_decode($extractionJson, true);
+                    if (is_array($extractionDecoded)) {
+                        $this->roundtripService->roundtrip(
+                            extractionId:     $extractionId,
+                            patientId:        $pid,           // REAL OpenEMR pid, not sentinel
+                            docType:          $docType,
+                            extraction:       $extractionDecoded,
+                            docRefId:         $docRefId,
+                            verifiedFieldMap: $verifiedFieldMap,
+                            fieldsWriter:     $this->fieldsWriter,
+                        );
+                    }
+                } catch (Throwable $rtError) {
+                    // Structural-only log per AUDIT.md C-6.
+                    $this->logger->error('ClinicalCopilot: demo-mode round-trip failed', [
+                        'extraction_id'   => $extractionId,
+                        'doc_ref_id'      => $docRefId,
+                        'doc_type'        => $docType,
+                        'exception_class' => get_class($rtError),
+                        'file'            => basename($rtError->getFile()),
+                        'line'            => $rtError->getLine(),
+                    ]);
                 }
             }
+
+            $this->logger->info('ClinicalCopilot: extraction persisted', [
+                'extraction_id'    => $extractionId,
+                'doc_ref_id'       => $docRefId,
+                'doc_type'         => $docType,
+                'status'           => $persistedStatus,
+                'hitl_gate_active' => $hitlGateEnabled,
+            ]);
         } catch (Throwable $e) {
             // Structural-only log: exception class + file:line.  The full
             // exception object (message + stack trace + local vars) is
@@ -358,16 +420,21 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
     }
 
     /**
-     * Return true only if an active, successfully-completed extraction already
+     * Return true only if an active extraction in a non-retryable state already
      * exists for this (doc_ref_id, doc_type) pair.
      *
-     * Rows with is_active = 0 (superseded attempts) or status != 'ok'
-     * (refused / error) are intentionally excluded so that retries can
-     * proceed through without being blocked.
+     * Non-retryable states (P4 R1):
+     *   - 'ok'             — legacy synchronous round-trip (pre-P4)
+     *   - 'pending_review' — awaiting clinician approve/reject
+     *   - 'approved'       — clinician approved; round-trip ran
      *
-     * Prior behaviour (pre-P2): any row — regardless of status — blocked a
-     * retry.  That caused refused / error rows to permanently silently skip
-     * re-extraction on subsequent uploads or manual reprocess attempts.
+     * Retryable states (rows with these statuses do NOT block a new attempt):
+     *   - 'error'    — agent internal error; retrying is appropriate
+     *   - 'refused'  — agent refused (>30% strip rate); retrying is appropriate
+     *   - 'rejected' — clinician rejected; retrying IS allowed (new upload of
+     *                  the same doc should start fresh)
+     *
+     * Rows with is_active = 0 (superseded attempts) are always excluded.
      */
     protected function activeOkExtractionExists(string $docRefId, string $docType): bool
     {
@@ -376,7 +443,7 @@ class DocumentSavedSubscriber implements EventSubscriberInterface
               WHERE `doc_ref_id` = ?
                 AND `doc_type` = ?
                 AND `is_active` = 1
-                AND `status` = \'ok\'
+                AND `status` IN (\'ok\', \'pending_review\', \'approved\')
               LIMIT 1',
             [$docRefId, $docType]
         );
