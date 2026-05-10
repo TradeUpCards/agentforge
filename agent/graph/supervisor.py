@@ -120,10 +120,16 @@ def supervisor_node(state: SupervisorState) -> dict[str, Any]:
         # every supervisor visit produces a span).  No tokens / no cost
         # since there's no LLM call — span metadata reflects that.
         logger.info("supervisor_node: deterministic short-circuit → intake_extractor")
-        with _langfuse_span(lf, _langfuse_available, hops_taken) as _span:
-            if _langfuse_available and lf is not None:
+        with _langfuse_span(lf, _langfuse_available, hops_taken) as _ctx:
+            # Update directly on the underlying span object — _ctx is
+            # the context-manager wrapper, _ctx._span is the actual
+            # LangfuseSpan returned by start_observation().
+            # `lf.update_current_span(...)` doesn't reach this span
+            # because no nested LLM call has pushed it onto the SDK's
+            # current-span context.
+            if _ctx._span is not None:
                 try:
-                    lf.update_current_span(
+                    _ctx._span.update(
                         metadata={
                             "route": "intake_extractor",
                             "hops_taken": hops_taken,
@@ -145,10 +151,10 @@ def supervisor_node(state: SupervisorState) -> dict[str, Any]:
         # Second supervisor visit — extraction has run, payload is on
         # state, terminate cleanly (router → END, skipping responder).
         logger.info("supervisor_node: extraction complete — terminating")
-        with _langfuse_span(lf, _langfuse_available, hops_taken) as _span:
-            if _langfuse_available and lf is not None:
+        with _langfuse_span(lf, _langfuse_available, hops_taken) as _ctx:
+            if _ctx._span is not None:
                 try:
-                    lf.update_current_span(
+                    _ctx._span.update(
                         metadata={
                             "route": "terminal",
                             "hops_taken": hops_taken,
