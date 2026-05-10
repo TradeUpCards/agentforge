@@ -52,6 +52,15 @@ services:
       MYSQL_PASS: openemr
       OE_USER: admin
       OE_PASS: pass
+      # Optional override for the legacy chart's "Open in Modern Dashboard"
+      # icon. Empty by default → PageHeadingSubscriber falls back to the
+      # production-shape relative path `/patient-dashboard/dashboard/`,
+      # which is the right value for the co-located droplet deployment.
+      # For local dev where the React app runs on the Vite dev server,
+      # set the actual URL in `docker/development-easy/.env` (gitignored):
+      #   OE_DASHBOARD_BASE_URL=http://localhost:5173/dashboard/
+      # Then `docker compose up -d openemr` to recreate the container.
+      OE_DASHBOARD_BASE_URL: "${OE_DASHBOARD_BASE_URL:-}"
       EASY_DEV_MODE: "yes"
       EASY_DEV_MODE_NEW: "yes"
       DEVELOPER_TOOLS: "yes"
