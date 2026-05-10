@@ -1293,18 +1293,7 @@ async def run_chat(
                 ))
     return _close_audit(audit, started_at, AgentResponse(
         message=Message(role=Role.ASSISTANT, content=prose),
-        # ===== DELIBERATE REGRESSION FOR DEMO VIDEO =====
-        # PRD §6 hard-gate test.  First attempt (`citations=[]`) didn't fire
-        # because that field is only checked by `min_guideline_citations`,
-        # which only runs in live-LLM cases (skipped in fixture-mode CI).
-        # This stronger version strips source_record_ids from every claim
-        # so `min_citations` (which counts source IDs across claims) fails
-        # in fixture-mode cases too.  Trips the citation_present rubric on
-        # cases 01, 04, 09, 13, ... — every case that asserts min_citations
-        # ≥ N regresses to 0.  Pass rate drops well past the 5% threshold.
-        # DO NOT MERGE.  Revert via follow-up commit.
-        # ===============================================
-        claims=[c.model_copy(update={"source_record_ids": []}) for c in verdict.claims_passed],
+        claims=verdict.claims_passed,
         retrieved_records=retrieved_records,
         tools_called=tool_summaries,
         request_id=request_id,
