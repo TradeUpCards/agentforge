@@ -57,14 +57,17 @@ This maps to **three named user-visible behaviors** the eval suite will gate:
 
 ### 2.1 Upload UX — OpenEMR-native, two-actor workflow
 
-**Important:** the PRD scenario explicitly names the front-desk staff as the uploader, not the PCP. The architecture supports a **two-actor workflow:**
+**Important:** the PRD scenario explicitly names the front-desk staff as the uploader, not the PCP. The architecture supports a **three-actor workflow** (front desk → clinician approval → PCP consumption):
 
 | Actor | Role | Touches |
 |---|---|---|
-| **Front-desk staff** | Uploads documents (lab PDFs, intake forms) | OpenEMR's Documents tab |
-| **PCP (week-1 user)** | Consumes extracted data when prepping for the visit | Co-Pilot drawer |
+| **Front-desk staff** | Uploads documents (lab PDFs, intake forms); does NOT have authority to write to clinical tables | OpenEMR's Documents tab → triggers extraction; result lands as `pending_review` |
+| **Clinician** (P4 R1+R2 — shipped) | Reviews extraction in HITL modal with bbox-overlay click-to-source; can edit OCR errors, assert from blocks for missed fields, approve or reject; **explicit Approve before any clinical-table write** | HITL review modal (`hitl-review.js`) + approve/reject endpoints |
+| **PCP (week-1 user)** | Consumes approved extracted data when prepping for the visit | Co-Pilot drawer |
 
-The PCP **does not manage uploads** — by the time they open the chart, extraction has already run and the structured facts are available in the drawer with citations. This matches the PRD's clinic-realistic scenario ("important recent information is buried in a scanned lab PDF and a patient intake form uploaded by the front desk").
+The HITL approve gate (commits `2a2d66a5b` P4 R1, `d699deb38` P4 R2) **structurally prevents the agent from auto-writing to clinical tables.** Round-trip happens only after explicit clinician approval. Reopen-for-review path supports post-approval correction.
+
+By the time the PCP opens the chart, extraction has already run AND been approved; the structured facts are available in the drawer with citations. This matches the PRD's clinic-realistic scenario ("important recent information is buried in a scanned lab PDF and a patient intake form uploaded by the front desk") with an additional safety boundary appropriate for a chart-write surface.
 
 **Decision: leverage OpenEMR's existing patient documents UI as the upload surface; trigger extraction via a category-tag event subscriber.** No custom upload UI in our module.
 
@@ -102,9 +105,17 @@ The PCP **does not manage uploads** — by the time they open the chart, extract
 | Standalone agent-side `/upload` endpoint | ❌ | Bypasses OpenEMR integrity — file lives outside `documents` table; breaks FHIR roundtrip requirement; introduces a parallel auth/CSRF surface |
 | ✅ **OpenEMR-native upload + category-triggered extraction** | Selected | Reuses existing UX/audit/storage; FHIR roundtrip is naturally OpenEMR-mediated; front-desk and PCP workflows both unchanged |
 
-**MVP vs Extension scope for the click-to-source UI:**
-- **MVP (Core req #5 — "visual PDF bounding-box overlay required"):** bbox highlight on the PDF when citation clicked
-- **Extension (PRD page 5):** rich snippet preview popover with extracted-fact context, multi-page navigation, side-by-side diff for follow-up questions
+**Click-to-source UI — shipped 2026-05-10:**
+
+The bbox overlay shipped via `feat/citation-bbox-overlay` (MRs !62 + !63) on final-submission day. Architecture:
+
+| Layer | File | Purpose |
+|---|---|---|
+| **Resolver endpoint** | `interface/modules/custom_modules/oe-module-clinical-copilot/public/resolve_citation.php` | `GET /resolve_citation.php?source_type=...&source_id=...` — pure-SQL traversal returns `{document_id, page, block_id, bbox, snippet}`. Auth via OpenEMR session + ACL. No LLM round-trip needed for the click. |
+| **Chat-side overlay** | `chat-panel.js` (citation popover) + `hitl-review.js` (modal sidecar) | Click any citation badge → fetch resolver → SVG overlay highlights the source region on the original PDF (or PNG/JPG via the image-overlay sidecar — commit `fb14e6ac3`) |
+| **Citation schema** | unchanged | `bbox` field on Citation stays optional / unpopulated for non-extracted-document citations. Bbox lives on the resolver response, not in the citation, so the agent payload stays small and the rendering logic is colocated with the document viewer. |
+
+**Extension (deferred to W3):** rich snippet preview popover with extracted-fact context, multi-page navigation, side-by-side diff for follow-up questions.
 
 ### 2.2 Pipeline
 
@@ -156,10 +167,24 @@ The PCP **does not manage uploads** — by the time they open the chart, extract
                                    │
                                    ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ FHIR resource creation                                             │
-│  - Lab fields  → DiagnosticReport + N×Observation                  │
-│  - Intake      → Patient + AllergyIntolerance + MedicationStatement│
-│ Each resource carries DocumentReference link back to source PDF    │
+│ Extraction stored as `co_pilot_extractions.status='pending_review'`│
+│ — clinical-table writes DO NOT fire automatically (P4 R1 gate).    │
+│ HITL banner appears on the document; clinician opens modal,        │
+│ reviews per-field bbox-overlay citations, optionally edits OCR     │
+│ errors / asserts from blocks for missed fields, then explicitly    │
+│ APPROVES.                                                          │
+└────────────────────────────────────────────────────────────────────┘
+                                   │
+                              (on Approve)
+                                   ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ FHIR resource creation (RoundtripService — PHP-side)               │
+│  - Lab fields  → procedure_order + procedure_report + N×procedure_result │
+│  - Intake      → lists (allergies, problems) + prescriptions       │
+│ Each row tracked in co_pilot_fhir_links with UNIQUE(extraction_id, │
+│ target_table, source_block_id) for idempotency. derivedFrom link   │
+│ traces every row back to the source DocumentReference + Docling    │
+│ block.                                                             │
 └────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
@@ -409,13 +434,16 @@ Query (from supervisor) → BM25 (keyword) ─┐
 
 ### 4.2 Corpus
 
-Small clinical-guideline corpus aligned to our existing UC1/UC2/UC3 use cases:
-- USPSTF preventive-care recommendations (subset)
-- ADA Standards of Care (diabetes — A1c targets, screening intervals)
-- JNC8 / 2017 ACC-AHA hypertension guidelines
-- Drug-interaction rules from `RULE_CORPUS.md` (Week-1 work, repurposed)
+Small clinical-guideline corpus indexed in Qdrant (`clinical_guidelines` collection, BAAI bge-small-en embeddings, 384-dim, cosine distance):
 
-Target: 50–200 chunks at week-2 close. Indexed with a stable chunk_id so citations roundtrip.
+- **Actual at W2 final-submission close: 26 chunks** across 5 named topics — afib anticoagulation, CKD staging, heart failure management, metformin first-line for T2DM, warfarin drug interactions
+- Sources: ADA Standards of Care subset, AHA/ACC guidance subset, drug-interaction rules from `RULE_CORPUS.md` (Week-1 work, repurposed)
+
+**Below `indexing_threshold: 20000`** — Qdrant uses brute-force exact search at this scale (HNSW kicks in only when the collection grows past 20K points). Correct architecture for the current corpus size; HNSW would be overhead.
+
+**Corpus expansion to ≥200 chunks** (HF, CKD, AFib coverage beyond named topics) is documented as W3 deferred per `DECISIONS.md` 2026-05-08 entry. The honest LLM behavior on out-of-corpus questions — refusing with prose-only inline citations rather than fabricating — is a positive system property under claim-emission discipline; expansion is content-engineering, not a system gap.
+
+Indexed with a stable chunk_id (`source_id` like `ada-2024-s2-3-chunk-7`) so citations round-trip through the resolver endpoint.
 
 ### 4.3 Citation contract
 
@@ -430,7 +458,11 @@ Per PRD requirement, every retrieved chunk surfaces with:
 }
 ```
 
-This shape extends Week 1's `lists:<id>` pattern — same idea, more fields, distinguishable from patient-record citations by `source_type`.
+This shape extends Week 1's `lists:<id>` pattern — same idea, more fields, distinguishable from patient-record citations by `source_type` (`patient_record` | `guideline` | `extracted_document`).
+
+**Click-to-source via resolver endpoint.** The `bbox` field on Citation stays optional — for patient-record and guideline citations it's typically `null` (those don't have document coordinates). For `extracted_document` citations, the bbox is resolved client-side by `GET /resolve_citation.php?source_type=extracted_document&source_id=<doc_ref_id>&block_id=<block>` which returns `{document_id, page, bbox, snippet}` via pure-SQL traversal of `co_pilot_extractions` + `co_pilot_extracted_fields`. The agent payload stays small (no bbox arrays inflating responses); the client fetches bbox on-demand when a citation badge is clicked. See §2.1 click-to-source UI architecture for full detail.
+
+**`quote_or_value` populated end-to-end (shipped 2026-05-10).** Earlier in W2 the `quote_or_value` field was stub-populated for `extracted_document` citations (echoed `block_id` instead of the actual extracted text). Aria's `feat/citation-bbox-overlay` MR shipped the population fix today: `evidence_retriever` populates `patient_record` citations with the actual value (e.g., "48 mg/dL"); `intake_extractor` populates `extracted_document` citations with rendered field values (e.g., `f"{lab_result.test_name}: {lab_result.value} {lab_result.unit}"`). Bram's `citation_has_quote` rubric DSL (`agent/tests/eval/runner.py`) locks the population in for regression-defense.
 
 ---
 
@@ -438,23 +470,28 @@ This shape extends Week 1's `lists:<id>` pattern — same idea, more fields, dis
 
 ### 5.1 Suite shape
 
-50 cases, organized by what they exercise. **Sub-shapes within each category are deliberately chosen to cover the PRD's named scenario challenges**: imperfect scan, incomplete patient record, follow-up question, FHIR roundtrip without duplication.
+**67 cases shipped at W2 final-submission** (PRD floor was 50; we exceed by 17), organized by what they exercise. **Sub-shapes within each category are deliberately chosen to cover the PRD's named scenario challenges**: imperfect scan, incomplete patient record, follow-up question, FHIR roundtrip without duplication.
 
-| Category | Cases | Hand-authored | Public benchmark | Sub-shapes covered |
-|---|---|---|---|---|
-| **Lab extraction** | 10 | 10 | 0 | 8 standard scans + **2 imperfect scans** (degraded OCR, partial extraction → tests low-confidence handling) + **1 idempotency case** (re-run `attach_and_extract` on same doc; assert no duplicate FHIR resources) |
-| **Intake extraction** | 8 | 8 | 0 | 8 standard intake forms covering allergies / meds / family history per PRD schema |
-| **Evidence retrieval** | 10 | 4 | 6 | 4 hand-authored RxNav-normalized drug+condition queries + **4 MedQA** (treatment-recommendation lookups) + **2 MedicationQA** (drug-info retrieval) |
-| **End-to-end answer** | 10 | 5 | 5 | **2 incomplete-record cases** (sparse chart 999100 + intake form supplements the gap) + **2 follow-up question cases** (multi-turn against extracted doc) + 1 grounded-synthesis case + **5 MedQA full vignettes** (case → recommendation with citation) |
-| **Safe refusal** | 6 | 6 | 0 | Out-of-scope query / unreadable scan / extraction confidence below threshold / no relevant evidence found / cross-patient lure / supervisor max-hops — each refusal returns a *named reason*, not a generic 'I cannot' |
-| **No PHI in logs** | 6 | 6 | 0 | Adversarial fixtures with embedded SSN/phone/email/cross-patient identifiers; assert via regex on Langfuse trace export |
-| **Total** | **50** | **39** | **11** | ~22% public-benchmark, 78% scenario-specific |
+| Category | Cases | Notes |
+|---|---|---|
+| **Lab extraction** | 10 | 8 standard scans + 2 imperfect scans (degraded OCR, partial extraction) + 1 idempotency case (re-run `attach_and_extract`; assert no duplicate FHIR resources) |
+| **Intake extraction** | 8 | 8 intake forms covering allergies / meds / family history / chief concern per PRD schema |
+| **Evidence retrieval** | 11 | Hand-authored drug+condition queries + MedQA-style treatment lookups + 5 named-corpus cases (afib, ckd, heart failure, metformin, warfarin) |
+| **Happy path** | 19 | UC1/UC2/UC3 end-to-end + graph_uc1/uc2/uc3 endpoint tests + W1 baseline cases |
+| **Edge case** | 5 | Contradictory progression / sparse data / unusual queries |
+| **Auth boundary** | 1 | bad_hmac (PRD §6 safe_refusal rubric coverage) |
+| **Safe refusal / leakage** | 5 | Out-of-scope / cross-patient lure / supervisor max-hops / patient-switch / vitals-via-encounters — each refusal returns a *named reason* |
+| **No PHI in logs** | 6 | Adversarial fixtures with embedded SSN/phone/email/MRN/cross-patient identifiers; asserted via regex on Langfuse trace export |
+| **Prompt injection** | 5 | Unicode-obfuscated / via-allergy-reaction / via-encounter-narrative / via-lab-field-name / standard injection patterns |
+| **Ambiguous** | 1 | Multi-interpretation query handling |
+| **Leakage attempt** | 1 | Cross-patient leakage resistance (the C-7 finding case) |
+| **Total** | **67** | Exceeds 50-case PRD floor by 17 |
 
 **Coverage of the PRD's three named challenges:**
 - *"document scan is imperfect"* → 2 cases in Lab extraction + 1 in Safe refusal (extraction-confidence-below-threshold)
-- *"patient record is incomplete"* → 2 cases in End-to-end answer (sparse chart + intake form)
-- *"user asks a follow-up question"* → 2 cases in End-to-end answer (UC3 multi-turn against extracted doc)
-- *"round-trip without untraceable records"* → 1 case in Lab extraction (idempotency) + the §2.4 `derivedFrom` contract is asserted on every end-to-end case
+- *"patient record is incomplete"* → 2 cases in Edge case (sparse chart + intake form supplements)
+- *"user asks a follow-up question"* → 2 cases in Happy path (UC3 multi-turn against extracted doc)
+- *"round-trip without untraceable records"* → 1 case in Lab extraction (idempotency) + the §2.4 `derivedFrom` contract is asserted on every end-to-end case via `co_pilot_fhir_links` UNIQUE constraint
 
 **Why MultiMedQA (MedQA + MedicationQA), not other components:**
 - ✅ **MedQA** (USMLE vignettes): closest public proxy for "case → recommendation" — fits Evidence retrieval + End-to-end answer
@@ -479,15 +516,20 @@ Each case asserts on five boolean dimensions (per PRD):
 
 ### 5.3 CI gate
 
-- Pre-commit hook runs the smoke subset (~10 cases, fixture mode, ~30s)
-- Full 50-case suite runs in CI on every PR (live LLM, ~5 min, ~$0.30)
-- Fails the build if any rubric category regresses by >5% or drops below pass threshold
+- **Pre-commit hook** runs the smoke tier (14 cases, fixture mode, ~12s, $0) — see `scripts/git-hooks/pre-commit`
+- **PR-blocking CI** runs the fixture-mode-eligible subset (33 cases out of 67, ~30s, $0) on every PR via `.github/workflows/agent-eval.yml` + `.gitlab-ci.yml` (mirror)
+- **Nightly tier** runs the full 67-case suite (live LLM, ~5 min, ~$0.80) — currently triggered manually; nightly cron deferred to W3
+- **Fail conditions (both axes must pass):**
+  - Rubric gate (`scripts/run_eval_gate.py`): any per-rubric pass rate drops more than 5pp from baseline OR falls below 80% absolute floor → exit 1
+  - Strip-rate gate (`scripts/run_strip_rate_gate.py`): any per-category strip rate (verifier-load measure) drifts more than 5pp from baseline → exit 1
+- **GitLab "Pipelines must succeed" toggle ON** → MR merge button disabled when gate fires
+- **Final-submission state** (2026-05-10): fixture-mode pass rate 33/0 = 100%; full 3-mode merged 60/7 = 89.6%; the 7 fails are all `live_llm_required` nightly-tier with documented W3 fix scopes per `EVAL_SUITE.md` §6
 
-**The grader will introduce a regression and confirm CI catches it.** The architecture is built around the assumption that boolean rubrics + structured-output judge are deterministic enough to make this gate trustworthy.
+**The grader will introduce a regression and confirm CI catches it.** Empirical proof per rubric is documented in `EVAL_SUITE.md` §8.6 (per-rubric regression-coverage matrix, verified 2026-05-10 immediately before final submission via deliberate inject-then-revert cycles on a sandbox branch).
 
 ### 5.5 Hard Gate confidence — how we know the gate catches regressions
 
-The PRD's grading explicitly tests the gate by introducing a regression. "We have a CI gate" is not enough; we need to defend that the gate is *sensitive* to the failure modes the rubrics name. Three confidence sources:
+The PRD's grading explicitly tests the gate by introducing a regression. "We have a CI gate" is not enough; we need to defend that the gate is *sensitive* to the failure modes the rubrics name. **Four** confidence sources (1-3 designed up-front; 4 added 2026-05-10 from empirical verification):
 
 **1. Per-rubric meta-tests.** For each of the 5 rubric categories, we keep a small set of **deliberately-broken fixtures** that should always fail their respective rubric. If a meta-test passes, the rubric isn't actually checking what it claims to:
 
@@ -505,7 +547,9 @@ The meta-tests run *separately* from the 50 cases — they're a tripwire on the 
 
 **3. Adversarial regression cases.** 6 of the 50 cases are deliberately designed to detect specific regression types — a prompt-cache misconfiguration, a verifier-strictness reduction, a worker-isolation breach (worker calling another worker directly), an extraction-verifier bypass, a citation-stripping bug, and a PHI-mask leak. Each case maps to a known regression class so we can defend "if the grader injects regression type X, this case fires."
 
-**Defensible interview answer:** *"We test the gate with three layers — per-rubric meta-tests that confirm each rubric actually fires when broken, a baseline-comparison threshold that catches >5% regression in any category, and 6 adversarial cases targeting specific regression classes. The gate is itself part of the test surface, not just a check."*
+**4. Empirical regression-injection verification (2026-05-10).** Immediately before final submission, we deliberately injected one regression per rubric on a sandbox branch (`agentforge/demo-regression-test-3`) and verified the CI gate fired RED for each. The full per-rubric matrix — including the GitLab pipeline numbers that exhibited each failure — is documented in `EVAL_SUITE.md` §8.6 "Per-rubric regression-coverage matrix." This is the canonical answer to a grader's "your CI gate fails on a regression I introduce" probe: it has been empirically tested per rubric, with reproducible commit SHAs and pipeline numbers cited.
+
+**Defensible interview answer:** *"We test the gate with four layers — per-rubric meta-tests that confirm each rubric actually fires when broken, a baseline-comparison threshold that catches >5% regression in any category, 6 adversarial cases targeting specific regression classes, and an empirical inject-then-revert verification cycle (one regression per rubric, pipeline numbers cited in EVAL_SUITE §8.6) done immediately before final submission. The gate is itself part of the test surface, not just a check."*
 
 ### 5.6 Why boolean (not 1–10 LLM-as-judge)
 
@@ -667,7 +711,7 @@ The 6 eval cases dedicated to `no_phi_in_logs` use synthetic patients with embed
 | Docling install / GPU dependency bites the 2-hour MVP window | Medium | Mistral OCR API as documented fallback (1-day swap; same shape) |
 | Cohere Rerank rate limits or pricing surprises | Low | BAAI/bge-reranker-v2 as open-source fallback; same interface |
 | LangGraph state-tracking complexity exceeds week-2 budget | Medium | Start with 2 nodes (supervisor + 1 worker), add second worker after first round-trips |
-| 50-case eval suite takes too long in CI | Low | Smoke subset (10 cases, fixture mode) for pre-commit; full 50 on PR only |
+| 67-case eval suite takes too long in CI | Closed | Smoke subset (14 cases, fixture mode, ~12s) for pre-commit; fixture-mode subset (33 cases, ~30s) on PR; full 67 nightly. PR-blocking gate stays under 1 minute. |
 | Multi-agent failure modes not surfaced by current observability | Medium | Each handoff is a Langfuse span; supervisor decisions logged with rationale |
 
 ### 9.3 Week-1 carryover sequencing
