@@ -477,7 +477,12 @@ _BASELINE_TOOLS = (
     "get_active_medications",
     "get_recent_labs",
     "get_allergies",
-    "get_recent_encounters",
+    "get_recent_encounters",   # surfaces chief_concern via form_encounter.reason
+    "get_family_history",      # surfaces family_history via history_data
+    # Fallback for any intake fields that didn't make the round-trip
+    # (typically returns []; see RoundtripService::roundtripChiefConcern
+    # and roundtripFamilyHistory for the canonical write paths).
+    "get_intake_extras",
 )
 
 

@@ -297,6 +297,35 @@
      * Returns the pid as a string, or null if none found.
      */
     function detectActivePid() {
+        // Strategy 0 (most authoritative): OpenEMR's Knockout view model.
+        //
+        // When the user picks a patient via Patient → Search, OpenEMR's
+        // shell calls `left_nav.setPatient(pname, pid, ...)` which updates
+        // `app_view_model.application_data.patient()` (a Knockout observable)
+        // BUT does NOT navigate any iframe to a URL containing `?pid=N`.
+        // It only calls `navigateTab("encounters.php", "enc", ...)` — no
+        // query string.  Strategies 1-4 below all miss this path because
+        // they scan URLs and globals that aren't updated.
+        //
+        // Reading the KO model first guarantees we see the new patient
+        // regardless of how the user navigated (Finder URL vs. Search KO
+        // call).  This closes a real PHI-isolation gap: without this, the
+        // chat panel stays scoped to the previous patient and the user
+        // can ask questions that resolve against stale context.
+        try {
+            if (hostWin.app_view_model
+                && hostWin.app_view_model.application_data
+                && typeof hostWin.app_view_model.application_data.patient === 'function') {
+                var p = hostWin.app_view_model.application_data.patient();
+                if (p && typeof p.pid === 'function') {
+                    var koPid = p.pid();
+                    if (koPid !== null && koPid !== undefined && String(koPid).length > 0) {
+                        return String(koPid);
+                    }
+                }
+            }
+        } catch (e) { /* KO model not available — fall through */ }
+
         // Strategy 1: any iframe URL containing pid=N or set_pid=N
         var iframes = hostDoc.querySelectorAll('iframe');
         for (var i = iframes.length - 1; i >= 0; i--) {
@@ -559,7 +588,12 @@
 
         function findMatchByText(doc, needle) {
             var n = needle.toLowerCase().trim();
-            if (n.length < 4) return null;
+            // Threshold matches the outer filter at the caller — 3 chars
+            // covers common clinical abbreviations (HTN, DM, MI, COPD,
+            // HLD, GERD, OA, RA, CKD, AFib).  Both filters must agree;
+            // a 4-char floor here was previously short-circuiting any
+            // "HTN"-style needle that the caller had passed in.
+            if (n.length < 3) return null;
             try {
                 var walker = doc.createTreeWalker(
                     doc.body || doc.documentElement,
@@ -721,12 +755,21 @@
 
             // Strategy 2: text-based search across all candidate docs,
             // climbing to a sensible row/card container.
+            //
+            // Length threshold lowered from 4 → 3 chars to cover common
+            // clinical abbreviations stored as the row's title in lists/
+            // medical_problem rows: HTN, DM, MI, COPD, HLD, GERD, OA, etc.
+            // Without this, the chart-highlight click-through silently
+            // failed for any short-abbreviation problem (HTN was the
+            // canonical example — 3 chars filtered out, no DOM match,
+            // yellow-flash never fired).  3-char floor still excludes
+            // most accidental 2-char hits (units, encounter mods).
             if (!match) {
                 var needles = [
                     fields.title, fields.drug, fields.medication,
                     fields.name, fields.diagnosis, fields.allergy,
                     fields.description,
-                ].filter(function (v) { return v && String(v).trim().length >= 4; });
+                ].filter(function (v) { return v && String(v).trim().length >= 3; });
                 for (var n = 0; n < needles.length && !match; n++) {
                     for (var d2 = 0; d2 < docs.length && !match; d2++) {
                         match = findMatchByText(docs[d2], String(needles[n]));

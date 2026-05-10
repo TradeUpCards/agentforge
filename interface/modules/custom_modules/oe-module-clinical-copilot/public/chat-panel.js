@@ -484,7 +484,8 @@
         if (!pid || !data || !data.document_id) return;
 
         // Preferred path: dispatch to the citation sidecar in the top
-        // window for PDF.js + bbox overlay rendering.
+        // window for PDF.js + bbox overlay rendering (or <img> + bbox
+        // for image documents — sidecar branches on mimetype).
         try {
             (window.parent || window).postMessage({
                 type: 'oe-copilot/show-citation-source',
@@ -495,6 +496,12 @@
                     bbox: data.bbox || null,
                     snippet: data.snippet || '',
                     patientId: String(pid),
+                    // Forward source-document mimetype so the sidecar can
+                    // pick its renderer.  Image documents (PNG/JPG intake
+                    // forms) need <img> rendering; PDFs use PDF.js.
+                    // Resolver returns this; absent → defaults to PDF
+                    // path for backward compatibility.
+                    mimetype: data.mimetype || null,
                 },
             }, '*');
             return;

@@ -55,8 +55,8 @@ logger = logging.getLogger(__name__)
 
 DocType = Literal["lab_pdf", "intake_form"]
 
-_SENTINEL_MIN = 999_100
-_SENTINEL_MAX = 999_199
+_SENTINEL_MIN = 999_001
+_SENTINEL_MAX = 999_999
 
 # Model names (W2_ARCHITECTURE.md model split)
 _HAIKU_MODEL = "claude-haiku-4-5"
@@ -224,6 +224,18 @@ def _run_docling_layout(pdf_path: Path) -> list[dict[str, object]]:
 
         if bbox_obj is None:
             continue
+
+        # NOTE: per-row table-bbox split (PRD §5 polish item) is deferred to
+        # W3.  An earlier attempt at this site walked Docling's
+        # TableData.table_cells to emit one block per row so the citation
+        # bbox would highlight only the cited row (e.g. just the
+        # Atorvastatin row in a medications table) rather than the whole
+        # table rectangle.  That change broke the `_run_extraction_with_retry`
+        # path on real intake PDFs (post-Docling pipeline 500'd consistently
+        # with no clear traceback in stdout) so it was reverted.  The
+        # whole-table bbox is acceptable provenance for the W2 submission;
+        # per-row split needs more time to debug + a regression test before
+        # it's safe to ship.  W3 backlog.
 
         # Docling bbox coords: l (left), t (top), r (right), b (bottom)
         # in the page's coordinate system. Normalize to our BBox shape

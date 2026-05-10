@@ -185,8 +185,12 @@ clock sync is achievable on the deployed stack."""
 _SUPPORTED_DOC_TYPES = frozenset({"lab_pdf", "intake_form"})
 
 # Sentinel range re-exported for the endpoint (mirrors extractors/__init__.py).
-_SENTINEL_MIN = 999_100
-_SENTINEL_MAX = 999_199
+# Expanded 2026-05-09 from [999_100, 999_199] (100 slots, 4 hardcoded
+# personas) to [999_001, 999_999] (999 slots) so the agent can be invoked
+# for any pid in the demo install (real pid p auto-maps to sentinel
+# 999_000+p via PersonaMap::sentinelId on the PHP side).
+_SENTINEL_MIN = 999_001
+_SENTINEL_MAX = 999_999
 
 
 @app.post("/attach_and_extract", response_model=None)
@@ -204,7 +208,7 @@ async def attach_and_extract_endpoint(
     Security controls (mirrors /chat and /score patterns):
     - X-OpenEMR-HMAC header verification (sha256, constant-time compare)
     - Replay-window gate: ±300s on X-OpenEMR-Timestamp
-    - Sentinel patient_id range: 999100–999199 only
+    - Sentinel patient_id range: 999001–999999 only
     - doc_type allowlist: "lab_pdf" | "intake_form"
     - Exception scrubbing via mask_observability_patterns + raise from None
       (Stage-2 fix #1 pattern) — no raw doc text or PHI in error responses

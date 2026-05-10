@@ -43,7 +43,10 @@ _ALL_PATIENT_TOOLS = (
     "get_active_medications",
     "get_recent_labs",
     "get_allergies",
-    "get_recent_encounters",
+    "get_recent_encounters",   # surfaces chief_concern via form_encounter.reason
+    "get_family_history",      # surfaces family_history via history_data
+    # Fallback when intake fields didn't round-trip cleanly.
+    "get_intake_extras",
 )
 
 # Keywords indicating the query needs guideline evidence.

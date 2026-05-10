@@ -454,21 +454,29 @@ class TestOutOfRangePatientIdRaises:
         )
 
     def test_patient_id_above_sentinel_raises(self) -> None:
-        """patient_id=999200 (above sentinel) → ValueError, no pid in message."""
+        """patient_id=1_000_000 (above sentinel) → ValueError, no pid in message.
+
+        Was 999_200 before sentinel range expanded from [999_100, 999_199]
+        to [999_001, 999_999] (so any pid in [1, 999] auto-maps to a
+        sentinel via PersonaMap::sentinelId).  999_200 is now IN range
+        so we use a clearly-out-of-range value (1_000_000) to keep the
+        boundary assertion meaningful.
+        """
         doc = _make_doc()
 
         with pytest.raises(ValueError) as exc_info:
             parse_lab_report(
                 haiku_json_text=_lab_report_haiku_response(),
                 doc=doc,
-                patient_id=999200,
+                patient_id=1_000_000,
                 doc_ref_id=_DOC_REF_ID,
                 extraction_model=_MODEL,
             )
 
         error_msg = str(exc_info.value)
         assert "sentinel range" in error_msg
-        assert "999200" not in error_msg
+        assert "1000000" not in error_msg
+        assert "1_000_000" not in error_msg
 
 
 # ---------------------------------------------------------------------------
