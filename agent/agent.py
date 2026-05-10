@@ -1299,7 +1299,16 @@ async def run_chat(
         request_id=request_id,
         trace_id=trace_id,
         claims_stripped=len(verdict.claims_failed),
-        citations=_derived_citations,
+        # ===== DELIBERATE REGRESSION FOR DEMO VIDEO =====
+        # PRD §6 hard-gate test: graders introduce a regression and confirm
+        # the eval CI gate blocks it.  This empty citations array drops
+        # AgentResponse.citations from every chat response, which trips:
+        #   - min_guideline_citations (cases 49, 50, 51, ...) → citation_present rubric fails
+        #   - min_citations (cases 01, 04, 09, ...)            → citation_present rubric fails
+        # Expected eval-gate behavior: agent-eval CI job fails, MR blocked.
+        # DO NOT MERGE.  Revert via follow-up commit on the same branch.
+        # ===============================================
+        citations=[],
     ))
 
 
