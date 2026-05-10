@@ -35,9 +35,15 @@ from agent.document_schemas import (
 # Sentinel constants
 # ---------------------------------------------------------------------------
 
+# Sentinel range was [999_100, 999_199] until 2026-05-09 when it expanded
+# to [999_001, 999_999] to support all 200 patients in the demo install
+# (real pid p auto-maps to sentinel 999_000 + p via PersonaMap).  Test
+# constants follow the new range — VALID stays at 999_100 since that's
+# still in range, BELOW switched to 12_345 (well below 999_001), ABOVE
+# switched to 1_000_000 (above the 999_999 ceiling).
 _PATIENT_ID_VALID = 999_100
-_PATIENT_ID_BELOW = 999_099
-_PATIENT_ID_ABOVE = 999_200
+_PATIENT_ID_BELOW = 12_345
+_PATIENT_ID_ABOVE = 1_000_000
 _DOC_REF_ID = "DocumentReference/test-lab-999100"
 
 

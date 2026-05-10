@@ -55,8 +55,8 @@ logger = logging.getLogger(__name__)
 
 DocType = Literal["lab_pdf", "intake_form"]
 
-_SENTINEL_MIN = 999_100
-_SENTINEL_MAX = 999_199
+_SENTINEL_MIN = 999_001
+_SENTINEL_MAX = 999_999
 
 # Model names (W2_ARCHITECTURE.md model split)
 _HAIKU_MODEL = "claude-haiku-4-5"

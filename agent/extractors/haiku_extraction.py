@@ -49,8 +49,8 @@ logger = logging.getLogger(__name__)
 # Sentinel range (mirrors document_schemas._SENTINEL_MIN/_MAX)
 # ---------------------------------------------------------------------------
 
-_SENTINEL_MIN = 999_100
-_SENTINEL_MAX = 999_199
+_SENTINEL_MIN = 999_001
+_SENTINEL_MAX = 999_999
 
 # ---------------------------------------------------------------------------
 # Extraction-verifier threshold (W2_ARCHITECTURE.md §2.4)

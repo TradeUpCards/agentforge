@@ -260,7 +260,7 @@ def test_attach_out_of_sentinel_pid_returns_400() -> None:
     (Stage-2 fix #2 pattern).
     """
     client = TestClient(app)
-    bad_pid = 12345  # below sentinel minimum 999100
+    bad_pid = 12345  # below sentinel minimum 999_001
 
     # Compute a valid HMAC for the bad pid so the rejection is from the
     # sentinel check, not the signature check.
