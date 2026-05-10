@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { openemrHome } from '../../utils/openemrLinks'
+import { useMediaQuery } from '../../hooks/useMediaQuery'
 
 const OPENEMR_BASE =
   import.meta.env.VITE_OPENEMR_BASE_URL ?? 'https://localhost:9300'
@@ -39,25 +40,6 @@ const OPENEMR_SITE = import.meta.env.VITE_OPENEMR_SITE ?? 'default'
  */
 interface CoPilotDrawerProps {
   patientId: string
-}
-
-/**
- * Tracks a media query and re-renders on change. SSR-safe (returns
- * false when window is unavailable; matchMedia subscribes on mount).
- */
-function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() => {
-    if (typeof window === 'undefined') return false
-    return window.matchMedia(query).matches
-  })
-  useEffect(() => {
-    const mql = window.matchMedia(query)
-    const onChange = () => setMatches(mql.matches)
-    setMatches(mql.matches)
-    mql.addEventListener('change', onChange)
-    return () => mql.removeEventListener('change', onChange)
-  }, [query])
-  return matches
 }
 
 export function CoPilotDrawer({ patientId }: CoPilotDrawerProps) {
