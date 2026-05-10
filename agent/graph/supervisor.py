@@ -90,6 +90,43 @@ def supervisor_node(state: SupervisorState) -> dict[str, Any]:
 
     hops_taken = state.get("hops_taken", 0)
 
+    # ----- Deterministic short-circuit for graph-routed extraction -----
+    # When the graph is invoked via the /extract_via_graph endpoint, the
+    # initial state carries:
+    #   - a doc_ref_id in tool_calls_accumulated[0] (signals "this run is
+    #     about a specific document"); and
+    #   - extraction_payload starts as None.
+    # Two deterministic decisions follow, no LLM call required:
+    #   (a) extraction_payload is still None → route to intake_extractor.
+    #       The router (next dispatch decision) is fixed by the calling
+    #       context, not by interpreting a query.
+    #   (b) extraction_payload is now populated → terminate with reason
+    #       "extraction_complete".  The /extract_via_graph endpoint reads
+    #       the payload from final_state and builds its HTTP response.
+    #
+    # Skipping the routing LLM on this path is a pure optimization: it
+    # saves ~1 supervisor LLM call (~$0.0002 + 200-800ms) and removes the
+    # only failure mode where the LLM might mis-route an extraction
+    # request.  The chat path (no doc_ctx in initial state) takes the
+    # normal LLM-routed flow below, unchanged.
+    has_doc_ctx = any(
+        isinstance(entry, dict) and "doc_ref_id" in entry
+        for entry in state.get("tool_calls_accumulated", [])
+    )
+    extraction_payload = state.get("extraction_payload")
+    if has_doc_ctx and extraction_payload is None:
+        logger.info("supervisor_node: deterministic short-circuit → intake_extractor")
+        return {
+            "hops_taken": hops_taken + 1,
+            "_pending_route": "intake_extractor",
+        }
+    if has_doc_ctx and extraction_payload is not None:
+        logger.info("supervisor_node: extraction complete — terminating")
+        return {
+            "terminal_reason": "extraction_complete",
+            "_pending_route": None,
+        }
+
     # Hard stop: 4-hop cap (§3.2 — named refusal supervisor_max_hops).
     if hops_taken >= _MAX_HOPS:
         logger.warning("SUPERVISOR_MAX_HOPS_REACHED hops_taken=%d", hops_taken)

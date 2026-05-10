@@ -124,6 +124,13 @@ def _supervisor_router(state: SupervisorState) -> str:
         # Bypass responder — /graph_chat handler returns RefusalResponse directly.
         return END
 
+    if terminal_reason == "extraction_complete":
+        # Graph-routed extraction is done — payload is in state.extraction_payload.
+        # Skip the responder (which would synthesize a chat answer); the
+        # /extract_via_graph endpoint reads the payload from final_state
+        # and builds its HTTP response directly.
+        return END
+
     if terminal_reason in ("answered", "supervisor_max_hops"):
         # Enough evidence accumulated (or hop cap) — run synthesis.
         return _RESPONDER
