@@ -90,6 +90,87 @@ def supervisor_node(state: SupervisorState) -> dict[str, Any]:
 
     hops_taken = state.get("hops_taken", 0)
 
+    # ----- Deterministic short-circuit for graph-routed extraction -----
+    # When the graph is invoked via the /extract_via_graph endpoint, the
+    # initial state carries:
+    #   - a doc_ref_id in tool_calls_accumulated[0] (signals "this run is
+    #     about a specific document"); and
+    #   - extraction_payload starts as None.
+    # Two deterministic decisions follow, no LLM call required:
+    #   (a) extraction_payload is still None → route to intake_extractor.
+    #       The router (next dispatch decision) is fixed by the calling
+    #       context, not by interpreting a query.
+    #   (b) extraction_payload is now populated → terminate with reason
+    #       "extraction_complete".  The /extract_via_graph endpoint reads
+    #       the payload from final_state and builds its HTTP response.
+    #
+    # Skipping the routing LLM on this path is a pure optimization: it
+    # saves ~1 supervisor LLM call (~$0.0002 + 200-800ms) and removes the
+    # only failure mode where the LLM might mis-route an extraction
+    # request.  The chat path (no doc_ctx in initial state) takes the
+    # normal LLM-routed flow below, unchanged.
+    has_doc_ctx = any(
+        isinstance(entry, dict) and "doc_ref_id" in entry
+        for entry in state.get("tool_calls_accumulated", [])
+    )
+    extraction_payload = state.get("extraction_payload")
+    if has_doc_ctx and extraction_payload is None:
+        # Open a Langfuse span so the demo trace shows the deterministic
+        # routing decision (parity with the LLM-routed flow below where
+        # every supervisor visit produces a span).  No tokens / no cost
+        # since there's no LLM call — span metadata reflects that.
+        logger.info("supervisor_node: deterministic short-circuit → intake_extractor")
+        with _langfuse_span(lf, _langfuse_available, hops_taken) as _ctx:
+            # Update directly on the underlying span object — _ctx is
+            # the context-manager wrapper, _ctx._span is the actual
+            # LangfuseSpan returned by start_observation().
+            # `lf.update_current_span(...)` doesn't reach this span
+            # because no nested LLM call has pushed it onto the SDK's
+            # current-span context.
+            if _ctx._span is not None:
+                try:
+                    _ctx._span.update(
+                        metadata={
+                            "route": "intake_extractor",
+                            "hops_taken": hops_taken,
+                            "decision_kind": "deterministic_short_circuit",
+                            "tokens_input": 0,
+                            "tokens_output": 0,
+                            "cost_estimate_usd": 0.0,
+                            "escalated_to_sonnet": False,
+                            "trigger": "doc_ref_id_in_state",
+                        }
+                    )
+                except Exception:
+                    pass
+        return {
+            "hops_taken": hops_taken + 1,
+            "_pending_route": "intake_extractor",
+        }
+    if has_doc_ctx and extraction_payload is not None:
+        # Second supervisor visit — extraction has run, payload is on
+        # state, terminate cleanly (router → END, skipping responder).
+        logger.info("supervisor_node: extraction complete — terminating")
+        with _langfuse_span(lf, _langfuse_available, hops_taken) as _ctx:
+            if _ctx._span is not None:
+                try:
+                    _ctx._span.update(
+                        metadata={
+                            "route": "terminal",
+                            "hops_taken": hops_taken,
+                            "decision_kind": "extraction_complete",
+                            "tokens_input": 0,
+                            "tokens_output": 0,
+                            "cost_estimate_usd": 0.0,
+                        }
+                    )
+                except Exception:
+                    pass
+        return {
+            "terminal_reason": "extraction_complete",
+            "_pending_route": None,
+        }
+
     # Hard stop: 4-hop cap (§3.2 — named refusal supervisor_max_hops).
     if hops_taken >= _MAX_HOPS:
         logger.warning("SUPERVISOR_MAX_HOPS_REACHED hops_taken=%d", hops_taken)

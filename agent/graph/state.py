@@ -85,6 +85,27 @@ class SupervisorState(TypedDict):
         only `table:id` references and the LLM (correctly) reports back
         "no clinical content available." Populated by evidence_retriever
         from the W1 patient tools' RetrievedRecord output.
+
+    extraction_payload : Optional[dict]
+        Set by intake_extractor_node when the graph is invoked for document
+        extraction (the /attach_and_extract HTTP path).  Carries the full
+        result of attach_and_extract_with_metadata_async() so the endpoint
+        can read it from the final state and build its HTTP response:
+            {result: dict (LabReport|IntakeForm model_dump),
+             docling_blocks: list[dict],
+             field_verdicts: list[dict],
+             original_values: dict,
+             n_blocks: int,
+             n_pages: int,
+             extraction_confidence_avg: float}
+        None on chat-only graph runs (intake_extractor not invoked, or
+        invoked without a doc context — the worker silently skips).
+
+        PHI: this field carries the structured extraction result which
+        includes patient values.  Same posture as retrieved_records —
+        held in graph memory only, NOT logged or traced.  The supervisor
+        does NOT pass this field to its routing LLM; only its presence/
+        absence affects routing (a structural signal).
     """
 
     query: str
@@ -97,6 +118,7 @@ class SupervisorState(TypedDict):
     final_response: Optional[AgentResponse | RefusalResponse]
     node_observability: list[dict]
     retrieved_records: list[RetrievedRecord]
+    extraction_payload: Optional[dict]
 
     # Internal routing signal: set by supervisor_node so _supervisor_router
     # can determine which worker to dispatch to without a second LLM call.

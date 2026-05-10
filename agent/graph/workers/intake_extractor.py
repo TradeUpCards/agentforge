@@ -55,6 +55,8 @@ def intake_extractor_node(state: SupervisorState) -> dict[str, Any]:
     t0 = time.monotonic()
     new_citations: list[Citation] = []
     n_citations_added = 0
+    extraction_payload: dict[str, Any] | None = None
+    extraction_error: str | None = None
 
     with _langfuse_span(lf, _langfuse_available) as _span:
         try:
@@ -64,14 +66,33 @@ def intake_extractor_node(state: SupervisorState) -> dict[str, Any]:
                     "intake_extractor_node: no doc context in state — skipping extraction"
                 )
             else:
-                result, docling_blocks = _run_extraction(doc_ctx)
+                payload = _run_extraction_full(doc_ctx)
+                result = payload["result"]
+                docling_blocks = payload["docling_blocks"]
                 new_citations = _build_citations(result, doc_ctx, docling_blocks)
                 n_citations_added = len(new_citations)
+
+                # Surface the FULL payload + computed response metadata so
+                # the /attach_and_extract endpoint can build its HTTP
+                # response from final_state['extraction_payload'] without
+                # re-doing model_dump or the per-doc-type counting logic.
+                # PHI: held in state memory; NOT logged, NOT span-tagged.
+                n_blocks, n_pages, conf_avg = _compute_response_meta(result)
+                extraction_payload = {
+                    "result": result.model_dump(mode="json"),
+                    "docling_blocks": payload.get("docling_blocks") or [],
+                    "field_verdicts": payload.get("field_verdicts") or [],
+                    "original_values": payload.get("original_values") or {},
+                    "n_blocks": n_blocks,
+                    "n_pages": n_pages,
+                    "extraction_confidence_avg": conf_avg,
+                }
         except Exception as exc:
             scrubbed = mask_observability_patterns(str(exc))
+            extraction_error = type(exc).__name__
             logger.error(
                 "intake_extractor_node extraction failed: %s",
-                type(exc).__name__,
+                extraction_error,
             )
             logger.debug("intake_extractor_node scrubbed error: %s", scrubbed)
 
@@ -83,6 +104,7 @@ def intake_extractor_node(state: SupervisorState) -> dict[str, Any]:
                         "worker_name": _WORKER_NAME,
                         "n_citations_added": n_citations_added,
                         "latency_ms": latency_ms,
+                        "extraction_error": extraction_error,
                     }
                 )
             except Exception:
@@ -107,11 +129,48 @@ def intake_extractor_node(state: SupervisorState) -> dict[str, Any]:
         "latency_ms": latency_ms,
     })
 
-    return {
+    state_patch: dict[str, Any] = {
         "citations": existing_citations,
         "tool_calls_accumulated": existing_tool_calls,
         "worker_results": existing_results,
     }
+    # Only set extraction_payload when we actually ran an extraction.
+    # On chat-only flows where doc_ctx is None we leave the field
+    # alone so the supervisor's terminal logic stays correct.
+    if extraction_payload is not None:
+        state_patch["extraction_payload"] = extraction_payload
+
+    return state_patch
+
+
+def _compute_response_meta(result: Any) -> tuple[int, int, float]:
+    """Compute (n_blocks, n_pages, extraction_confidence_avg) for the response.
+
+    Mirrors the per-doc-type logic the /attach_and_extract endpoint used
+    to do inline; lifted here so the endpoint just reads from
+    extraction_payload after graph.ainvoke().
+
+    No PHI: only counts and averaged confidence values.
+    """
+    if isinstance(result, LabReport):
+        n_blocks = len(result.results)
+        n_pages = result.extraction_metadata.page_count
+        confidences = [r.confidence for r in result.results]
+    elif isinstance(result, IntakeForm):
+        n_blocks = (
+            len(result.current_medications)
+            + len(result.allergies)
+            + len(result.family_history)
+        )
+        n_pages = result.extraction_metadata.page_count
+        confidences = []
+    else:
+        n_blocks = len(getattr(result, "blocks", []))
+        n_pages = getattr(result, "page_count", 1)
+        confidences = []
+
+    confidence_avg = sum(confidences) / len(confidences) if confidences else 0.0
+    return n_blocks, n_pages, confidence_avg
 
 
 def _find_doc_context(state: SupervisorState) -> dict[str, Any] | None:
@@ -126,42 +185,55 @@ def _find_doc_context(state: SupervisorState) -> dict[str, Any] | None:
     return None
 
 
-def _run_extraction(
-    doc_ctx: dict[str, Any],
-) -> tuple[LabReport | IntakeForm, list[dict[str, Any]]]:
-    """Call attach_and_extract_with_metadata_async() synchronously.
+def _run_extraction_full(doc_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Call attach_and_extract_with_metadata_async() synchronously and
+    return the FULL payload dict.
 
-    Returns the (extraction_result, docling_blocks) tuple needed by
-    _build_citations() so the citations can carry the source block's page
-    number (page_or_section) and an actual extracted-value string
-    (quote_or_value), per PRD §5 minimum citation shape.
-
-    docling_blocks is the list of {block_id, page (1-based), bbox, text_snippet,
-    block_type} dicts returned by the metadata variant; used for block_id→page
-    lookup in _build_citations.
+    Replaces the older _run_extraction() (which returned only
+    (result, docling_blocks)).  The graph-routed extraction path needs
+    the full payload — result + docling_blocks + field_verdicts +
+    original_values — so the /extract_via_graph endpoint can build its
+    HTTP response from the final-state extraction_payload without
+    re-doing model_dump or running Stage-1 again.
 
     attach_and_extract_with_metadata_async() is preferred over the legacy
-    attach_and_extract_async() here because the legacy variant returns ONLY
-    the validated LabReport/IntakeForm and discards the Docling block
-    inventory; we'd then have to re-run Stage-1 just to get page numbers.
+    attach_and_extract_async() here because the legacy variant returns
+    ONLY the validated LabReport/IntakeForm and discards the Docling
+    block inventory; we'd then have to re-run Stage-1 just to get page
+    numbers and bboxes.
 
-    Thread-pool workaround for event-loop-already-running case (pytest-asyncio).
+    Thread-pool workaround for the event-loop-already-running case
+    (pytest-asyncio + FastAPI request handler both).  When the caller
+    is already inside a running asyncio loop, asyncio.run() refuses;
+    we spawn a worker thread that runs a fresh event loop just for the
+    extraction coroutine.
     """
     patient_id = int(doc_ctx["patient_id"])
     doc_ref_id = str(doc_ctx["doc_ref_id"])
     doc_type = str(doc_ctx.get("doc_type", "lab_pdf"))
     pdf_path_str = doc_ctx.get("pdf_path")
     pdf_path = Path(pdf_path_str) if pdf_path_str else None
+    triggered_by = doc_ctx.get("triggered_by")
+    parent_extraction_id = doc_ctx.get("parent_extraction_id")
 
-    coro = attach_and_extract_with_metadata_async(
-        patient_id=patient_id,
-        doc_ref_id=doc_ref_id,
-        doc_type=doc_type,
-        pdf_path=pdf_path,
-    )
+    # Pass triggered_by + parent_extraction_id through ONLY when set —
+    # the metadata function accepts them as optional kwargs and routes
+    # them through Stage-2 retry-ladder telemetry.
+    extraction_kwargs: dict[str, Any] = {
+        "patient_id": patient_id,
+        "doc_ref_id": doc_ref_id,
+        "doc_type": doc_type,
+        "pdf_path": pdf_path,
+    }
+    if triggered_by is not None:
+        extraction_kwargs["triggered_by"] = triggered_by
+    if parent_extraction_id is not None:
+        extraction_kwargs["parent_extraction_id"] = parent_extraction_id
+
+    coro = attach_and_extract_with_metadata_async(**extraction_kwargs)
 
     # Python 3.12: asyncio.get_event_loop() raises DeprecationWarning when
-    # no running loop. Use get_running_loop() to detect running loop safely.
+    # no running loop. Use get_running_loop() to detect a running loop safely.
     try:
         asyncio.get_running_loop()
         _loop_running = True
@@ -176,13 +248,15 @@ def _run_extraction(
     else:
         payload = asyncio.run(coro)
 
-    # payload is dict[str, Any] from attach_and_extract_with_metadata_async
-    # with keys: result, docling_blocks, field_verdicts, original_values.
-    result = payload.get("result")
-    docling_blocks = payload.get("docling_blocks") or []
-    if not isinstance(docling_blocks, list):
-        docling_blocks = []
-    return result, docling_blocks
+    # Defensive: ensure payload is a dict with the expected keys.
+    if not isinstance(payload, dict):
+        return {
+            "result": None,
+            "docling_blocks": [],
+            "field_verdicts": [],
+            "original_values": {},
+        }
+    return payload
 
 
 def _build_citations(
