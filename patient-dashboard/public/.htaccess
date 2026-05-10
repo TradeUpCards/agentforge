@@ -18,7 +18,13 @@
 # the build output and the source tree separate avoids the source-code-
 # exposure issue you'd otherwise hit by deploying into the source dir.
 
-Options -MultiViews
+# `Options -MultiViews` would be the standard hardening here (turns off
+# Apache content negotiation), but OpenEMR's Apache config grants only
+# `AllowOverride FileInfo`, which doesn't permit the `Options` directive.
+# Setting it via .htaccess returns HTTP 500. Skipping it is fine — our
+# explicit rewrite rules below already handle every legitimate request,
+# and the only ambiguity MultiViews could introduce is a same-name
+# extensionless filename, which we don't ship.
 RewriteEngine On
 RewriteBase /dashboard-app/
 
