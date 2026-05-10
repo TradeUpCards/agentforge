@@ -220,7 +220,10 @@ def test_sentinel_patient_id_enforced() -> None:
 
     with pytest.raises(ValueError, match="sentinel range"):
         attach_and_extract(
-            patient_id=999200,  # outside W2 block — should be rejected
+            # 1_000_000 is one above the new sentinel ceiling 999_999.  Was
+            # 999_200 in the legacy [999_100, 999_199] regime, but that's now
+            # IN range after the 2026-05-09 expansion to [999_001, 999_999].
+            patient_id=1_000_000,
             doc_ref_id=_DOC_REF_ID,
             doc_type=_DOC_TYPE,
             pdf_path=_FIXTURE_PDF,
