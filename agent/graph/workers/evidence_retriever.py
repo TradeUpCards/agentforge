@@ -43,9 +43,9 @@ _ALL_PATIENT_TOOLS = (
     "get_active_medications",
     "get_recent_labs",
     "get_allergies",
-    "get_recent_encounters",
-    # PRD §2 intake-form fields not round-tripped to OpenEMR native tables
-    # (chief_concern, family_history) — sourced from co_pilot_extractions.
+    "get_recent_encounters",   # surfaces chief_concern via form_encounter.reason
+    "get_family_history",      # surfaces family_history via history_data
+    # Fallback when intake fields didn't round-trip cleanly.
     "get_intake_extras",
 )
 

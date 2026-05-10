@@ -151,12 +151,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "get_intake_extras",
         "description": (
-            "Return PRD-required intake-form fields that aren't round-tripped "
-            "to native OpenEMR clinical tables: chief concern and family "
-            "history.  Sourced from the most recent active intake-form "
-            "extraction for the patient (co_pilot_extractions table).  Cite "
-            "as 'co_pilot_extractions:<id>'.  Returns an empty list if the "
-            "patient has no active intake-form extraction on file."
+            "Fallback: return intake-form fields not yet round-tripped to "
+            "native OpenEMR tables.  Most intake fields are now in native "
+            "tables (chief_concern → form_encounter.reason via "
+            "get_recent_encounters; family_history → history_data via "
+            "get_family_history).  This tool stays as a safety net for "
+            "extractions whose round-trip didn't land — typically returns "
+            "an empty list.  Cite as 'co_pilot_extractions:<id>'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"patient_id": {"type": "integer"}},
+            "required": ["patient_id"],
+        },
+    },
+    {
+        "name": "get_family_history",
+        "description": (
+            "Return the patient's family medical history as a single record "
+            "with relation-keyed fields (mother / father / siblings / "
+            "offspring / spouse / additional).  Each field is a free-text "
+            "string of conditions separated by '; '.  Sourced from "
+            "OpenEMR's history_data table; populated by the intake-form "
+            "round-trip.  Cite as 'history_data:<id>'.  Returns an empty "
+            "list if the patient has no history_data row."
         ),
         "input_schema": {
             "type": "object",
@@ -279,6 +297,7 @@ def _json_fixture_dispatch(patient_id: int, tool_name: str) -> list[RetrievedRec
         "get_allergies": "allergies",
         "get_recent_encounters": "recent_encounters",
         "get_intake_extras": "intake_extras",
+        "get_family_history": "family_history",
     }
     key = tool_to_key.get(tool_name)
     if key is None:
@@ -330,6 +349,11 @@ def _fixture_dispatch(tool_name: str, tool_input: dict[str, Any]) -> list[Retrie
         # the tool_to_key map above; the live-DB path returns real records
         # from co_pilot_extractions.  Empty list is the correct "no records
         # found" response per ARCHITECTURE.md §2.6.
+        return []
+    if tool_name == "get_family_history":
+        # Same as get_intake_extras — fixture mode has no canned history_data.
+        # JSON-fixture path supplies via the tool_to_key map.  Live-DB path
+        # queries the history_data table.
         return []
     raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -625,6 +649,7 @@ async def _real_dispatch(tool_name: str, tool_input: dict[str, Any]) -> list[Ret
         "get_allergies": _real_get_allergies,
         "get_recent_encounters": _real_get_recent_encounters,
         "get_intake_extras": _real_get_intake_extras,
+        "get_family_history": _real_get_family_history,
     }
     handler = handlers.get(tool_name)
     if handler is None:
@@ -956,4 +981,65 @@ def _real_get_intake_extras(patient_id: int) -> list[RetrievedRecord]:
                 "doc_ref_id": str(row.get("doc_ref_id") or ""),
             },
         ))
+    return out
+
+
+def _real_get_family_history(patient_id: int) -> list[RetrievedRecord]:
+    """Patient's family medical history from OpenEMR's history_data table.
+
+    history_data is per-patient (0 or 1 row), with wide-form columns
+    keyed by relation (history_father, history_mother, history_siblings,
+    history_offspring, history_spouse) plus an `additional_history`
+    catch-all.  Each column is free-text; the intake-form round-trip
+    populates them with semicolon-separated condition strings.
+
+    Returns one RetrievedRecord with `table='history_data'` and
+    `record_id=<history_data.id>`.  fields carry the relation-keyed
+    strings (only non-empty ones).  Empty list when the patient has no
+    history_data row, which is correct "no records found" per
+    ARCHITECTURE.md §2.6.
+    """
+    sql = """
+        SELECT id,
+               history_father, history_mother, history_siblings,
+               history_offspring, history_spouse, additional_history
+          FROM history_data
+         WHERE pid = %s
+         ORDER BY id ASC
+         LIMIT 1
+    """
+    out: list[RetrievedRecord] = []
+    with _db_cursor() as cur:
+        cur.execute(sql, (patient_id,))
+        rows = cur.fetchall()
+
+    if not rows:
+        return out
+    row = rows[0]
+
+    # Surface only non-empty fields so the responder LLM doesn't see
+    # noise.  Each value is a free-text string of conditions joined by
+    # '; ' (per RoundtripService.roundtripFamilyHistory).
+    fields: dict[str, Any] = {}
+    for key, label in [
+        ("history_father",     "father"),
+        ("history_mother",     "mother"),
+        ("history_siblings",   "siblings"),
+        ("history_offspring",  "offspring"),
+        ("history_spouse",     "spouse"),
+        ("additional_history", "additional"),
+    ]:
+        val = row.get(key)
+        if isinstance(val, str) and val.strip():
+            fields[label] = val.strip()
+
+    if not fields:
+        return out  # Empty row — same as no row
+
+    out.append(RetrievedRecord(
+        table="history_data",
+        record_id=str(row["id"]),
+        citation_strength=CitationStrength.STRUCTURED,
+        fields=fields,
+    ))
     return out
