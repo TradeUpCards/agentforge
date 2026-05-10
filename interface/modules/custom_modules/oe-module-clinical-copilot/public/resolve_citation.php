@@ -301,10 +301,13 @@ if ($sourceType === 'patient_record') {
     $bboxFromField = decodeBboxJson(isset($fieldRow['bbox_json']) ? (string) $fieldRow['bbox_json'] : null);
 
     // Look up the extraction to get doc_ref_id + docling_blocks_json.
+    // JOIN documents to surface the source file's mimetype so the sidecar
+    // can branch its renderer (image/* → <img>, application/pdf → PDF.js).
     $extractionRows = QueryUtils::fetchRecords(
-        'SELECT `doc_ref_id`, `docling_blocks_json`
-           FROM `co_pilot_extractions`
-          WHERE `id` = ?
+        'SELECT cpe.`doc_ref_id`, cpe.`docling_blocks_json`, d.`mimetype`
+           FROM `co_pilot_extractions` cpe
+           LEFT JOIN `documents` d ON d.`id` = cpe.`doc_ref_id`
+          WHERE cpe.`id` = ?
           LIMIT 1',
         [$extractionId],
     );
@@ -315,6 +318,9 @@ if ($sourceType === 'patient_record') {
     }
     $docRefId        = (string) $extractionRows[0]['doc_ref_id'];
     $blocksJsonRaw   = $extractionRows[0]['docling_blocks_json'] ?? null;
+    $mimetype        = isset($extractionRows[0]['mimetype'])
+        ? (string) $extractionRows[0]['mimetype']
+        : 'application/pdf';
 
     // Find the block by source_block_id (may be empty if field had no cited block).
     $blocks = is_string($blocksJsonRaw) && $blocksJsonRaw !== ''
@@ -364,6 +370,12 @@ if ($sourceType === 'patient_record') {
         'block_id'    => $sourceBlockId !== '' ? $sourceBlockId : null,
         'bbox'        => $bbox,
         'snippet'     => $snippet,
+        // Surface the source-document mimetype so the citation sidecar can
+        // pick its renderer: image/* → <img> + SVG bbox overlay; PDF →
+        // PDF.js path.  Without this, image documents (handwritten intake
+        // PNGs etc.) fail with InvalidPDFException when PDF.js tries to
+        // parse them.
+        'mimetype'    => $mimetype,
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -388,11 +400,12 @@ if ($sourceType === 'extracted_document') {
     $docRefId = $sourceId;
 
     $extractionRows = QueryUtils::fetchRecords(
-        'SELECT `id`, `docling_blocks_json`
-           FROM `co_pilot_extractions`
-          WHERE `doc_ref_id` = ?
-            AND `is_active` = 1
-          ORDER BY `id` DESC
+        'SELECT cpe.`id`, cpe.`docling_blocks_json`, d.`mimetype`
+           FROM `co_pilot_extractions` cpe
+           LEFT JOIN `documents` d ON d.`id` = cpe.`doc_ref_id`
+          WHERE cpe.`doc_ref_id` = ?
+            AND cpe.`is_active` = 1
+          ORDER BY cpe.`id` DESC
           LIMIT 1',
         [$docRefId],
     );
@@ -402,6 +415,9 @@ if ($sourceType === 'extracted_document') {
         exit;
     }
     $blocksJsonRaw = $extractionRows[0]['docling_blocks_json'] ?? null;
+    $mimetype      = isset($extractionRows[0]['mimetype'])
+        ? (string) $extractionRows[0]['mimetype']
+        : 'application/pdf';
     $blocks = is_string($blocksJsonRaw) && $blocksJsonRaw !== ''
         ? json_decode($blocksJsonRaw, true)
         : [];
@@ -446,6 +462,7 @@ if ($sourceType === 'extracted_document') {
         'block_id'    => $fieldOrChunkId,
         'bbox'        => $bbox,
         'snippet'     => $snippet,
+        'mimetype'    => $mimetype,
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }

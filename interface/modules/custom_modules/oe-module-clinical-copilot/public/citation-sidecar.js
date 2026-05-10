@@ -323,6 +323,20 @@
             setLoading('Cannot load document — missing patient or document id.', true);
             return;
         }
+
+        // Branch by source-document mimetype.  Image documents (PNG/JPG
+        // intake forms photographed or scanned to image) cannot be loaded
+        // by PDF.js — it throws InvalidPDFException — so we route them to
+        // a dedicated <img>-based renderer that still gets the same SVG
+        // bbox overlay treatment.  Mimetype is supplied by the resolver
+        // (joined from documents.mimetype); when absent we default to
+        // application/pdf for backward compatibility.
+        var mimetype = String(citation.mimetype || 'application/pdf').toLowerCase();
+        if (mimetype.indexOf('image/') === 0) {
+            renderImageWithBbox(pdfUrl, citation);
+            return;
+        }
+
         if (!configurePdfJs()) {
             setLoading('PDF.js not loaded — cannot render document preview.', true);
             return;
@@ -353,6 +367,78 @@
                 true,
             );
         });
+    }
+
+    /**
+     * Render an image document (PNG / JPG intake form) with bbox overlay.
+     *
+     * Mirrors renderPageWithBbox's structure: width-fit to body pane,
+     * <img> for the page content + transparent SVG above for the bbox.
+     * The bbox math is the same as the PDF path (drawBboxOverlay):
+     * Docling stores bbox coords with bottom-left origin so the Y axis
+     * flips when projecting onto a top-left canvas/img.  If a future
+     * image OCR backend stores top-left origin instead we'll need a
+     * coord_origin flag through the resolver — not currently surfaced.
+     */
+    function renderImageWithBbox(imgUrl, citation) {
+        if (sidecarLoadingEl) sidecarLoadingEl.style.display = 'none';
+
+        var paneWidth = sidecarBodyEl.clientWidth || 600;
+        var desiredWidth = Math.max(paneWidth - 24, 240);
+
+        var wrap = hostDoc.createElement('div');
+        wrap.className = 'oe-citation-sidecar__page-wrap';
+        wrap.style.position = 'relative';
+        wrap.style.margin = '0 auto';
+
+        var img = hostDoc.createElement('img');
+        img.className = 'oe-citation-sidecar__canvas';
+        img.alt = 'Source document';
+        img.style.display = 'block';
+
+        var svgNS = 'http://www.w3.org/2000/svg';
+        var svg = hostDoc.createElementNS(svgNS, 'svg');
+        svg.setAttribute('xmlns', svgNS);
+        svg.style.position = 'absolute';
+        svg.style.top = '0';
+        svg.style.left = '0';
+        svg.style.pointerEvents = 'none';
+
+        wrap.appendChild(img);
+        wrap.appendChild(svg);
+        sidecarBodyEl.appendChild(wrap);
+
+        img.onload = function () {
+            // Use the image's natural dimensions for the bbox math; scale
+            // the displayed size by desiredWidth / naturalWidth so the
+            // SVG overlay registers exactly with the rendered <img>.
+            var naturalW = img.naturalWidth || desiredWidth;
+            var naturalH = img.naturalHeight || desiredWidth;
+            var scale = desiredWidth / naturalW;
+            var displayW = Math.round(naturalW * scale);
+            var displayH = Math.round(naturalH * scale);
+
+            wrap.style.width = displayW + 'px';
+            wrap.style.height = displayH + 'px';
+            img.style.width = displayW + 'px';
+            img.style.height = displayH + 'px';
+            svg.setAttribute('width', String(displayW));
+            svg.setAttribute('height', String(displayH));
+            svg.setAttribute('viewBox', '0 0 ' + displayW + ' ' + displayH);
+
+            drawBboxOverlay(svg, { width: naturalW, height: naturalH }, scale, citation);
+
+            try { wrap.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+            catch (e) { /* ignore */ }
+        };
+
+        img.onerror = function () {
+            setLoading('Could not load source image (network or auth error).', true);
+        };
+
+        // Trigger the load.  Same-origin credential cookies flow on the
+        // OpenEMR document URL by default.
+        img.src = imgUrl;
     }
 
     function renderPageWithBbox(page, citation) {

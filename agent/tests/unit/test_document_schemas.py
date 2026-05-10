@@ -39,11 +39,12 @@ from agent.document_schemas import (
 # to [999_001, 999_999] to support all 200 patients in the demo install
 # (real pid p auto-maps to sentinel 999_000 + p via PersonaMap).  Test
 # constants follow the new range — VALID stays at 999_100 since that's
-# still in range, BELOW switched to 12_345 (well below 999_001), ABOVE
-# switched to 1_000_000 (above the 999_999 ceiling).
+# still in range; BELOW + ABOVE are tight-boundary values (one below the
+# new lower bound, one above the new upper bound) so an off-by-one in
+# the schema validator is caught immediately.
 _PATIENT_ID_VALID = 999_100
-_PATIENT_ID_BELOW = 12_345
-_PATIENT_ID_ABOVE = 1_000_000
+_PATIENT_ID_BELOW = 999_000      # one below new lower bound 999_001 → rejected
+_PATIENT_ID_ABOVE = 1_000_000    # one above new upper bound 999_999 → rejected
 _DOC_REF_ID = "DocumentReference/test-lab-999100"
 
 
