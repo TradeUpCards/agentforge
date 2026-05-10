@@ -70,6 +70,16 @@ final class ScriptFilterSubscriber implements EventSubscriberInterface
             . self::MODULE_PUBLIC_PATH . '/hitl-banner.js'
             . $this->mtimeQuery('/hitl-banner.js');
 
+        // Upload-progress UX for auto-extract document uploads. Disables the
+        // submit button + shows a spinner with phase-progress text during the
+        // 30-90s synchronous agent extraction. Self-gates on URL pattern
+        // (controller.php?document&upload&parent_id ∈ {9000, 9001}); on every
+        // other page it loads but does nothing — same low-cost pattern as
+        // hitl-banner.js. Phase timings calibrated from real Langfuse traces.
+        $scripts[] = OEGlobalsBag::getInstance()->getWebRoot()
+            . self::MODULE_PUBLIC_PATH . '/upload-progress.js'
+            . $this->mtimeQuery('/upload-progress.js');
+
         $event->setScripts($scripts);
     }
 
