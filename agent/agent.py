@@ -1293,22 +1293,24 @@ async def run_chat(
                 ))
     return _close_audit(audit, started_at, AgentResponse(
         message=Message(role=Role.ASSISTANT, content=prose),
-        claims=verdict.claims_passed,
+        # ===== DELIBERATE REGRESSION FOR DEMO VIDEO =====
+        # PRD §6 hard-gate test.  First attempt (`citations=[]`) didn't fire
+        # because that field is only checked by `min_guideline_citations`,
+        # which only runs in live-LLM cases (skipped in fixture-mode CI).
+        # This stronger version strips source_record_ids from every claim
+        # so `min_citations` (which counts source IDs across claims) fails
+        # in fixture-mode cases too.  Trips the citation_present rubric on
+        # cases 01, 04, 09, 13, ... — every case that asserts min_citations
+        # ≥ N regresses to 0.  Pass rate drops well past the 5% threshold.
+        # DO NOT MERGE.  Revert via follow-up commit.
+        # ===============================================
+        claims=[c.model_copy(update={"source_record_ids": []}) for c in verdict.claims_passed],
         retrieved_records=retrieved_records,
         tools_called=tool_summaries,
         request_id=request_id,
         trace_id=trace_id,
         claims_stripped=len(verdict.claims_failed),
-        # ===== DELIBERATE REGRESSION FOR DEMO VIDEO =====
-        # PRD §6 hard-gate test: graders introduce a regression and confirm
-        # the eval CI gate blocks it.  This empty citations array drops
-        # AgentResponse.citations from every chat response, which trips:
-        #   - min_guideline_citations (cases 49, 50, 51, ...) → citation_present rubric fails
-        #   - min_citations (cases 01, 04, 09, ...)            → citation_present rubric fails
-        # Expected eval-gate behavior: agent-eval CI job fails, MR blocked.
-        # DO NOT MERGE.  Revert via follow-up commit on the same branch.
-        # ===============================================
-        citations=[],
+        citations=_derived_citations,
     ))
 
 
