@@ -255,7 +255,22 @@ if ($sourceType === 'patient_record') {
 
     // Closed allowlist of clinical tables we recognise — must match
     // RoundtripService's writers (see W2_ARCHITECTURE.md §2.7).
-    $allowedTables = ['procedure_result', 'lists', 'prescriptions'];
+    //
+    // Added 2026-05-09 along with PRD §2 round-trip expansion:
+    //   - form_encounter: roundtripChiefConcern writes chief_concern to
+    //     form_encounter.reason for the visit.
+    //   - history_data: roundtripFamilyHistory writes family_history items
+    //     to the patient's history_data row's wide-form columns.
+    // Both go through the same co_pilot_extracted_fields → docling_blocks
+    // chain as the original three tables, so no traversal-logic changes
+    // are required — only the allowlist needs to be extended.
+    $allowedTables = [
+        'procedure_result',
+        'lists',
+        'prescriptions',
+        'form_encounter',
+        'history_data',
+    ];
     if (!in_array($clinicalTable, $allowedTables, true)) {
         http_response_code(400);
         echo json_encode(['error' => 'unrecognised_clinical_table']);

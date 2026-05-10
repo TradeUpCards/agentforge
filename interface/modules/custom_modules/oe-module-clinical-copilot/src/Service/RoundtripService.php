@@ -162,6 +162,7 @@ class RoundtripService
                     isset($sourceCitations['chief_concern']) ? (string) $sourceCitations['chief_concern'] : null,
                     $verifiedFieldMap,
                     $fieldsWriter,
+                    $docRefId,
                 );
                 $this->roundtripFamilyHistory(
                     $extractionId,
@@ -695,7 +696,7 @@ class RoundtripService
                     $this->updateFieldPointer(
                         $fieldsWriter,
                         $verifiedFieldMap,
-                        (string) $idx,
+                        'results[' . (string) $idx . ']',
                         'procedure_result',
                         $existingResultId,
                     );
@@ -753,7 +754,7 @@ class RoundtripService
             $this->updateFieldPointer(
                 $fieldsWriter,
                 $verifiedFieldMap,
-                (string) $idx,
+                'results[' . (string) $idx . ']',
                 'procedure_result',
                 $resultId,
             );
@@ -890,7 +891,7 @@ class RoundtripService
                 $this->updateFieldPointer(
                     $fieldsWriter,
                     $verifiedFieldMap,
-                    (string) $idx,
+                    'allergies[' . (string) $idx . ']',
                     'lists',
                     $existingPatientListId,
                 );
@@ -922,7 +923,7 @@ class RoundtripService
                     $this->updateFieldPointer(
                         $fieldsWriter,
                         $verifiedFieldMap,
-                        (string) $idx,
+                        'allergies[' . (string) $idx . ']',
                         'lists',
                         $existingListId,
                     );
@@ -979,7 +980,7 @@ class RoundtripService
             $this->updateFieldPointer(
                 $fieldsWriter,
                 $verifiedFieldMap,
-                (string) $idx,
+                'allergies[' . (string) $idx . ']',
                 'lists',
                 $listId,
             );
@@ -1052,7 +1053,7 @@ class RoundtripService
                 $this->updateFieldPointer(
                     $fieldsWriter,
                     $verifiedFieldMap,
-                    (string) $idx,
+                    'current_medications[' . (string) $idx . ']',
                     'prescriptions',
                     $existingPatientPrescriptionId,
                 );
@@ -1083,7 +1084,7 @@ class RoundtripService
                     $this->updateFieldPointer(
                         $fieldsWriter,
                         $verifiedFieldMap,
-                        (string) $idx,
+                        'current_medications[' . (string) $idx . ']',
                         'prescriptions',
                         $existingPrescriptionId,
                     );
@@ -1138,7 +1139,7 @@ class RoundtripService
             $this->updateFieldPointer(
                 $fieldsWriter,
                 $verifiedFieldMap,
-                (string) $idx,
+                'current_medications[' . (string) $idx . ']',
                 'prescriptions',
                 $prescriptionId,
             );
@@ -1252,20 +1253,28 @@ class RoundtripService
         ?string $sourceBlockId,
         array $verifiedFieldMap,
         ?ExtractedFieldsWriter $fieldsWriter,
+        string $docRefId = '',
     ): void {
         $chiefConcern = trim($chiefConcern);
         if ($chiefConcern === '') {
             return;
         }
 
-        // Re-extraction of the same doc: did we already write an
-        // encounter for this extraction's chief_concern?  If yes, UPDATE
-        // it in place rather than creating another encounter row.
-        $existingEncounterId = $this->findTrackedClinicalRow(
-            $extractionId,
-            'form_encounter',
-            'chief_concern',
-        );
+        // Re-extraction of the same doc: did ANY prior extraction for
+        // this same doc_ref_id write a form_encounter row for chief_concern?
+        // If yes, UPDATE it in place rather than creating another encounter
+        // row.  Cross-extraction lookup is required because each re-upload
+        // creates a new co_pilot_extractions row with a fresh extraction_id;
+        // a per-extraction-id lookup would always miss on re-upload.
+        $existingEncounterId = $this->findChiefConcernEncounterByDocRef($docRefId);
+        if ($existingEncounterId === null) {
+            // Fallback: same extraction (e.g. retry within one upload).
+            $existingEncounterId = $this->findTrackedClinicalRow(
+                $extractionId,
+                'form_encounter',
+                'chief_concern',
+            );
+        }
         if ($existingEncounterId !== null) {
             QueryUtils::sqlStatementThrowException(
                 "UPDATE form_encounter SET reason = ? WHERE id = ?",
@@ -1404,6 +1413,22 @@ class RoundtripService
             );
         }
 
+        // Back-fill the clinical pointer for each individual family_history[N]
+        // field row.  Items in the extraction have field paths like
+        // "family_history[0].condition", "family_history[1].relation", etc.;
+        // they all merge into the same history_data row, so they all share the
+        // same clinical_row_id.  Also back-fill the scalar "family_history"
+        // path in case the agent emitted a top-level entry (defensive).
+        $itemCount = count($familyHistory);
+        for ($i = 0; $i < $itemCount; $i++) {
+            $this->updateFieldPointer(
+                $fieldsWriter,
+                $verifiedFieldMap,
+                'family_history[' . (string) $i . ']',
+                'history_data',
+                $historyId,
+            );
+        }
         $this->updateFieldPointer(
             $fieldsWriter,
             $verifiedFieldMap,
@@ -1440,6 +1465,39 @@ class RoundtripService
         if (in_array($r, $childSet, true))   return 'history_offspring';
         if (in_array($r, $spouseSet, true))  return 'history_spouse';
         return null;
+    }
+
+    /**
+     * Cross-extraction lookup: find the form_encounter row that ANY prior
+     * extraction for this `doc_ref_id` already wrote a chief_concern into.
+     *
+     * Walks `co_pilot_extracted_fields` JOINed to `co_pilot_extractions` so
+     * the lookup spans every attempt for this doc, not just the current one.
+     * Required because re-upload of the same intake form produces a new
+     * `co_pilot_extractions` row with a fresh `extraction_id` (the prior is
+     * marked inactive, not reused), so a per-extraction-id lookup would
+     * always miss on re-upload and INSERT a duplicate `form_encounter`.
+     *
+     * Returns null on empty doc_ref_id (caller falls back to per-extraction).
+     */
+    private function findChiefConcernEncounterByDocRef(string $docRefId): ?int
+    {
+        if ($docRefId === '') {
+            return null;
+        }
+        $rows = QueryUtils::fetchRecords(
+            "SELECT cef.clinical_row_id
+               FROM co_pilot_extracted_fields cef
+               JOIN co_pilot_extractions cpe ON cpe.id = cef.extraction_id
+              WHERE cpe.doc_ref_id = ?
+                AND cef.clinical_table = 'form_encounter'
+                AND cef.field_path = 'chief_concern'
+                AND cef.clinical_row_id IS NOT NULL
+              ORDER BY cef.id DESC
+              LIMIT 1",
+            [$docRefId],
+        );
+        return $rows === [] ? null : (int) $rows[0]['clinical_row_id'];
     }
 
     /**
@@ -1598,7 +1656,7 @@ class RoundtripService
     private function updateFieldPointer(
         ?ExtractedFieldsWriter $fieldsWriter,
         array $verifiedFieldMap,
-        string $rowIndex,
+        string $fieldPathPrefix,
         string $clinicalTable,
         int $clinicalRowId,
     ): void {
@@ -1606,11 +1664,34 @@ class RoundtripService
             return;
         }
 
-        // Match any field_path that begins with "results[{rowIndex}]",
-        // "allergies[{rowIndex}]", or "current_medications[{rowIndex}]".
+        // $fieldPathPrefix is the COLLECTION-SCOPED prefix (or scalar name) of
+        // the field paths to back-fill.  Two valid shapes:
+        //
+        //   1. Indexed-collection prefix — "results[0]", "allergies[2]",
+        //      "current_medications[3]", "family_history[1]".  Match field
+        //      paths that start with this prefix (so "results[0].test_name",
+        //      "results[0].value", "results[0].unit" all share one back-fill).
+        //
+        //   2. Scalar top-level field — "chief_concern", "family_history".
+        //      Match field path by exact equality.
+        //
+        // History note: an earlier version took just a numeric $rowIndex like
+        // "0" and matched any field path containing "[0]", which collided
+        // across collections — back-fills from roundtripMedications would
+        // overwrite ones from roundtripAllergies for the same index because
+        // their field paths share the bracketed-index portion.  The
+        // collection-scoped prefix prevents that collision.
+        $isCollectionPrefix = preg_match('/\[\d+\]$/', $fieldPathPrefix) === 1;
+
         foreach ($verifiedFieldMap as $fieldPath => $efRowId) {
-            // Accept any path whose bracketed index matches $rowIndex.
-            if (preg_match('/\[' . preg_quote($rowIndex, '/') . '\]/', $fieldPath) === 1) {
+            $matched = $isCollectionPrefix
+                // Collection: match anything starting with the prefix +
+                // either a "." separator or end-of-string.
+                ? (str_starts_with($fieldPath, $fieldPathPrefix . '.')
+                    || $fieldPath === $fieldPathPrefix)
+                // Scalar: exact-equality on the literal name.
+                : $fieldPath === $fieldPathPrefix;
+            if ($matched) {
                 $fieldsWriter->updateClinicalPointer($efRowId, $clinicalTable, $clinicalRowId);
             }
         }
