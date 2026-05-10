@@ -42,8 +42,16 @@ final class PageHeadingSubscriber implements EventSubscriberInterface
     /**
      * Default URL prefix for the Modern Dashboard out-link, assuming the
      * co-located deployment shape documented in PATIENT_DASHBOARD_MIGRATION.md
-     * §13: the React bundle lives at `/patient-dashboard/` under OpenEMR's
+     * §13: the React bundle lives at `/dashboard-app/` under OpenEMR's
      * docroot, and the React Router patient route is `/dashboard/{uuid}`.
+     *
+     * The bundle path `/dashboard-app/` is intentionally distinct from the
+     * `/patient-dashboard/` *source* directory at the same docroot. Apache
+     * serves whatever is under the docroot, so deploying built bundles into
+     * `/patient-dashboard/` would either nuke the committed source tree
+     * (with --delete) or leave the source code publicly readable
+     * (without --delete). Using a sibling deploy path keeps both concerns
+     * separate.
      *
      * For local dev environments where the dashboard runs on the Vite dev
      * server (default `http://localhost:5173`) the prefix can be overridden
@@ -52,7 +60,7 @@ final class PageHeadingSubscriber implements EventSubscriberInterface
      * setting is exposed because the override is a deploy-shape detail,
      * not a per-installation runtime knob.
      */
-    private const DEFAULT_DASHBOARD_BASE_URL = '/patient-dashboard/dashboard/';
+    private const DEFAULT_DASHBOARD_BASE_URL = '/dashboard-app/dashboard/';
 
     public static function getSubscribedEvents(): array
     {

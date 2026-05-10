@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the patient-dashboard SPA with production env + rsync the
 # resulting `dist/` to the DigitalOcean droplet's OpenEMR docroot under
-# `/patient-dashboard/`.
+# `/dashboard-app/`.
 #
 # Usage:
 #   bash patient-dashboard/scripts/deploy-to-droplet.sh
@@ -17,18 +17,18 @@
 #   VITE_OPENEMR_SITE=default
 #   VITE_CLIENT_ID=<from prod OAuth registration>
 #   VITE_CLIENT_SECRET=<from prod OAuth registration>
-#   VITE_REDIRECT_URI=https://<droplet-host>/patient-dashboard/callback
-#   VITE_POST_LOGOUT_REDIRECT_URI=https://<droplet-host>/patient-dashboard/
-#   VITE_BASE_PATH=/patient-dashboard/
+#   VITE_REDIRECT_URI=https://<droplet-host>/dashboard-app/callback
+#   VITE_POST_LOGOUT_REDIRECT_URI=https://<droplet-host>/dashboard-app/
+#   VITE_BASE_PATH=/dashboard-app/
 #
 # What this script does, in order:
 #   1. Source `.env.deploy` (the SSH target + docroot path)
 #   2. Build the SPA (`pnpm build`) — Vite picks up `.env.production`
 #      automatically, so the prod env values get baked into the bundle
 #   3. Verify `dist/index.html` and `dist/.htaccess` are present
-#   4. rsync `dist/` to `<droplet>:<docroot>/patient-dashboard/` (the
+#   4. rsync `dist/` to `<droplet>:<docroot>/dashboard-app/` (the
 #      `--delete` flag removes stale files from previous deploys)
-#   5. Smoke-test the deployed page by curling `/patient-dashboard/`
+#   5. Smoke-test the deployed page by curling `/dashboard-app/`
 #
 # Safety:
 #   - Will refuse to run if `.env.deploy` or `.env.production` is missing
@@ -66,7 +66,7 @@ fi
 
 # ---- 2. Build ----------------------------------------------------------------
 
-echo "[1/4] Building patient-dashboard with .env.production…"
+echo "[1/4] Building dashboard with .env.production…"
 cd "${DASHBOARD_DIR}"
 pnpm build
 
@@ -82,11 +82,33 @@ fi
 
 # ---- 3. Deploy ---------------------------------------------------------------
 
-REMOTE_PATH="${DROPLET_DOCROOT%/}/patient-dashboard/"
-echo "[2/4] rsync dist/ → ${DROPLET_SSH_TARGET}:${REMOTE_PATH}"
-rsync -avz --delete \
-  "${DASHBOARD_DIR}/dist/" \
-  "${DROPLET_SSH_TARGET}:${REMOTE_PATH}"
+REMOTE_PATH="${DROPLET_DOCROOT%/}/dashboard-app/"
+echo "[2/4] Deploying dist/ → ${DROPLET_SSH_TARGET}:${REMOTE_PATH}"
+
+# Prefer rsync when available (delta transfer + --delete in one shot).
+# Fall back to tar-over-ssh when rsync is missing — typical on Git Bash
+# for Windows. The fallback creates a remote temp dir, untars into it,
+# atomically swaps it in, and removes the previous version. That mimics
+# rsync --delete semantics without needing rsync.
+if command -v rsync >/dev/null 2>&1; then
+  rsync -avz --delete \
+    "${DASHBOARD_DIR}/dist/" \
+    "${DROPLET_SSH_TARGET}:${REMOTE_PATH}"
+else
+  echo "        (rsync not found — using tar+ssh portable fallback)"
+  TIMESTAMP="$(date +%s)"
+  REMOTE_TMP="${REMOTE_PATH%/}.${TIMESTAMP}.new"
+  REMOTE_OLD="${REMOTE_PATH%/}.${TIMESTAMP}.old"
+
+  ssh "${DROPLET_SSH_TARGET}" "mkdir -p '${REMOTE_TMP}'"
+  tar -C "${DASHBOARD_DIR}/dist" -czf - . | \
+    ssh "${DROPLET_SSH_TARGET}" "tar -C '${REMOTE_TMP}' -xzf -"
+  ssh "${DROPLET_SSH_TARGET}" "
+    if [ -d '${REMOTE_PATH%/}' ]; then mv '${REMOTE_PATH%/}' '${REMOTE_OLD}'; fi
+    mv '${REMOTE_TMP}' '${REMOTE_PATH%/}'
+    rm -rf '${REMOTE_OLD}'
+  "
+fi
 
 # ---- 4. Smoke test -----------------------------------------------------------
 
@@ -94,8 +116,8 @@ rsync -avz --delete \
 # "user@host" — strip the "user@" prefix.
 DROPLET_HOST="${DROPLET_SSH_TARGET#*@}"
 
-echo "[3/4] Smoke-testing https://${DROPLET_HOST}/patient-dashboard/"
-HTTP_CODE="$(curl -sk -o /dev/null -w '%{http_code}' "https://${DROPLET_HOST}/patient-dashboard/" || echo "000")"
+echo "[3/4] Smoke-testing https://${DROPLET_HOST}/dashboard-app/"
+HTTP_CODE="$(curl -sk -o /dev/null -w '%{http_code}' "https://${DROPLET_HOST}/dashboard-app/" || echo "000")"
 if [ "${HTTP_CODE}" = "200" ]; then
   echo "        ✅ HTTP 200 — bundle is reachable"
 else
@@ -107,6 +129,6 @@ fi
 echo "[4/4] Done."
 echo
 echo "Next:"
-echo "  - Sign in: https://${DROPLET_HOST}/patient-dashboard/"
+echo "  - Sign in: https://${DROPLET_HOST}/dashboard-app/"
 echo "  - Click a patient → verify FHIR cards load"
 echo "  - From legacy chart: open patient → click the new grid icon → land in modern dashboard"

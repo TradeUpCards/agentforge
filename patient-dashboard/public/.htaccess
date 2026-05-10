@@ -1,6 +1,6 @@
 # SPA-routing fallback for the React patient dashboard.
 #
-# Without this, hitting `https://<host>/patient-dashboard/dashboard/abc-123`
+# Without this, hitting `https://<host>/dashboard-app/dashboard/abc-123`
 # directly returns 404 because Apache looks for a file at that path. With
 # this rule, every non-file/non-directory request falls back to the SPA's
 # `index.html`, which lets React Router pick up the route on the client.
@@ -12,10 +12,15 @@
 #
 # This file is in `patient-dashboard/public/` so Vite copies it into
 # `dist/` on every build, alongside index.html, with no extra deploy step.
+#
+# Note: the deploy path is `/dashboard-app/` (a sibling of the
+# `/patient-dashboard/` source directory at OpenEMR's docroot). Keeping
+# the build output and the source tree separate avoids the source-code-
+# exposure issue you'd otherwise hit by deploying into the source dir.
 
 Options -MultiViews
 RewriteEngine On
-RewriteBase /patient-dashboard/
+RewriteBase /dashboard-app/
 
 # Don't rewrite real files or directories — let Apache serve them
 # directly (assets, favicon, fonts, .well-known, etc.).
