@@ -802,6 +802,17 @@ async def extract_via_graph_endpoint(
             triggered_by_value=triggered_by_value,
             parent_extraction_id=parent_extraction_id,
         )
+
+        # Flush Langfuse so the supervisor + worker spans surface in the
+        # cloud UI before the response returns to the caller (parity with
+        # /graph_chat which flushes for the same reason).  Without this
+        # the trace can lag the response by a few seconds — fine for
+        # production but confusing during a live demo.
+        try:
+            from langfuse import get_client as _get_lf_client
+            _get_lf_client().flush()
+        except Exception:
+            pass
         # graph_payload was built by intake_extractor_node and includes
         # the response-meta the endpoint needs (n_blocks, n_pages, avg).
         result_dict = graph_payload["result"]

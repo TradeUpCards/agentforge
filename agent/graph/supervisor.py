@@ -115,13 +115,51 @@ def supervisor_node(state: SupervisorState) -> dict[str, Any]:
     )
     extraction_payload = state.get("extraction_payload")
     if has_doc_ctx and extraction_payload is None:
+        # Open a Langfuse span so the demo trace shows the deterministic
+        # routing decision (parity with the LLM-routed flow below where
+        # every supervisor visit produces a span).  No tokens / no cost
+        # since there's no LLM call — span metadata reflects that.
         logger.info("supervisor_node: deterministic short-circuit → intake_extractor")
+        with _langfuse_span(lf, _langfuse_available, hops_taken) as _span:
+            if _langfuse_available and lf is not None:
+                try:
+                    lf.update_current_span(
+                        metadata={
+                            "route": "intake_extractor",
+                            "hops_taken": hops_taken,
+                            "decision_kind": "deterministic_short_circuit",
+                            "tokens_input": 0,
+                            "tokens_output": 0,
+                            "cost_estimate_usd": 0.0,
+                            "escalated_to_sonnet": False,
+                            "trigger": "doc_ref_id_in_state",
+                        }
+                    )
+                except Exception:
+                    pass
         return {
             "hops_taken": hops_taken + 1,
             "_pending_route": "intake_extractor",
         }
     if has_doc_ctx and extraction_payload is not None:
+        # Second supervisor visit — extraction has run, payload is on
+        # state, terminate cleanly (router → END, skipping responder).
         logger.info("supervisor_node: extraction complete — terminating")
+        with _langfuse_span(lf, _langfuse_available, hops_taken) as _span:
+            if _langfuse_available and lf is not None:
+                try:
+                    lf.update_current_span(
+                        metadata={
+                            "route": "terminal",
+                            "hops_taken": hops_taken,
+                            "decision_kind": "extraction_complete",
+                            "tokens_input": 0,
+                            "tokens_output": 0,
+                            "cost_estimate_usd": 0.0,
+                        }
+                    )
+                except Exception:
+                    pass
         return {
             "terminal_reason": "extraction_complete",
             "_pending_route": None,
