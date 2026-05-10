@@ -56,7 +56,7 @@ Every tool takes `patient_id` as the *only* identifier parameter — derived fro
 |---|---|
 | **Deployed agent** | https://142-93-242-40.nip.io (credentials provided via the GauntletAI submission portal — synthetic demo data only, no real PHI) |
 | **Eval results (latest run)** | **[`EVAL_RESULTS.md`](./EVAL_RESULTS.md)** — 67-case golden set; **60 pass / 7 fail = 89.6%** in the merged 3-mode view (live + fixture + hybrid). **Fixture mode (PR-blocking gate): 33/0 fail = 100%.** All 7 remaining failures are nightly-tier `live_llm_required` cases documented in [`EVAL_SUITE.md`](./EVAL_SUITE.md) §6 with W3 fix scopes. Per-rubric regression-coverage matrix at [`EVAL_SUITE.md`](./EVAL_SUITE.md) §8.6 documents empirical proof that each of the 5 PRD rubrics fires under deliberate regression injection. |
-| **Demo video (final submission)** | *Final-submission video link added on final commit.* |
+| **Demo video (final submission)** | https://youtu.be/kwIbpru4ci4 |
 | **Demo video (early submission, MVP gate)** | See `.gauntlet/week1/early-submission-video-script.md` (private notes; the video itself was submitted via the GauntletAI portal) |
 | **GitHub mirror** | https://github.com/TradeUpCards/agentforge |
 | **GitLab (primary)** | https://labs.gauntletai.com/coryvandenberg/agentforge |
@@ -79,7 +79,7 @@ Pre-loaded with **200 Synthea-imported demo patients** + 1 hand-crafted edge-cas
 | 6 | **Eval Dataset** | **[`EVAL_RESULTS.md`](./EVAL_RESULTS.md)** + [`EVAL_SUITE.md`](./EVAL_SUITE.md) (suite design) + [`agent/tests/eval/cases/`](./agent/tests/eval/cases/) (65 case YAMLs) + [`agent/tests/eval/COVERAGE.md`](./agent/tests/eval/COVERAGE.md) (coverage matrix) | 65 cases across 10 categories; merged report shows live + fixture + hybrid mode results per case; 12 synthetic patient fixtures. |
 | 7 | **AI Cost Analysis** | [`COST_ANALYSIS.md`](./COST_ANALYSIS.md) | Actual W1 + W2 dev burn + per-PCP/mo projections at 100 / 1K / 10K / 100K with the architectural changes named at each tier; W2 ingestion-pipeline economics + bottleneck analysis. |
 | 8 | **Deployed Application** | https://142-93-242-40.nip.io | Single DigitalOcean droplet running the full stack (OpenEMR + agent service + MariaDB + Qdrant + Caddy). |
-| 9 | **Social Post** *(final only)* | *Posted on X; link added on final commit.* | |
+| 9 | **Social Post** *(final only)* | https://x.com/CardsTradeup/status/2053452810885177646 | |
 
 ### Week 2 brief — additional deliverables
 
