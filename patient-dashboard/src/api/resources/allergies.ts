@@ -1,4 +1,4 @@
-import { fhirGet, fhirPost } from '../fhirClient'
+import { fhirGet, standardApiPost } from '../fhirClient'
 import type { FhirAllergyIntolerance, FhirBundle } from '../../types/fhir'
 
 export const getAllergies = (patientId: string, token: string) =>
@@ -8,16 +8,42 @@ export const getAllergies = (patientId: string, token: string) =>
   )
 
 /**
- * Create a new AllergyIntolerance for the given patient. Backs the
- * Add-Allergy modal demo. Requires the `user/AllergyIntolerance.cu`
- * scope on the access token; the OAuth2 client registration script
- * includes it (re-run after first install if you registered before
- * 2026-05-08).
+ * Create a new allergy for the given patient via OpenEMR's legacy REST
+ * API at `POST /apis/default/api/patient/{puuid}/allergy`.
  *
- * Status fields default to "active" / "confirmed" — the demo doesn't
- * surface them in the form. Reaction shape uses one manifestation +
- * one severity, mirroring how the existing OpenEMR data is typically
- * authored.
+ * Why the legacy API and not FHIR: OpenEMR's FHIR R4 server does not
+ * implement create/update for any clinical resource — only Patient,
+ * Practitioner, and Organization. See PATIENT_DASHBOARD_MIGRATION.md §15
+ * for the source-level evidence and the design tradeoff.
+ *
+ * Security envelope:
+ *   - OAuth2 scope `api:oemr` (requested in `oidcConfig.ts`) is required.
+ *     Without it OpenEMR returns 403 at the dispatch layer (see
+ *     `BearerTokenAuthorizationStrategy.php` line 373).
+ *   - The clinician's user-level ACL must include `patients/med` (see
+ *     route handler in `apis/routes/_rest_routes_standard.inc.php` line 279).
+ *   - The endpoint converts `puuid` to internal `pid` server-side using
+ *     `UuidRegistry::uuidToBytes()`, so the dashboard does not need to
+ *     resolve UUID → integer pid in the browser.
+ *   - Insert flows through `AllergyIntoleranceService::insert()` which
+ *     calls `sqlInsert()` — this writes to the audit log automatically
+ *     (see `library/sql.inc.php` and `QueryUtils::sqlInsert`).
+ *
+ * Body shape: the controller's WHITELISTED_FIELDS constant accepts
+ *   { title, begdate, enddate, diagnosis, comments }
+ * — see `src/RestControllers/AllergyIntoleranceRestController.php` line 38.
+ *
+ * Field mapping from the modal:
+ *   substance → title         (free text — the allergen name)
+ *   reaction  → comments      (free text — observed reaction)
+ *   severity  → comments      (appended; the legacy whitelist excludes
+ *                              the `severity_al` lists-table column, so
+ *                              structured severity isn't writable through
+ *                              this endpoint. The modal still collects it
+ *                              so a future FHIR write path can use it.)
+ *   begdate   → today's ISO date (auto-populated; the modal does not
+ *                              expose a date picker — the typical demo
+ *                              workflow is "I just discovered this".)
  */
 export interface CreateAllergyInput {
   patientId: string
@@ -26,48 +52,34 @@ export interface CreateAllergyInput {
   severity?: 'mild' | 'moderate' | 'severe'
 }
 
+interface LegacyAllergyResponse {
+  validationErrors?: unknown[]
+  internalErrors?: unknown[]
+  data?: { id?: number; uuid?: string }
+}
+
+function buildComments(input: CreateAllergyInput): string | undefined {
+  const parts: string[] = []
+  if (input.reaction) parts.push(`Reaction: ${input.reaction}`)
+  if (input.severity) parts.push(`Severity: ${input.severity}`)
+  return parts.length > 0 ? parts.join(' | ') : undefined
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+}
+
 export const createAllergy = (input: CreateAllergyInput, token: string) => {
-  const body: FhirAllergyIntolerance = {
-    resourceType: 'AllergyIntolerance',
-    clinicalStatus: {
-      coding: [
-        {
-          system:
-            'http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical',
-          code: 'active',
-        },
-      ],
-    },
-    verificationStatus: {
-      coding: [
-        {
-          system:
-            'http://terminology.hl7.org/CodeSystem/allergyintolerance-verification',
-          code: 'confirmed',
-        },
-      ],
-    },
-    code: { text: input.substance },
-    ...(input.reaction || input.severity
-      ? {
-          reaction: [
-            {
-              ...(input.reaction
-                ? { manifestation: [{ text: input.reaction }] }
-                : {}),
-              ...(input.severity ? { severity: input.severity } : {}),
-            },
-          ],
-        }
-      : {}),
+  const body: Record<string, string> = {
+    title: input.substance,
+    begdate: todayIso(),
   }
-  // The FHIR Patient reference is encoded in the resource via a custom
-  // field OpenEMR's writer recognizes. The spec puts patient under
-  // `patient.reference` but the type narrowing in our local FhirAllergyIntolerance
-  // doesn't expose that field; we cast for the wire shape.
-  const wire = {
-    ...body,
-    patient: { reference: `Patient/${input.patientId}` },
-  }
-  return fhirPost<FhirAllergyIntolerance>('/AllergyIntolerance', wire, token)
+  const comments = buildComments(input)
+  if (comments) body.comments = comments
+
+  return standardApiPost<LegacyAllergyResponse>(
+    `/patient/${encodeURIComponent(input.patientId)}/allergy`,
+    body,
+    token,
+  )
 }

@@ -11,21 +11,34 @@ interface AddAllergyModalProps {
 }
 
 /**
- * Add-Allergy demo modal. The only WRITE surface in the dashboard;
- * exists to demonstrate that:
+ * Add-Allergy demo modal. The only WRITE surface in the dashboard.
  *
- *   1. OAuth2 scope expansion works (`user/AllergyIntolerance.cu`)
- *      — re-running scripts/register-oauth-client.sh registers a
- *      client with that scope; the dashboard can then POST.
- *   2. The modal is the right pattern for a focused write task
- *      (the rest of the dashboard uses inline accordions; the contrast
- *      illustrates the case for each).
- *   3. After a successful POST we invalidate the allergies query so
- *      the list refreshes immediately — read-after-write consistency
- *      via TanStack Query, not a manual refetch.
+ * **Wire path (the interesting bit).** OpenEMR's FHIR R4 server does
+ * not implement create/update for clinical resources — only Patient,
+ * Practitioner, and Organization are writable via FHIR
+ * (`ServerScopeListEntity.php` line 167, `// we'll ignore write for now`).
+ * The modal therefore POSTs to OpenEMR's legacy REST API at
+ * `/apis/default/api/patient/{puuid}/allergy`, gated by the `api:oemr`
+ * OAuth2 scope plus the clinician's per-route ACL. The full discovery
+ * and tradeoff is documented in PATIENT_DASHBOARD_MIGRATION.md §15.
  *
- * Form fields: substance (required), reaction (optional), severity
- * (optional). Status defaults are baked into createAllergy.
+ * What this modal demonstrates:
+ *
+ *   1. Focused-task modal pattern (contrast with the inline-accordion
+ *      pattern used elsewhere in the dashboard).
+ *   2. End-to-end TanStack Query mutation: `useMutation` →
+ *      `invalidateQueries` for read-after-write consistency. The card
+ *      refetches automatically and the new allergy appears.
+ *   3. Two-API client architecture in the SPA — FHIR for reads
+ *      (`fhirGet`) and the legacy REST API for the one write surface
+ *      (`standardApiPost`). Both share the same OAuth2 token.
+ *   4. PHI-safe error handling (status code surfaced; response body
+ *      drained but not logged).
+ *
+ * Form fields: substance (required) → `title`; reaction +
+ * severity (optional) → folded into `comments` (the legacy REST
+ * controller's WHITELISTED_FIELDS doesn't accept structured severity
+ * — see `src/api/resources/allergies.ts` for the mapping).
  *
  * Layout:
  *   - Phone (any orientation, <md): full-screen overlay. The modal
@@ -88,7 +101,21 @@ export function AddAllergyModal({ patientId, open, onClose }: AddAllergyModalPro
     if (err instanceof FhirError) {
       if (err.status === 401) return 'Your session has expired. Please sign out and back in.'
       if (err.status === 403) {
-        return 'OAuth2 scope missing. Re-run scripts/register-oauth-client.sh and update .env to enable Allergy writes.'
+        return (
+          'Permission denied. The dashboard needs the `api:oemr` ' +
+          'OAuth2 scope and the `patients/med` user-ACL. Re-run ' +
+          'scripts/register-oauth-client.sh, update .env with the new ' +
+          'client_id/client_secret, and sign out and back in.'
+        )
+      }
+      if (err.status === 404) {
+        // The legacy REST endpoint exists; a 404 here means the patient
+        // UUID was not found (deleted, or registered under a different
+        // site).
+        return 'Patient not found in OpenEMR.'
+      }
+      if (err.status >= 500) {
+        return 'OpenEMR returned a server error. Check the OpenEMR PHP error log.'
       }
       return `Could not save (HTTP ${err.status}).`
     }

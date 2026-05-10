@@ -68,9 +68,16 @@ export function standardApiGet<T>(path: string, token: string): Promise<T> {
 }
 
 /**
- * POST a FHIR resource. Used for the Add-Allergy demo (the only WRITE
- * surface in the dashboard). Same auth + error-handling contract as
- * `fhirGet`; throws FhirError on non-2xx.
+ * POST a FHIR resource. Same auth + error-handling contract as `fhirGet`;
+ * throws FhirError on non-2xx.
+ *
+ * Note: OpenEMR's FHIR R4 server does not currently implement POST on any
+ * clinical resource (AllergyIntolerance, Condition, MedicationRequest, etc.
+ * — see PATIENT_DASHBOARD_MIGRATION.md §15 for the source-level evidence).
+ * The Add-Allergy modal therefore uses `standardApiPost` against OpenEMR's
+ * legacy REST API instead. `fhirPost` is kept here for future write
+ * surfaces against Patient/Practitioner/Organization (the three resources
+ * OpenEMR's FHIR does write).
  */
 export async function fhirPost<T>(
   path: string,
@@ -84,6 +91,41 @@ export async function fhirPost<T>(
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/fhir+json',
       Accept: 'application/fhir+json',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    void res.text().catch(() => {
+      /* ignore */
+    })
+    throw new FhirError(res.status, res.statusText, url)
+  }
+  return res.json() as Promise<T>
+}
+
+/**
+ * POST against OpenEMR's legacy REST API (`/apis/default/api/*`). Used by
+ * the Add-Allergy demo. Same auth + PHI-safe error handling as `fhirPost`;
+ * throws FhirError on non-2xx so the UI can branch on status code.
+ *
+ * The legacy REST API gates access on the `api:oemr` OAuth scope (see
+ * `BearerTokenAuthorizationStrategy.php` line 373) plus a per-route ACL
+ * check at the user level. The OAuth scope is requested in `oidcConfig.ts`;
+ * the user-ACL check uses the clinician's existing OpenEMR role
+ * permissions.
+ */
+export async function standardApiPost<T>(
+  path: string,
+  body: unknown,
+  token: string,
+): Promise<T> {
+  const url = path.startsWith('http') ? path : `${STANDARD_API_BASE}${path}`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
     },
     body: JSON.stringify(body),
   })
