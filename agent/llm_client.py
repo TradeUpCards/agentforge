@@ -54,7 +54,21 @@ class AnthropicLLMClient(LLMClient):
             base_url=settings.anthropic_base_url,
         )
 
-    @observe(as_type="generation", name="anthropic.messages.create")
+    @observe(
+        as_type="generation",
+        name="anthropic.messages.create",
+        # PHI guard: by default Langfuse @observe captures function args at
+        # entry (system + messages — full prompt, PHI when patient context
+        # is referenced) and the return Message at exit (full LLM response,
+        # PHI in claim text).  Disable auto-capture; the body below writes
+        # only structural metadata (model, token counts, cost attribution,
+        # cache stats, stop_reason) via update_current_generation().  We
+        # lose the ability to debug LLM hallucinations from the trace UI,
+        # but token tracking + cost accounting + cache utilization stay
+        # intact — those are the demo-graded observability signals.
+        capture_input=False,
+        capture_output=False,
+    )
     async def create(
         self,
         *,
@@ -75,10 +89,22 @@ class AnthropicLLMClient(LLMClient):
         if tools:
             kwargs["tools"] = tools
 
-        # Pre-call: stamp the input + model on the Langfuse generation.
+        # Pre-call: stamp model + structural input shape (no PHI).
+        # Langfuse generation spans require nominal input/output to record
+        # as "generation" type (vs plain span); we provide structural-only
+        # summaries — character counts and message counts, no content.
+        # The actual content is sent to Anthropic but never to Langfuse.
         lf = get_client()
+        system_chars = len(system) if isinstance(system, str) else sum(
+            len(str(s.get("text", ""))) for s in system if isinstance(s, dict)
+        )
         lf.update_current_generation(
-            input={"system": system, "messages": messages},
+            input={
+                "system_prompt_chars": system_chars,
+                "n_messages": len(messages),
+                "has_tools": bool(tools),
+                "n_tools": len(tools) if tools else 0,
+            },
             model=model,
             model_parameters={
                 "max_tokens": max_tokens,
@@ -89,7 +115,9 @@ class AnthropicLLMClient(LLMClient):
 
         response = await self._client.messages.create(**kwargs)
 
-        # Post-call: stamp output text + token usage + cache stats.
+        # Post-call: structural-only output (length, finish reason).  Token
+        # counts + cache stats stay — those are observability primitives
+        # that don't carry PHI.
         output_text = "".join(
             getattr(b, "text", "") for b in response.content
             if getattr(b, "type", None) == "text"
@@ -103,7 +131,10 @@ class AnthropicLLMClient(LLMClient):
             else 0.0
         )
         lf.update_current_generation(
-            output=output_text,
+            output={
+                "output_chars": len(output_text),
+                "n_content_blocks": len(response.content) if response.content else 0,
+            },
             usage_details={
                 "input": usage.input_tokens,
                 "output": usage.output_tokens,
