@@ -327,3 +327,56 @@ agent/venv/Scripts/pytest agent/tests/unit/ -v
 If you see *"Something went wrong. Please retry."*, check the browser console first (likely 401 from a session-bag mismatch or a malformed URL) before suspecting the agent. The agent's uvicorn log will show the inbound request and the verifier verdict — those are the next two diagnostic surfaces.
 
 **5. Langfuse trace lands** (only if Langfuse keys are configured). Open https://cloud.langfuse.com → your project → Traces. Each `/chat` request appears as a top-level span with per-tool nested spans, generation tokens/cost, and a `verifier_verdict` metadata field.
+
+---
+
+## Week 2 — additional services + endpoint verification
+
+Week 2 added two services that come up automatically with `docker compose up`:
+
+| Service | Container | Purpose | Verification |
+|---|---|---|---|
+| **Qdrant** (vector store) | `development-easy-qdrant-1` | Stores the 26-chunk clinical-guideline corpus for hybrid RAG | `docker compose exec agent python -c "import httpx; print(httpx.get('http://qdrant:6333/healthz').text)"` → `healthz check passed` |
+| **Docling** (Python lib in agent container) | inside `development-easy-agent-1` | Document layout extractor (PDF / PNG / JPG) for the upload pipeline | Implicit — tested by the W2 endpoint verification below |
+
+### Optional W2 env vars
+
+| Var | Notes |
+|---|---|
+| `COHERE_API_KEY` | Optional. With the key, Cohere Rerank is used; without it, the local BAAI cross-encoder fallback fires (~16s cold-start, ~2s warm). Either path satisfies the hybrid-RAG rerank requirement; Cohere is a cost-lever, not a dependency. |
+
+### Week 2 endpoint smoke checks
+
+Run these after the W1 verification above passes. They confirm the W2 multimodal capabilities work end-to-end.
+
+**6. `/graph_chat` endpoint (LangGraph supervisor + 2 workers + responder).**
+```bash
+# From inside OpenEMR's container (so HMAC + internal-network rules hold)
+docker compose exec openemr curl -s -X POST http://agent:8000/graph_chat \
+  -H "Content-Type: application/json" \
+  -d '{"patient_id": 1, "session_id": "smoke-test", "messages": [{"role":"user","content":"What problems does this patient have?"}]}'
+# 200 OK with {"final_response": ..., "citations": [...]}
+```
+
+**7. `/attach_and_extract` endpoint (Docling layout + Haiku extraction).** Easiest path: upload a lab PDF via the OpenEMR Documents UI under category 9000 (Lab Result auto-extract) or 9001 (Intake Form auto-extract). The DocumentSavedSubscriber fires automatically; check that an extraction landed:
+```bash
+docker compose exec mysql mariadb -uopenemr -p"$MYSQL_USER_PASSWORD" openemr -e \
+  "SELECT id, doc_type, status, attempt_n, model FROM co_pilot_extractions ORDER BY id DESC LIMIT 3;"
+# Most-recent row shows status='ok' with a non-null model (e.g. claude-haiku-4-5)
+```
+
+**8. PR-blocking eval gate (W2 §6 hard gate).**
+```bash
+# Run the smoke tier (8 cases, fixture mode, ~5s, $0)
+USE_FIXTURE_LLM=true USE_FIXTURE_DATA=true USE_FIXTURE_EXTRACTION=true \
+OPENEMR_HMAC_SECRET=ci-fixture-mode-not-a-real-secret \
+agent/venv/Scripts/python -m pytest agent/tests/eval/ -q -m smoke
+```
+
+**9. React patient dashboard (W2 surprise challenge).** Run in a second terminal alongside the docker stack:
+```bash
+cd patient-dashboard
+pnpm install && pnpm dev
+# Open http://localhost:5173 — sign in via OAuth2 against local OpenEMR
+```
+Six clinical cards (Allergies, Problems, Medications, Prescriptions, Care Team, Encounters) load over OpenEMR FHIR API; full parity with the legacy patient summary screen.

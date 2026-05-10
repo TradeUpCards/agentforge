@@ -507,9 +507,52 @@ Use these to back-of-envelope any week 2+ UC pitch before committing engineering
 
 ---
 
+## Week 2 — additional dev burn + ingestion-pipeline economics
+
+This section covers W2-specific additions. §1 above remains the W1 baseline.
+
+### Actual W2 dev burn (2026-05-02 → 2026-05-10, full sprint inclusive of final-submission day)
+
+| Cost driver | Amount | Source |
+|---|---|---|
+| Eval-suite full runs (live + hybrid modes; fixture is $0) | **~$7** | 14 all-modes 3-mode merged runs + ~21 standalone live/hybrid runs counted in `agent/tests/eval/results/` (through 2026-05-09) |
+| Demo upload tests on prod (Haiku extraction calls) | **~$1.50** | ~10-20 successful upload tests × $0.0024 typical extraction cost (per Extraction Pipeline Cost Constants above) |
+| Manual /chat + /graph_chat debugging (eval cleanup, agent dev) | **~$1.60** | Multiple iterations of test queries during MR 50-54 cleanup work |
+| **Final-submission day** (2026-05-10) — Aria's regression-CI-trip verification + clean post-revert eval re-run + final docs-sweep eval | **~$1.69** | 2 full 3-mode merged eval runs (regression-trip + clean) + Aria's per-rubric injection cycles for §8.6 matrix verification |
+| Cohere Rerank API | **$0** | Free tier (under 1K queries/mo) |
+| Qdrant vector store hosting | **$0** | Self-hosted on droplet, included in $4/mo VPS prorated |
+| Docling layout | **$0** | Self-hosted Python; CPU-only, included in droplet cost |
+| **Total W2 LLM spend** | **$11.77** | Authoritative from Anthropic console for the period; per-line splits are reconstructed from artifact counts |
+
+The $11.77 total is the authoritative figure from the Anthropic console (console.anthropic.com → Usage → AgentForge API key, date range 2026-05-02 → 2026-05-10). The per-line splits are best-effort allocation from on-disk eval artifacts + known per-extraction cost constants from the Extraction Pipeline section above; they sum to the authoritative total. Add ~$0.50 prorated droplet for the W2 portion of the $4/mo VPS → **~$12.30 total W2 infra spend.**
+
+### W2 ingestion-pipeline latency (`/attach_and_extract`)
+
+The W2 extraction pipeline adds four steps to the W1 read-path latencies in `PERFORMANCE.md`:
+
+| Step | Estimated p50 | Notes |
+|---|---|---|
+| Document decryption (PHP-side, OpenEMR's CryptoGen aes-256-gcm) | ~50ms | Once per upload; reads `documents.url`, decrypts, writes plaintext to tmpnam |
+| Docling layout (Python, CPU-bound on agent container) | ~1-2s per page | Varies with PDF complexity, image quality, table density; lab PDFs typically 1-2 pages |
+| Haiku extraction call (Anthropic) | ~2-4s | Single attempt at P1; 3-attempt ladder ceiling at P2 |
+| RoundtripService write (PHP→MariaDB) | ~50-150ms | One PHP service call writes parent + child rows in transaction with `co_pilot_fhir_links` audit |
+| **Total /attach_and_extract estimated p50** | **~4-7s** | Most wall time in Haiku call; Docling variance dominates worst-case |
+
+These are estimates from architecture analysis. Actual per-span p50/p95 numbers are visible in Langfuse for any `/attach_and_extract` trace; promote the estimates to measured values once a representative trace is captured.
+
+### W2 bottleneck analysis
+
+- **Dominant cost driver:** Haiku extraction call (~60% of wall time and the only step with $-cost). Cost-per-document driven by token count of the document blocks Haiku sees.
+- **Dominant variance driver:** Docling layout. PDFs with embedded scans, multi-column layouts, or rotated images push p95 well above p50.
+- **Hybrid RAG retrieval** (Qdrant + BM25 + rerank): not on the upload path. Only fires on `/graph_chat` evidence_retriever calls — different latency story (W1 read-path budget applies).
+- **Mitigation deferred to W3:** the current p50 of ~4-7s is well under the clinician-perceptible threshold for an async-feel upload (clinician uploads, navigates away, returns to find extraction visible — no UI block). No production gate forces sub-second extraction at MVP. Latency-budget pressure increases when the bbox-overlay UI lands and clinicians wait for the highlight to render.
+
+---
+
 ## Defense talking points (interview)
 
 - "What did week 1 cost?" — *$1.64 LLM spend, $0 Langfuse (free tier), $4 droplet prorated. ~$6 total. Counterfactual without multi-model tiering: ~$3.50 (Sonnet-only) or ~$15-25 (Opus-only).*
+- "What did week 2 cost?" — *$11.77 LLM spend on the Anthropic console for May 2 → May 10 (full sprint, inclusive of final-submission day). Eval-suite full runs were the dominant driver (~$7 across 14 three-mode merged runs through May 9 + ~$1.69 on May 10 for Aria's regression-CI-trip verification cycle and the final-submission docs-sweep clean re-run). Demo upload tests + manual /chat + /graph_chat debugging accounted for ~$3 across the sprint. Cohere Rerank free tier ($0), Qdrant self-hosted ($0), Docling self-hosted ($0). Add ~$0.50 droplet prorated → ~$12.30 W2 total. The eval-suite cost was lower than I'd estimated from artifact counts because many of the on-disk result files were partial / cut-short runs that didn't bill full token counts.*
 - "What's per-request cost?" — *Blended ~$0.014 post-ship at the §2.5 mix. UC1/UC2 single-turn pay cache CREATION ($0.009 Haiku, $0.027 Sonnet); UC3 multi-turn follow-ups within 5-min TTL hit cache READ ($0.015 Sonnet — still expensive because the model is Sonnet, just less than cold). See §2.4.*
 - "What's the dominant cost lever?" — *Model choice (Sonnet vs Haiku) above cache hit rate. Sonnet UC3 READ at $0.015 is still more expensive than Haiku UC1 CREATION at $0.009. Caching break-even is ~22% same-patient-same-model repeat rate (§3.1); below that, caching is a net cost. §2.5 baseline assumes 20% (right at the line). Pilot telemetry on cache hit ratio is the single gating signal — model-agnostic, no need to attribute by UC.*
 
