@@ -399,12 +399,34 @@
 
         // Render the page to canvas.
         //
-        // annotationMode: DISABLE — suppresses PDF.js's default form-field
-        // highlight rendering (pink/magenta tint over form fields).  Lab
-        // PDFs are often authored as fillable forms; without this flag,
-        // every form field area gets a colored overlay that visually
-        // competes with our own bbox highlight.  We only need the page
-        // content for visual provenance — interactivity is irrelevant.
+        // Three layered fixes for PDF.js's pink-tint behavior on certain lab
+        // PDFs (observed: Pacific Diagnostics lipid panel renders rose-pink
+        // in our sidecar but beige in OpenEMR's native viewer):
+        //
+        //   1. annotationMode: DISABLE — suppresses PDF.js's default
+        //      form-field highlight rendering (translucent pink/magenta over
+        //      input rectangles).  Some lab PDFs are authored as fillable
+        //      forms; without this flag every form field area gets a colored
+        //      overlay that visually competes with our own bbox highlight.
+        //
+        //   2. intent: 'print' — strips non-printing Optional Content Groups
+        //      (PDF layers tagged "ViewOnly: true / PrintAlways: false") and
+        //      certain non-printing annotation overlays that survive
+        //      annotationMode: DISABLE.  Print intent matches how a clean
+        //      printout would look.
+        //
+        //   3. pageColors — explicit white background + black foreground.
+        //      Overrides any inherited or system-color rendering the page
+        //      might otherwise pick up; immune to OS-level dark mode or
+        //      forced-colors media queries that occasionally bleed into
+        //      PDF.js canvas paints.
+        //
+        // Note: a residual color shift may remain on PDFs authored in pure
+        // CMYK with non-standard ICC profiles — PDF.js uses approximate
+        // CMYK→RGB conversion (no full ICC profile path) so warm beige
+        // values can render rose-tinted relative to Chrome's native viewer.
+        // That residual is a PDF.js engine limitation, not a fix we can
+        // make from our render-call settings.
         var annotationMode = (
             hostWin.pdfjsLib && hostWin.pdfjsLib.AnnotationMode
                 ? hostWin.pdfjsLib.AnnotationMode.DISABLE
@@ -414,6 +436,11 @@
             canvasContext: canvas.getContext('2d'),
             viewport: viewport,
             annotationMode: annotationMode,
+            intent: 'print',
+            pageColors: {
+                background: 'rgb(255, 255, 255)',
+                foreground: 'rgb(0, 0, 0)',
+            },
         }).promise.then(function () {
             drawBboxOverlay(svg, naturalViewport, scale, citation);
             // Scroll to the bbox after render so the highlight is in view.
