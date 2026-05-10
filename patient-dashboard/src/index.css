@@ -11,3 +11,86 @@ html, body, #root {
   margin: 0;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
+
+/*
+ * Co-Pilot drawer "push content" mode.
+ *
+ * When the Co-Pilot drawer opens, CoPilotDrawer adds the
+ * `data-copilot-open` attribute to <body>. We respond by constraining
+ * body's available area so the chart sits next to (or above) the drawer
+ * rather than under it:
+ *
+ *   Side-drawer cases (phone landscape / tablet / desktop):
+ *     padding-right shrinks body's content area; chart reflows in the
+ *     left side, drawer fills the right side.
+ *
+ *   Bottom-sheet case (phone portrait):
+ *     body becomes a height-constrained scroll container at 50 vh so
+ *     the chart fits in the top half AND remains fully scrollable.
+ *     The drawer (position: fixed) overlays the bottom 50 vh.
+ *     Without this, body's `min-h-screen` wrapper extended below the
+ *     drawer and content was unreachable without closing it.
+ *
+ * The drawer itself is `position: fixed` so it doesn't move with body
+ * padding; it overlays the area body vacated.
+ *
+ * Result: the patient chart and the Co-Pilot are side-by-side (or
+ * stacked on phone portrait); both surfaces remain fully scrollable
+ * and interactive. No modal backdrop, no global scroll lock.
+ *
+ * Transitions on padding + max-height give a smooth push/pull when the
+ * drawer opens or closes; matches the drawer's 300 ms slide animation.
+ */
+body {
+  transition: padding 300ms ease-out;
+}
+
+#root {
+  transition: max-height 300ms ease-out;
+}
+
+/* --- Side-drawer cases (phone landscape, tablet, desktop) ----------- */
+
+@media (min-width: 640px) {
+  body[data-copilot-open] { padding-right: 384px; }
+}
+@media (min-width: 768px) {
+  body[data-copilot-open] { padding-right: 400px; }
+}
+@media (min-width: 1024px) {
+  body[data-copilot-open] { padding-right: 480px; }
+}
+@media (min-width: 1280px) {
+  body[data-copilot-open] { padding-right: 520px; }
+}
+
+/* --- Bottom-sheet case (phone portrait) ----------------------------- */
+
+@media (max-width: 639px) and (orientation: portrait) {
+  body[data-copilot-open] {
+    padding-right: 0;
+    /* Disable body-level scroll so the chart's scroll container is
+       deterministic. Without this, both body and #root could scroll
+       on different browsers, leading to either no scroll or runaway
+       scroll. */
+    overflow: hidden;
+  }
+  /* #root becomes the chart's scroll container, sized to leave room
+     for the drawer below it. Compact (drawer 40 vh) → root 60 vh.
+     Expanded via double-tap (drawer 90 vh) → root 10 vh (just the
+     patient header sticky + a peek of chart on scroll). */
+  body[data-copilot-open] > #root {
+    height: 60vh;
+    max-height: 60vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  body[data-copilot-open][data-copilot-expanded] > #root {
+    height: 10vh;
+    max-height: 10vh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body, #root { transition: none; }
+}

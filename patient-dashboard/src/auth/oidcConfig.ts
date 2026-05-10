@@ -30,6 +30,13 @@ const SCOPES = [
   'openid',
   'fhirUser',
   'offline_access',
+  // `api:oemr` gates access to OpenEMR's legacy REST API at
+  // `/apis/default/api/*`. The Add-Allergy modal uses that surface
+  // (`POST /api/patient/{puuid}/allergy`) because OpenEMR's FHIR R4
+  // server does not implement write for any clinical resource — see
+  // PATIENT_DASHBOARD_MIGRATION.md §15. All FHIR reads continue to
+  // run through the FHIR endpoints unchanged.
+  'api:oemr',
   'user/Patient.rs',
   'user/AllergyIntolerance.rs',
   'user/Condition.rs',
@@ -37,6 +44,11 @@ const SCOPES = [
   'user/MedicationDispense.rs',
   'user/CareTeam.rs',
   'user/Encounter.rs',
+  // OpenEMR only registers `user/DocumentReference.rs` in its restricted
+  // form (clinical-note category only). The plain `.rs` is silently
+  // dropped at registration. We request the restricted form explicitly
+  // so the granted scope matches what was asked for.
+  'user/DocumentReference.rs?category=http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category|clinical-note',
 ].join(' ')
 
 export const oidcConfig: AuthProviderProps = {

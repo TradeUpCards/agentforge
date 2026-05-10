@@ -353,7 +353,124 @@ patient-dashboard/
     └── utils/                # fhirParsers (name/MRN/active), formatters (dates)
 ```
 
-## 15. How to run
+## 15. OpenEMR FHIR write limitations and the legacy-REST workaround
+
+This section captures a discovery from late W2 build that shapes how
+the Add-Allergy write demo is wired. It is recorded here so the
+tradeoff is defended honestly in interview, not papered over.
+
+### 15.1 The discovery
+
+OpenEMR's FHIR R4 server registers no `.c` / `.u` (create/update)
+scopes for clinical resources. The relevant code is
+`src/Common/Auth/OpenIDConnect/Entities/ServerScopeListEntity.php`
+around line 167 — the V2 scope-registration loop is annotated
+`// we'll ignore write for now` and emits only `.rs` (read/search)
+scopes for every resource on the FHIR R4 list. The V1 scope set adds
+`.write` for exactly three resources: `Patient`, `Practitioner`, and
+`Organization`. Every clinical resource the dashboard touches —
+`AllergyIntolerance`, `Condition`, `MedicationRequest`,
+`MedicationDispense`, `CareTeam`, `Encounter`, `DocumentReference` —
+is read-only via FHIR.
+
+OpenEMR's OAuth2 server silently filters unrecognized scopes at
+client registration. A registration request including
+`user/AllergyIntolerance.cu` returns a successful 200 with that scope
+absent from the response body. A subsequent `POST /fhir/AllergyIntolerance`
+returns 404 — not 403 — because no route exists, not because the
+scope is insufficient.
+
+### 15.2 The chosen workaround: legacy REST API
+
+The Add-Allergy modal POSTs to OpenEMR's legacy REST API:
+
+```
+POST /apis/default/api/patient/{puuid}/allergy
+Authorization: Bearer <oauth2-token>
+Content-Type: application/json
+
+{
+  "title": "Penicillin",
+  "begdate": "2026-05-08",
+  "comments": "Reaction: hives | Severity: moderate"
+}
+```
+
+Three properties make this a clean choice:
+
+1. **Same OAuth2 token, additional `api:oemr` scope.** The token
+   carries both `user/AllergyIntolerance.rs` (FHIR read) and
+   `api:oemr` (legacy API write). One sign-in, two endpoints. The
+   `api:oemr` scope is gated at OpenEMR's bearer-token strategy
+   (`BearerTokenAuthorizationStrategy.php` line 373); without it
+   OpenEMR returns 403 at the dispatch layer.
+
+2. **No UUID → pid resolution needed in the SPA.** The endpoint
+   accepts the FHIR Patient UUID directly in the path. The internal
+   `AllergyIntoleranceService::insert()` calls
+   `UuidRegistry::uuidToBytes()` and `getIdByUuid()` to resolve to
+   the integer pid server-side. The dashboard already has the UUID
+   from the FHIR Patient resource — no extra lookup.
+
+3. **Same compliance posture as FHIR.** The write flows through
+   `AllergyIntoleranceService::insert()` → `sqlInsert()`, which
+   automatically writes to OpenEMR's audit log. ACL check is
+   enforced inline (`RestConfig::request_authorization_check($request,
+   "patients", "med")` in the route handler). Transmission is the
+   same TLS as the FHIR endpoint. The legacy REST endpoint is
+   functionally equivalent to FHIR for HIPAA technical safeguards
+   (authentication, authorization, audit, transmission encryption),
+   with one caveat: `api:oemr` is a broader scope than a hypothetical
+   per-resource `.cu` would be. The user-level ACL still constrains
+   what each clinician can actually do, which is what every
+   ONC-certified OpenEMR deployment relies on.
+
+**Field mapping.** The legacy controller's WHITELISTED_FIELDS accepts
+`{title, begdate, enddate, diagnosis, comments}`. The modal's
+substance maps to `title`; reaction and severity fold into
+`comments` (the whitelist excludes the `severity_al` lists-table
+column, so structured severity isn't writable through this endpoint).
+`begdate` is auto-populated to today; the modal does not expose a
+date picker because the typical clinician workflow for the modal is
+"I just discovered this allergy." The mapping is documented in
+`patient-dashboard/src/api/resources/allergies.ts`.
+
+### 15.3 DocumentReference scope restriction (related, smaller)
+
+OpenEMR registers `user/DocumentReference.rs` only in its restricted
+form (`category=...|clinical-note`). The plain unrestricted scope is
+silently dropped at registration. Both the registration JSON and
+`oidcConfig.ts` request the restricted form explicitly so the granted
+scope literally matches what is asked for. The DocumentReference
+search URL (`getDocuments`) appends the same `category` filter so
+the search request matches the granted scope — without it OpenEMR
+returns 403 on an otherwise valid token. The dashboard therefore
+shows only clinical-note category documents, which is the intended
+set for a clinician dashboard, not a workaround.
+
+### 15.4 What this means for the codebase
+
+- `oidcConfig.ts` requests `api:oemr` alongside the FHIR `.rs` scopes.
+- `fhirClient.ts` exposes `standardApiPost` (mirror of `fhirPost`)
+  pointed at `/apis/default/api/`.
+- `api/resources/allergies.ts` uses `standardApiPost` for create and
+  `fhirGet` for read — both backed by the same OAuth2 token.
+- `AddAllergyModal.tsx` error mapping recognizes 403 (scope/ACL),
+  401 (expired session), 404 (patient not found), 5xx (server error).
+- The two-API client architecture is the model for any future
+  write surfaces in the dashboard. FHIR for reads where supported,
+  legacy REST API for writes that FHIR doesn't expose.
+
+### 15.5 Alternatives considered and why they were rejected
+
+| Alternative | Reason rejected |
+|---|---|
+| Wait for OpenEMR to add FHIR write | Out of timeline; out of workstream scope |
+| Custom PHP endpoint that hits the DB directly | Reimplements `AllergyIntoleranceService::insert()` (validation, audit, ACL, list-options FK, idempotency) — strictly more work, strictly worse compliance posture |
+| Omit the write demo entirely | Loses the modal-vs-accordion UX contrast and the read-after-write consistency demonstration; obscures a real architectural decision |
+| Demo write on Patient demographics (FHIR-supported) | Demographics edit isn't a useful clinical-dashboard surface |
+
+## 16. How to run
 
 ```bash
 # 1. Register the OAuth2 client (one time per OpenEMR install)
@@ -375,7 +492,7 @@ pnpm build      # emits dist/, deploy under OpenEMR origin (§13)
 
 If pnpm is not on the system: `npm i -g pnpm` (or `corepack enable`).
 
-## 16. What I can defend in interview
+## 17. What I can defend in interview
 
 - **"If OpenEMR already has a patient dashboard, why should this exist?"** Six concrete things this delivers that the PHP dashboard does not:
   1. **Independent card loading** — the page paints as each FHIR query resolves; one slow card cannot block the rest (§10).

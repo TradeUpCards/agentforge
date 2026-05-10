@@ -1,9 +1,13 @@
+import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { MainNav } from '../components/layout/MainNav'
 import { OpenTabBar } from '../components/layout/OpenTabBar'
 import { PatientHeader } from '../components/layout/PatientHeader'
 import { MedicalRecordHeading } from '../components/layout/MedicalRecordHeading'
 import { SubNav } from '../components/layout/SubNav'
+import { CoPilotDrawer } from '../components/copilot/CoPilotDrawer'
+import { useScrollDirection } from '../hooks/useScrollDirection'
+import { openemrHome } from '../utils/openemrLinks'
 
 /**
  * Placeholder page for the non-Dashboard sub-nav items
@@ -34,12 +38,12 @@ const LABELS: Record<string, string> = {
   'external-data': 'External Data',
 }
 
-const OPENEMR_BASE =
-  import.meta.env.VITE_OPENEMR_BASE_URL ?? 'https://localhost:9300'
-
 export function SectionStubPage() {
   const { patientId, section } = useParams<{ patientId: string; section: string }>()
   const label = (section && LABELS[section]) ?? 'Section'
+  const [headerCollapsed, setHeaderCollapsed] = useState(false)
+  const [headerHidden, setHeaderHidden] = useState(false)
+  const hideMainNav = useScrollDirection()
 
   if (!patientId) {
     return (
@@ -51,9 +55,29 @@ export function SectionStubPage() {
 
   return (
     <div className="min-h-screen bg-white">
-      <MainNav />
-      <PatientHeader patientId={patientId} />
-      <OpenTabBar active="Dashboard" />
+      <div className="sticky top-0 z-30 bg-white">
+        <div
+          aria-hidden={hideMainNav}
+          className={`grid motion-safe:transition-[grid-template-rows] motion-safe:duration-200 ${
+            hideMainNav ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'
+          }`}
+        >
+          <div className="overflow-hidden">
+            <MainNav />
+          </div>
+        </div>
+        <PatientHeader
+          patientId={patientId}
+          collapsed={headerCollapsed}
+          hidden={headerHidden}
+          onToggleHidden={() => setHeaderHidden((s) => !s)}
+        />
+      </div>
+      <OpenTabBar
+        active="Dashboard"
+        headerCollapsed={headerCollapsed}
+        onToggleHeader={() => setHeaderCollapsed((s) => !s)}
+      />
       <MedicalRecordHeading patientId={patientId} />
       <SubNav patientId={patientId} />
       <main className="px-4 py-8 max-w-3xl mx-auto">
@@ -68,7 +92,7 @@ export function SectionStubPage() {
         </p>
         <div className="mt-5 flex items-center gap-3">
           <a
-            href={`${OPENEMR_BASE}/interface/main/main_screen.php`}
+            href={openemrHome()}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded border border-blue-700 bg-white text-blue-700 hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
@@ -83,6 +107,7 @@ export function SectionStubPage() {
           </Link>
         </div>
       </main>
+      <CoPilotDrawer patientId={patientId} />
     </div>
   )
 }

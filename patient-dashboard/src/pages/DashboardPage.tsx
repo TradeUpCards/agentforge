@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { MainNav } from '../components/layout/MainNav'
 import { OpenTabBar } from '../components/layout/OpenTabBar'
@@ -11,6 +12,9 @@ import { MedicationsCard } from '../components/cards/MedicationsCard'
 import { PrescriptionsCard } from '../components/cards/PrescriptionsCard'
 import { CareTeamCard } from '../components/cards/CareTeamCard'
 import { EncountersCard } from '../components/cards/EncountersCard'
+import { DocumentsCard } from '../components/cards/DocumentsCard'
+import { CoPilotDrawer } from '../components/copilot/CoPilotDrawer'
+import { useScrollDirection } from '../hooks/useScrollDirection'
 
 /**
  * Composes the full patient dashboard with the OpenEMR-familiar layout:
@@ -28,6 +32,14 @@ import { EncountersCard } from '../components/cards/EncountersCard'
  */
 export function DashboardPage() {
   const { patientId } = useParams<{ patientId: string }>()
+  // Desktop-only thin-bar collapse, toggled by OpenTabBar's chevron.
+  const [headerCollapsed, setHeaderCollapsed] = useState(false)
+  // Drawer-style hide-entirely toggle (all breakpoints), via the
+  // chevron handle bottom-center of the patient header.
+  const [headerHidden, setHeaderHidden] = useState(false)
+  // Auto-hide MainNav on scroll-down, reveal on any upward scroll.
+  // PatientHeader stays sticky-always (clinical-safety priority).
+  const hideMainNav = useScrollDirection()
 
   if (!patientId) {
     return (
@@ -41,9 +53,36 @@ export function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-white">
-      <MainNav />
-      <PatientHeader patientId={patientId} />
-      <OpenTabBar active="Dashboard" />
+      {/* Sticky chrome — MainNav + PatientHeader move together so the
+          menu stays accessible when the user scrolls cards. */}
+      <div className="sticky top-0 z-30 bg-white">
+        {/* Collapsing wrapper — when hideMainNav is true, the row
+            collapses to 0 height (Material's "Top App Bar" auto-hide
+            pattern). PatientHeader stays in place because the wrapper
+            participates in normal flow; it expands/contracts the
+            sticky group rather than overlapping. */}
+        <div
+          aria-hidden={hideMainNav}
+          className={`grid motion-safe:transition-[grid-template-rows] motion-safe:duration-200 ${
+            hideMainNav ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'
+          }`}
+        >
+          <div className="overflow-hidden">
+            <MainNav />
+          </div>
+        </div>
+        <PatientHeader
+          patientId={patientId}
+          collapsed={headerCollapsed}
+          hidden={headerHidden}
+          onToggleHidden={() => setHeaderHidden((s) => !s)}
+        />
+      </div>
+      <OpenTabBar
+        active="Dashboard"
+        headerCollapsed={headerCollapsed}
+        onToggleHeader={() => setHeaderCollapsed((s) => !s)}
+      />
       <MedicalRecordHeading patientId={patientId} />
       <SubNav patientId={patientId} />
       <DashboardGrid>
@@ -53,7 +92,9 @@ export function DashboardPage() {
         <PrescriptionsCard patientId={patientId} />
         <CareTeamCard patientId={patientId} />
         <EncountersCard patientId={patientId} />
+        <DocumentsCard patientId={patientId} />
       </DashboardGrid>
+      <CoPilotDrawer patientId={patientId} />
     </div>
   )
 }

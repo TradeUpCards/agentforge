@@ -165,6 +165,41 @@ export interface FhirEncounter {
   reasonCode?: FhirCodeableConcept[]
 }
 
+// --- DocumentReference -----------------------------------------------------
+
+export interface FhirAttachment {
+  contentType?: string
+  url?: string
+  size?: number
+  title?: string
+  creation?: string
+}
+
+export interface FhirDocumentContent {
+  attachment?: FhirAttachment
+  format?: FhirCoding
+}
+
+export interface FhirDocumentContext {
+  encounter?: FhirReference[]
+  period?: FhirPeriod
+}
+
+export interface FhirDocumentReference {
+  resourceType: 'DocumentReference'
+  id?: string
+  status?: string
+  docStatus?: string
+  type?: FhirCodeableConcept
+  category?: FhirCodeableConcept[]
+  subject?: FhirReference
+  date?: string
+  author?: FhirReference[]
+  description?: string
+  content?: FhirDocumentContent[]
+  context?: FhirDocumentContext
+}
+
 // --- Bundle ---------------------------------------------------------------
 
 export interface FhirBundleEntry<T = unknown> {
