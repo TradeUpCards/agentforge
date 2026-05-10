@@ -190,7 +190,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
-@observe(name="tool.execute")
+@observe(
+    name="tool.execute",
+    # PHI guard: by default Langfuse @observe captures function args at
+    # entry and return value at exit.  For us, args carry patient_id (a
+    # sentinel pid, not PHI) and the return is list[RetrievedRecord]
+    # whose .fields contains drug names, condition titles, allergen
+    # substances — clinical content the agent legitimately uses but
+    # that the PRD's strict reading of "no raw PHI in logs" wants kept
+    # out of observability.  Disable auto-capture; the function below
+    # explicitly tags the span with structural-only input/output (tool
+    # name, query length, record_count) via update_current_span().
+    capture_input=False,
+    capture_output=False,
+)
 async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> list[RetrievedRecord]:
     """Dispatch a tool call to the right handler.
 

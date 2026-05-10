@@ -770,7 +770,23 @@ def _close_audit(
 # ---------------------------------------------------------------------------
 
 
-@observe(name="run_chat")
+@observe(
+    name="run_chat",
+    # PHI guard: by default Langfuse @observe captures the ChatRequest
+    # at entry (which includes user-typed messages — PHI when patients
+    # are referenced by name or clinical detail) and the AgentResponse
+    # at exit (whose claims + citations carry patient values).  Disable
+    # auto-capture so the run_chat span exists as the trace-tree frame
+    # but doesn't carry raw message/response payloads.  Child spans
+    # (supervisor.decide, worker.*, tool.execute, anthropic.messages.create)
+    # carry their own structural metadata.  The LLM generation span
+    # (anthropic.messages.create) is the one place we still capture
+    # prompt+response — that's deliberate for token/cost tracking +
+    # debug visibility, and falls under the PRD's "prompts are
+    # sensitive but allowed in observability" framing.
+    capture_input=False,
+    capture_output=False,
+)
 async def run_chat(
     request: ChatRequest,
     *,
