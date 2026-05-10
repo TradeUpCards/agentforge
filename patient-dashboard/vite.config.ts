@@ -9,7 +9,16 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const target = env.VITE_OPENEMR_BASE_URL ?? 'https://localhost:9300'
 
+  // Public base path for the built bundle. In production the dashboard
+  // is co-located under OpenEMR's docroot at `/patient-dashboard/`
+  // (see PATIENT_DASHBOARD_MIGRATION.md §13), so asset URLs must be
+  // prefixed `/patient-dashboard/...`. Set via VITE_BASE_PATH in
+  // .env.production. In dev (no env var set) the default is `/` so
+  // `pnpm dev` continues to serve at `http://localhost:5173/`.
+  const basePath = env.VITE_BASE_PATH ?? '/'
+
   return {
+    base: basePath,
     plugins: [react(), tailwindcss()],
     server: {
       port: 5173,

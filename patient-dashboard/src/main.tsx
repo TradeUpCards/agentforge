@@ -14,6 +14,12 @@ import { oidcConfig } from './auth/oidcConfig'
  *   QueryClient      — TanStack Query cache; cleared on logout from
  *                      PatientHeader / PatientSelectPage.
  *   BrowserRouter    — innermost so route changes can react to auth.
+ *
+ * `basename` is fed from `import.meta.env.BASE_URL`, which Vite injects
+ * based on the `base` config (`/` in dev, `/patient-dashboard/` in
+ * production builds). Without this, the React routes would not match
+ * after the prefix is stripped by Apache. See PATIENT_DASHBOARD_MIGRATION.md
+ * §13 for the deploy shape this supports.
  */
 
 const queryClient = new QueryClient({
@@ -38,7 +44,7 @@ ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
     <AuthProvider {...oidcConfig}>
       <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
+        <BrowserRouter basename={import.meta.env.BASE_URL}>
           <App />
         </BrowserRouter>
       </QueryClientProvider>
