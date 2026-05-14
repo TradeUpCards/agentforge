@@ -58,6 +58,11 @@ class Settings(BaseModel):
     port: int
     log_level: str
 
+    # Container provenance (set at Docker build time via VERSION_SHA build arg).
+    # Surfaced at /health so external monitors have a deterministic fingerprint.
+    # "unknown" when running outside a built container (local dev, tests).
+    version_sha: str
+
     # Dev mode
     use_fixture_llm: bool
     use_fixture_data: bool
@@ -132,6 +137,7 @@ def get_settings() -> Settings:
         host=os.getenv("AGENT_HOST", "0.0.0.0"),
         port=int(os.getenv("AGENT_PORT", "8000")),
         log_level=os.getenv("AGENT_LOG_LEVEL", "info"),
+        version_sha=os.getenv("VERSION_SHA", "unknown"),
         use_fixture_llm=_resolve_use_fixture_llm(
             os.getenv("USE_FIXTURE_LLM", "auto"),
             has_real_key,

@@ -308,7 +308,12 @@ ufw --force enable >/dev/null
 
 echo "==> Pulling images + building agent (~3-5 min)"
 docker compose pull --quiet --ignore-buildable
-docker compose build agent
+# Pass current commit SHA into the agent image so /health surfaces a
+# deterministic version fingerprint (consumed by W3 Clinical Red Team
+# Platform daemon for fingerprint-change detection). Falls back to
+# "unknown" if not in a git checkout (e.g. tarball deploy).
+VERSION_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+docker compose build --build-arg VERSION_SHA="$VERSION_SHA" agent
 
 echo "==> Starting containers"
 docker compose up -d
