@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import unicodedata
 from dataclasses import dataclass, field as _dc_field
 from datetime import date
@@ -84,6 +85,7 @@ class ExtractionLowGrounding(ValueError):
 REASON_VALUE_NOT_SUBSTRING = "value_not_substring_of_block"
 REASON_BLOCK_NOT_FOUND = "block_not_found"
 REASON_CONFIDENCE_OOB = "confidence_oob"
+REASON_INJECTION_PATTERN = "value_only_in_injection_pattern"
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +235,82 @@ def verify_field(
     if _normalize(value) in _normalize(block_text):
         return True, None
     return False, REASON_VALUE_NOT_SUBSTRING
+
+
+# ---------------------------------------------------------------------------
+# Defense-in-depth: known prompt-injection-pattern detection (W2 VULN-002/003)
+# ---------------------------------------------------------------------------
+#
+# Conservative pattern set targeting KNOWN injection markers — not "all
+# brackets". Legit clinical bracketed content like "[ALLERGY ALERT: PCN]" or
+# "[per Dr. Smith: hold metformin]" must NOT trigger this. The patterns below
+# are derived from W3 Clinical Red Team Platform attack reproducers
+# (atk_2026-05-14_001) and OWASP LLM01 (Prompt Injection) common payloads.
+#
+# When the extracted value's normalized form appears INSIDE one of these
+# bracketed sub-regions AND does NOT also appear elsewhere in the block,
+# the field is stripped as suspected prompt injection. The L1 prompt clause
+# (intake_form_extraction.py / lab_report_extraction.py) is the primary
+# defense; this is defense in depth in case the LLM ignores the clause.
+#
+# Pattern set deliberately conservative: extend as W3 surfaces new variants.
+
+_INJECTION_BRACKET_PATTERNS = [
+    # Case-insensitive markers seen in W3 attack reproducers + OWASP LLM01.
+    # `\b` word boundary handles both `[SYSTEM]` alone and `[SYSTEM NOTE: ...]`.
+    # Excludes `[USER ID: ...]`-style legit clinical headers (no `user` pattern).
+    r"\[\s*system\b[^\]]*\]",
+    r"\[\s*instruction\b[^\]]*\]",
+    r"\[\s*assistant\b[^\]]*\]",
+    r"\[\s*admin\b[^\]]*\]",
+]
+
+_INJECTION_BRACKET_RE = re.compile(
+    "|".join(_INJECTION_BRACKET_PATTERNS),
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_value_only_in_injection_pattern(
+    value: str,
+    source_block_id: str | None,
+    block_index: dict[str, str],
+) -> bool:
+    """Return True if `value` (normalized) appears in the source block ONLY
+    inside a known prompt-injection bracket pattern.
+
+    Returns False if:
+      - source_block_id is None or not in the index (caller already handled)
+      - block contains no injection patterns
+      - value also appears OUTSIDE the bracketed regions (legit content;
+        the bracket is incidental)
+      - value does not appear in the block at all (verify_field will catch)
+
+    Returns True only when the value is found EXCLUSIVELY inside one or
+    more `[SYSTEM ...]` / `[INSTRUCTION ...]` / `[ASSISTANT ...]` /
+    `[USER ...]` / `[ADMIN ...]` bracketed regions of the source block.
+
+    The check is structural — does not log the value or block text.
+    """
+    if not source_block_id:
+        return False
+    block_text = block_index.get(source_block_id)
+    if block_text is None:
+        return False
+    normalized_value = _normalize(value)
+    if not normalized_value:
+        return False
+    # Mask out injection-bracket regions; if value appears in the masked
+    # (bracket-free) version of the block, it's legit grounded content.
+    masked = _INJECTION_BRACKET_RE.sub(" ", block_text)
+    if normalized_value in _normalize(masked):
+        return False
+    # Value is NOT in the masked text. Confirm it IS in the un-masked text
+    # (i.e. inside one of the brackets); otherwise verify_field already
+    # would have caught it as not-grounded.
+    if normalized_value in _normalize(block_text):
+        return True
+    return False
 
 
 def _check_grounding_rate(
@@ -528,6 +606,25 @@ def parse_lab_report(
             )
             continue
 
+        # Defense in depth: strip if value sits ONLY inside a known
+        # injection-pattern bracket (W2 VULN-002/003). The L1 prompt clause
+        # is the primary defense; this catches LLM ignoring the clause.
+        if is_value_only_in_injection_pattern(test_name, source_block_id, block_index):
+            stats.record_failure(
+                REASON_INJECTION_PATTERN,
+                field_path=field_path,
+                source_block_id=source_block_id,
+            )
+            logger.warning(
+                "extraction_verifier: field stripped (injection pattern detected)",
+                extra={
+                    "field": "test_name",
+                    "source_block_id": source_block_id,
+                    "vuln_class": "prompt_injection",
+                },
+            )
+            continue
+
         # Grounding passed — record verified verdict
         stats.record_verified(field_path, source_block_id)
         all_confidences.append(confidence)
@@ -676,6 +773,21 @@ def parse_intake_form(
             source_block_id=demo_block_id,
         )
         demo_block_id = None  # strip — null out block ref but keep the field
+    elif is_value_only_in_injection_pattern(demo_name, demo_block_id, block_index):
+        # Defense in depth: W2 VULN-002/003 — value sits only in [SYSTEM ...]
+        # / [INSTRUCTION ...] / [ASSISTANT ...] / [USER ...] / [ADMIN ...]
+        # bracket. Treat as injection, not legit demographics.
+        stats.record_failure(
+            REASON_INJECTION_PATTERN,
+            field_path="demographics.name",
+            source_block_id=demo_block_id,
+        )
+        logger.warning(
+            "extraction_verifier: demographics stripped (injection pattern detected)",
+            extra={"source_block_id": demo_block_id, "vuln_class": "prompt_injection"},
+        )
+        demo_block_id = None
+        demo_name = ""  # null out the value too
     else:
         stats.record_verified("demographics.name", demo_block_id)
 
@@ -708,6 +820,18 @@ def parse_intake_form(
                 source_block_id=chief_concern_block_id,
             )
             chief_concern = None  # strip ungrounded chief_concern
+        elif is_value_only_in_injection_pattern(chief_concern, chief_concern_block_id, block_index):
+            # Defense in depth: W2 VULN-002/003.
+            stats.record_failure(
+                REASON_INJECTION_PATTERN,
+                field_path="chief_concern",
+                source_block_id=chief_concern_block_id,
+            )
+            logger.warning(
+                "extraction_verifier: chief_concern stripped (injection pattern detected)",
+                extra={"source_block_id": chief_concern_block_id, "vuln_class": "prompt_injection"},
+            )
+            chief_concern = None
         else:
             stats.record_verified("chief_concern", chief_concern_block_id)
 
@@ -730,6 +854,19 @@ def parse_intake_form(
             logger.info(
                 "extraction_verifier: medication stripped (grounding failed)",
                 extra={"source_block_id": med_block_id},
+            )
+            continue
+        # Defense in depth: W2 VULN-002 — strip if value sits only in
+        # injection-pattern bracket.
+        if is_value_only_in_injection_pattern(med_name, med_block_id, block_index):
+            stats.record_failure(
+                REASON_INJECTION_PATTERN,
+                field_path=med_field_path,
+                source_block_id=med_block_id,
+            )
+            logger.warning(
+                "extraction_verifier: medication stripped (injection pattern detected)",
+                extra={"source_block_id": med_block_id, "vuln_class": "prompt_injection"},
             )
             continue
         stats.record_verified(med_field_path, med_block_id)
@@ -763,6 +900,19 @@ def parse_intake_form(
                 extra={"source_block_id": allergy_block_id},
             )
             continue
+        # Defense in depth: W2 VULN-002/003 variant — strip if value sits
+        # only in injection-pattern bracket.
+        if is_value_only_in_injection_pattern(substance, allergy_block_id, block_index):
+            stats.record_failure(
+                REASON_INJECTION_PATTERN,
+                field_path=allergy_field_path,
+                source_block_id=allergy_block_id,
+            )
+            logger.warning(
+                "extraction_verifier: allergy stripped (injection pattern detected)",
+                extra={"source_block_id": allergy_block_id, "vuln_class": "prompt_injection"},
+            )
+            continue
         stats.record_verified(allergy_field_path, allergy_block_id)
         allergies.append(
             Allergy(
@@ -792,6 +942,19 @@ def parse_intake_form(
             logger.info(
                 "extraction_verifier: family_history stripped (grounding failed)",
                 extra={"source_block_id": fh_block_id},
+            )
+            continue
+        # Defense in depth: W2 VULN-002/003 variant — strip if value sits
+        # only in injection-pattern bracket.
+        if is_value_only_in_injection_pattern(condition, fh_block_id, block_index):
+            stats.record_failure(
+                REASON_INJECTION_PATTERN,
+                field_path=fh_field_path,
+                source_block_id=fh_block_id,
+            )
+            logger.warning(
+                "extraction_verifier: family_history stripped (injection pattern detected)",
+                extra={"source_block_id": fh_block_id, "vuln_class": "prompt_injection"},
             )
             continue
         stats.record_verified(fh_field_path, fh_block_id)
