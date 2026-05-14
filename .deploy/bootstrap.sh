@@ -312,7 +312,11 @@ docker compose pull --quiet --ignore-buildable
 # deterministic version fingerprint (consumed by W3 Clinical Red Team
 # Platform daemon for fingerprint-change detection). Falls back to
 # "unknown" if not in a git checkout (e.g. tarball deploy).
-VERSION_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+#
+# 2026-05-14 fix: was `git rev-parse HEAD` (no -C), which silently fell
+# through to "unknown" because this script `cd`s to $DEPLOY_DIR (line 31)
+# — NOT a git repo. Use `git -C "$REPO_DIR"` to target the actual checkout.
+VERSION_SHA="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 docker compose build --build-arg VERSION_SHA="$VERSION_SHA" agent
 
 echo "==> Starting containers"
