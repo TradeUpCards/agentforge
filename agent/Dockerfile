@@ -1,13 +1,5 @@
 FROM python:3.12-slim
 
-# Container provenance — passed in by the build invocation
-# (`.deploy/bootstrap.sh` populates from `git rev-parse HEAD`). Surfaced
-# at runtime via /health so external monitors (W3 Clinical Red Team
-# Platform daemon, ops alerting) have a deterministic version fingerprint
-# instead of inferring from response shape.
-ARG VERSION_SHA=unknown
-ENV VERSION_SHA=$VERSION_SHA
-
 WORKDIR /app
 
 # System deps:
@@ -36,6 +28,20 @@ ENV PYTHONUNBUFFERED=1 \
     # BAAI reranker).  Persisted via a named Docker volume so the ~80 MB
     # model download survives container restarts.  W2_ARCHITECTURE.md §4.1.
     HF_HOME=/app/.hf_cache
+
+# Container provenance — passed in by the build invocation
+# (`.deploy/bootstrap.sh` populates from `git rev-parse HEAD`). Surfaced
+# at runtime via /health so external monitors (W3 Clinical Red Team
+# Platform daemon, ops alerting) have a deterministic version fingerprint
+# instead of inferring from response shape.
+#
+# IMPORTANT: ARG/ENV go AT THE BOTTOM (after the expensive RUN pip install
+# and COPY . layers). Docker invalidates all layers BELOW an ARG when the
+# ARG value changes; placing it at the top forces a full rebuild on every
+# fingerprint bump (~10 min). Placing it here makes fingerprint-only
+# rebuilds a fast cache-walk (~30s). 2026-05-14 fix.
+ARG VERSION_SHA=unknown
+ENV VERSION_SHA=$VERSION_SHA
 
 EXPOSE 8000
 
