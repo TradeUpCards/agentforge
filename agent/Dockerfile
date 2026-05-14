@@ -1,5 +1,13 @@
 FROM python:3.12-slim
 
+# Container provenance — passed in by the build invocation
+# (`.deploy/bootstrap.sh` populates from `git rev-parse HEAD`). Surfaced
+# at runtime via /health so external monitors (W3 Clinical Red Team
+# Platform daemon, ops alerting) have a deterministic version fingerprint
+# instead of inferring from response shape.
+ARG VERSION_SHA=unknown
+ENV VERSION_SHA=$VERSION_SHA
+
 WORKDIR /app
 
 # System deps:

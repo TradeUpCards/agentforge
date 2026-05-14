@@ -122,6 +122,12 @@ async def health() -> dict[str, str]:
     return {
         "status": "ok",
         "llm_mode": "fixture" if settings.use_fixture_llm else "live",
+        # Deterministic version fingerprint for external monitors
+        # (W3 Clinical Red Team Platform daemon, ops alerting).
+        # Set at container build time via VERSION_SHA Docker build arg
+        # populated from `git rev-parse HEAD`. "unknown" when running
+        # outside a built container (local dev, tests).
+        "version_sha": settings.version_sha,
     }
 
 

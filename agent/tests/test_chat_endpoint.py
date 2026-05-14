@@ -34,7 +34,16 @@ def test_health() -> None:
     client = TestClient(app)
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json()["status"] == "ok"
+    body = r.json()
+    assert body["status"] == "ok"
+    # llm_mode is one of the two known values
+    assert body["llm_mode"] in ("fixture", "live")
+    # version_sha is always present (deterministic fingerprint for external
+    # monitors like the W3 Clinical Red Team Platform daemon). Outside of a
+    # built container it falls back to "unknown".
+    assert "version_sha" in body
+    assert isinstance(body["version_sha"], str)
+    assert body["version_sha"] != ""
 
 
 def test_chat_uc1_starter_returns_verified_response() -> None:
