@@ -1034,11 +1034,36 @@ A regression in any of those properties drops the case's `citation_present` rubr
 
 ---
 
+### W2 VULN-002/003 closure: L1+L4 shipped, L2+L3 deferred to W4 (2026-05-14)
+
+**Decision.** W3 Clinical Red Team Platform reported two HIGH-severity indirect prompt injections in `/attach_and_extract` against the deployed Co-Pilot on 2026-05-14, with ~30 hours to demo. Shipped two of the four defense layers W3 recommended:
+
+- **L1 — Data-not-instructions clause** added verbatim from `agent/agent.py:218-220` (the clause that has protected `/chat` since W1) into both `agent/prompts/intake_form_extraction.py` and `agent/prompts/lab_report_extraction.py` SYSTEM_PROMPTs. Names specific injection markers explicitly (`[SYSTEM NOTE]`, `[INSTRUCTION]`, `[ASSISTANT]`).
+- **L4 — Known-injection-pattern stripper** as `is_value_only_in_injection_pattern()` in `agent/extractors/haiku_extraction.py`. Conservative pattern set: matches `[SYSTEM ...]` / `[INSTRUCTION ...]` / `[ASSISTANT ...]` / `[ADMIN ...]` only — explicitly excludes `[USER ...]` to avoid false-positive on legitimate `[USER ID: ...]` headers. Wired into all 6 `verify_field` caller sites; emits `REASON_INJECTION_PATTERN` on detection. 18 new tests (16 helper + 2 prompt-clause-presence guards). All 348 existing unit tests still pass.
+
+MR #78 landed at master `76a175b9` + deterministic-fingerprint follow-up MR #79 at master `cb13d6473`. Total wall-clock: under 3 hours from W3 report received to verified-deployed.
+
+**Deferred to W4 (L2 + L3) with documented rationale.**
+
+- **L2** (verifier semantic check on field-name↔block-context) has real false-positive risk on legit cross-section mentions: `"patient stopped taking Lisinopril, BP now 180/100"` in chief_complaint cites a non-medications block but is real clinical content; `"father takes Metformin for diabetes"` in family_history same shape; combined-section tables (meds + supplements + allergies in one block) also break. The "looks like a medications section" check has multiple plausible implementations (header detection / Docling block_type / smaller LLM classifier) each with a different false-positive profile. We have no eval cases exercising field-cited-from-atypical-block. Iterating to a defensible implementation needs ~3-5 hybrid+live eval rounds (~$10-20 + ~2 hr wall-clock).
+- **L3** (pre-LLM regex stripping of `[SYSTEM ...]` patterns) destroys legitimate clinical bracketed content if the pattern set is wrong: `[ALLERGY ALERT: anaphylaxis to PCN]`, `[per Dr. Smith: hold metformin if NPO]`, `[NOTE: refill x3]`, `[Result corrected 2024-08-12]` are real clinical artifacts that must not be stripped pre-LLM. Right answer needs allowlist + heuristic (e.g. strip only if bracket contains directive verbs like `extract`, `add`, `output`, `ignore`) — meaningful design work, not a 30-min regex. Bbox-overlay UX also breaks if pre-LLM-stripped text is then rendered to the clinician (HITL sees text the LLM didn't process).
+
+Both L2 + L3 land in the W4 cycle alongside an eval DSL extension (`expect_extraction_no_field` negative-assertion key, ~30 min change worth doing alongside L2 + L3). Filed as separate handoffs back to W3.
+
+**Tradeoff accepted.** Layered defense ≠ shipping every layer. It means shipping the layers where the trade-offs are clearly defensible at the time available. L1 alone closes the immediate exploit (W3 explicitly confirmed); L4 adds zero-false-positive-risk defense in depth at the verifier seam. Shipping L2 + L3 under 30-hour deadline pressure without iteration time on their false-positive profiles is exactly how you ship regressions clinicians complain about Monday morning.
+
+**Revisit threshold.** L2 + L3 land in W4 (next sprint cycle). Earlier if W3 surfaces a follow-up attack class that L1 + L4 don't catch.
+
+**Source.** W3 ClinicalRedTeam VULN-002 + VULN-003 reports (2026-05-14); MR #78 commit `76a175b9` (L1 + L4 + 18 tests); MR #79 commit `9ee07927` merged at `cb13d6473` (`/health` `version_sha` follow-up so W3 daemon's fingerprint detection becomes deterministic); story file `.gauntlet/stories/vuln-002-003-three-hour-fix-loop.md` (full STAR-format writeup).
+
+---
+
 ## Revision log
 
 | Date | Revision | Author |
 |---|---|---|
 | 2026-04-29 (afternoon) | Initial document. Sections 1–10 + appendix entries for Wed afternoon work. | AgentForge build |
+| 2026-05-14 | Appendix entry: W2 VULN-002/003 closure. Documents the L1+L4 layered-defense scope shipped via MR #78 + MR #79 and the L2+L3 deferral rationale (false-positive risk on legit clinical content; W4 cycle picks up alongside eval DSL extension). | AgentForge build |
 | 2026-04-29 (evening) | Three appendix entries for the local-integration smoke-test bugs (`js_url` URL-encoding, `$sessionAllowWrite` bootstrap, session-bag namespace). | AgentForge build |
 | 2026-04-30 (morning) | Closed §3.7 implementation gap (absence claims pass when no records retrieved); added eval case 06; honest provenance note (caught by manual testing, not eval). | AgentForge build |
 | 2026-04-30 (morning) | Workflow insight: schedule (not search) is the natural entry point. Calendar-integrated trigger + pre-visit-brief pre-warming added to §10 non-goals as week-2+ candidates. | AgentForge build |
