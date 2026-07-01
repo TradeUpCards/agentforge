@@ -50,7 +50,7 @@ jobs:
         printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
     - name: PHPStan Cache
       # https://phpstan.org/user-guide/result-cache
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       with:
         path: tmp-phpstan # same as in phpstan.neon
         key: phpstan-result-cache-${{ steps.phpstan-version.outputs.version }}-${{ hashFiles('phpstan.neon.dist', '.phpstan/**', 'tests/PHPStan/**') }}-${{ github.run_id }}
